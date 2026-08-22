@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "magnetofluidics-pinn"
+version = "0.1.0"
+description = "Physics-informed neural networks for magnetic particle transport in viscous microfluidic flows."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+license-files = ["LICEN[CS]E.*"]
+
+authors = [
+    {name = "David FOLIO", email = "david.folio@insa-cvl.fr"}
+]
+maintainers = [
+    {name = "David FOLIO", email = "david.folio@insa-cvl.fr"}
+]
+keywords = [
+    "physics-informed-neural-networks",
+    "microfluidics",
+    "magnetic-microrobots",
+    "stokes-flow",
+    "navier-stokes",
+]
+
+dependencies = [
+    "numpy>=1.26",
+    "scipy>=1.11",
+    "torch>=2.2",
+    "matplotlib>=3.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-cov>=5.0",
+    "black>=24.0",
+    "ruff>=0.5",
+]
+
+[tool.setuptools.packages.find]
+where = ["magnetofluidics_pinn"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
