@@ -1,4 +1,4 @@
-# magnetofluidics_pinn
+# `magnetofluidic`
 
 Physics-informed neural networks (PINNs) for predicting the motion of magnetic
 particles transported by a viscous flow inside a microfluidic vessel, under a
@@ -25,57 +25,53 @@ pip install -e ".[dev]"
 
 ## Package layout
 
-See `src/magnetofluidics_pinn/` for the module breakdown: `geometry`,
-`boundary_conditions`, `physics`, `sampling`, `networks`, `training`,
-`trajectory`, and `visualization`.
-
 ```bash
 magnetofluidics_pinn/
 ├── pyproject.toml
 ├── README.md
-├── src/
-│   └── magnetofluidics_pinn/
-│       ├── __init__.py                # public API re-exports, __version__
-│       ├── config.py                  # DomainConfig, FluidConfig, FieldConfig, TrainingConfig
-│       ├── geometry/
-│       │   ├── __init__.py
-│       │   ├── channel.py             # straight-vessel domain builder
-│       │   └── bifurcation.py         # bifurcated-vessel domain builder
-│       ├── boundary_conditions/
-│       │   ├── __init__.py
-│       │   ├── flow_bc.py             # inlet/outlet pressure or velocity, no-slip walls
-│       │   └── magnetic_field_bc.py   # prescribed B-field as an input (see note below)
-│       ├── physics/
-│       │   ├── __init__.py
-│       │   ├── fluid_residuals.py     # stokes_residual, navier_stokes_residual
-│       │   └── magnetic_forcing.py    # dipole_force(moment, field_fn, coords)
-│       ├── sampling/
-│       │   ├── __init__.py
-│       │   └── collocation.py         # interior / boundary / initial point generators
-│       ├── networks/
-│       │   ├── __init__.py
-│       │   └── mlp.py                 # CUDA-aware MLP builder
-│       ├── training/
-│       │   ├── __init__.py
-│       │   ├── losses.py              # functional loss composition
-│       │   └── trainer.py             # training loop
-│       ├── trajectory/
-│       │   ├── __init__.py
-│       │   └── integrator.py          # particle-path ODE integration
-│       ├── visualization/
-│       │   ├── __init__.py
-│       │   └── plotting.py            # streamlines, trajectories
-│       └── io_utils.py                # checkpointing, config (de)serialization
+├── magnetofluidics_pinn/
+|   ├── __init__.py                # public API re-exports, __version__
+|   ├── config.py                  # DomainConfig, FluidConfig, FieldConfig, TrainingConfig
+|   ├── geometry/
+|   |   ├── __init__.py
+|   |   ├── channel.py             # straight-vessel domain builder
+|   |   └── bifurcation.py         # bifurcated-vessel domain builder
+|   ├── boundary_conditions/
+|   |   ├── __init__.py
+|   |   ├── flow_bc.py             # inlet/outlet pressure or velocity, no-slip walls
+|   |   └── magnetic_field_bc.py   # prescribed B-field as an input (see note below)
+|   ├── physics/
+|   |   ├── __init__.py
+|   |   ├── fluid_residuals.py     # stokes_residual, navier_stokes_residual
+|   |   └── magnetic_forcing.py    # dipole_force(moment, field_fn, coords)
+|   ├── sampling/
+|   |   ├── __init__.py
+|   |   └── collocation.py         # interior / boundary / initial point generators
+|   ├── networks/
+|   |   ├── __init__.py
+|   |   └── mlp.py                 # CUDA-aware MLP builder
+|   ├── training/
+|   |   ├── __init__.py
+|   |   ├── losses.py              # functional loss composition
+|   |   └── trainer.py             # training loop
+|   ├── trajectory/
+|   |   ├── __init__.py
+|   |   └── integrator.py          # particle-path ODE integration
+|   ├── visualization/
+|   |   ├── __init__.py
+|   |   └── plotting.py            # streamlines, trajectories
+│       └── io_utils.py            # checkpointing, config (de)serialization
 └── tests/
-    └── ...                            # mirrors src/ structure, one test module per source module
+    └── ...                        # mirrors src/ structure, one test module per source module
 ```
 
 ## Status
 
+- **Phase 1** — single sphere, uniform $\mathbf{B}$, Stokes flow, straight channel. [in development]
+- **Phase 2** — particle swarm (tens of particles), still Stokes, non-uniform $\mathbf{B}$.
+- **Phase 3** — Navier–Stokes flow, bifurcated geometry, time-dependent magnetic actuation.
+
 Architectural scaffold only. Function bodies raise `NotImplementedError`
 until the corresponding implementation stage is approved.
 
-
-Phase 1 — single sphere, uniform $\mathbf{B}$, Stokes flow, straight channel.
-Phase 2 — particle swarm (tens of particles), still Stokes, non-uniform $\mathbf{B}$.
-Phase 3 — Navier–Stokes flow, bifurcated geometry, time-dependent magnetic actuation.
+## References

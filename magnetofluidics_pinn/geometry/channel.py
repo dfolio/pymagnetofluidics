@@ -1,8 +1,7 @@
 """Straight-channel vessel geometry.
 
 Builds the simplest supported domain: an axisymmetric, straight channel of
-constant radius, used for the first phase of the roadmap (single particle,
-uniform magnetic field, Stokes flow).
+constant radius.
 """
 
 from __future__ import annotations
@@ -28,10 +27,24 @@ def build_channel_domain(config: DomainConfig) -> Domain:
       straight channel geometry, in physical (SI) units.
 
     Raises:
-    - `ValueError`: If `config.kind` is not `"channel"`.
+    - `ValueError`: If `config.kind` is not `"channel"`, or if `config.length`
+      or `config.radius` is not strictly positive (a degenerate geometry has
+      no valid interior to solve on).
     """
     if config.kind != "channel":
         raise ValueError(
             f"Expected a channel domain configuration, got kind={config.kind!r}."
         )
-    raise NotImplementedError("Implementation scheduled for Step 2.")
+    if config.length <= 0.0:
+        raise ValueError(f"config.length must be strictly positive; got {config.length!r}.")
+    if config.radius <= 0.0:
+        raise ValueError(f"config.radius must be strictly positive; got {config.radius!r}.")
+
+    # A straight channel is fully described by its axial extent and radius;
+    # it carries no branch angle, unlike a bifurcated vessel.
+    return Domain(
+        kind="channel",
+        length=config.length,
+        radius=config.radius,
+        branch_angle=None,
+    )

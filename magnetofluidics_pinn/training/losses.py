@@ -7,6 +7,7 @@ as a callable, so that new terms can be added without modifying this module.
 
 from __future__ import annotations
 
+from functools import reduce
 from typing import Callable
 
 import torch
@@ -36,4 +37,7 @@ def compose_loss(
         raise ValueError("terms must contain at least one loss term.")
     if weights is not None and not set(weights).issubset(terms):
         raise ValueError("weights contains a key not present in terms.")
-    raise NotImplementedError("Implementation scheduled for Step 2.")
+
+    resolved_weights = {name: (weights or {}).get(name, 1.0) for name in terms}
+    weighted_values = (resolved_weights[name] * term() for name, term in terms.items())
+    return reduce(torch.add, weighted_values)

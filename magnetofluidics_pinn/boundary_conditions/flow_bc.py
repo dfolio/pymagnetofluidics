@@ -14,7 +14,7 @@ from magnetofluidics_pinn.types import Domain
 
 
 def inlet_velocity_condition(
-    domain: Domain, coordinates: torch.Tensor, peak_velocity: float
+        domain: Domain, coordinates: torch.Tensor, peak_velocity: float
 ) -> torch.Tensor:
     """Compute the prescribed inlet velocity profile at given coordinates.
 
@@ -26,12 +26,30 @@ def inlet_velocity_condition(
     Returns:
     - Tensor of shape `(n_points, n_dims)` with the target velocity vector at
       each coordinate (e.g., a parabolic Poiseuille-like profile).
+
+    Raises:
+    - `ValueError`: If `coordinates` do not have shape `(n_points, 2)`, the
+      axisymmetric `(r, z)` convention this package uses, or if
+      `domain.radius` is not strictly positive.
     """
-    raise NotImplementedError("Implementation scheduled for Step 2.")
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(
+            "coordinates must have shape (n_points, 2) for the axisymmetric "
+            f"(r, z) convention; got {tuple(coordinates.shape)}."
+        )
+    if domain.radius <= 0.0:
+        raise ValueError(f"domain.radius must be strictly positive; got {domain.radius!r}.")
+    
+    # Classical (Hagen-)Poiseuille profile for axisymmetric pipe flow: purely
+    # axial, parabolic in r, maximal on the axis, and zero at the wall.
+    radial_position = coordinates[:, 0:1]
+    axial_velocity = peak_velocity * (1.0 - (radial_position / domain.radius) ** 2)
+    radial_velocity = torch.zeros_like(axial_velocity)
+    return torch.cat([radial_velocity, axial_velocity], dim=1)
 
 
 def outlet_pressure_condition(
-    domain: Domain, coordinates: torch.Tensor, reference_pressure: float
+        domain: Domain, coordinates: torch.Tensor, reference_pressure: float
 ) -> torch.Tensor:
     """Compute the prescribed outlet pressure at given coordinates.
 
@@ -43,8 +61,24 @@ def outlet_pressure_condition(
     Returns:
     - Tensor of shape `(n_points, 1)` with the target pressure at each
       coordinate.
+
+    Raises:
+    - `ValueError`: If `coordinates` is not a 2-D tensor.
     """
-    raise NotImplementedError("Implementation scheduled for Step 2.")
+    if coordinates.ndim != 2:
+        raise ValueError(
+            f"coordinates must have shape (n_points, n_dims); got {tuple(coordinates.shape)}."
+        )
+    del domain  # An outlet's reference pressure does not depend on geometry;
+    # `domain` is kept in the signature for symmetry with the other
+    # boundary-condition functions and for forward compatibility with a
+    # geometry-dependent pressure BC in a later phase.
+    return torch.full(
+        (coordinates.shape[0], 1),
+        float(reference_pressure),
+        dtype=coordinates.dtype,
+        device=coordinates.device,
+    )
 
 
 def no_slip_condition(domain: Domain, coordinates: torch.Tensor) -> torch.Tensor:
@@ -57,5 +91,14 @@ def no_slip_condition(domain: Domain, coordinates: torch.Tensor) -> torch.Tensor
     Returns:
     - Tensor of shape `(n_points, n_dims)` of zeros, matching the no-slip
       condition at solid boundaries.
+
+    Raises:
+    - `ValueError`: If `coordinates` is not a 2-D tensor.
     """
-    raise NotImplementedError("Implementation scheduled for Step 2.")
+    if coordinates.ndim != 2:
+        raise ValueError(
+            f"coordinates must have shape (n_points, n_dims); got {tuple(coordinates.shape)}."
+        )
+    del domain  # The no-slip target is always zero velocity, regardless of
+    # the specific wall geometry; kept in the signature for API symmetry.
+    return torch.zeros_like(coordinates)

@@ -13,7 +13,78 @@ from typing import Callable
 import torch
 from torch import nn
 
+from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force
 from magnetofluidics_pinn.types import FieldSample, ParticleState
+
+
+def _select_moment(
+    magnetic_moment: torch.Tensor, particle_index: int, n_dims: int
+) -> torch.Tensor:
+    """Select the magnetic moment of shape `(1, n_dims)` for one particle.
+
+    Args:
+    - `magnetic_moment`: Tensor of shape `(n_dims,)`, shared by every
+      particle, or `(n_particles, n_dims)`, one row per particle.
+    - `particle_index`: Index of the particle whose moment is requested.
+    - `n_dims`: Expected number of spatial dimensions.
+
+    Returns:
+    - Tensor of shape `(1, n_dims)`.
+
+    Raises:
+    - `ValueError`: If `magnetic_moment` has neither 1 nor 2 dimensions, or
+      if its last dimension does not equal `n_dims`.
+    """
+    if magnetic_moment.ndim not in (1, 2) or magnetic_moment.shape[-1] != n_dims:
+        raise ValueError(
+            "magnetic_moment must have shape (n_dims,) or (n_particles, n_dims) "
+            f"with n_dims={n_dims}; got shape {tuple(magnetic_moment.shape)}."
+        )
+    if magnetic_moment.ndim == 1:
+        return magnetic_moment.unsqueeze(0)
+    return magnetic_moment[particle_index : particle_index + 1]
+
+
+def _drift_velocity(
+    flow_network: nn.Module,
+    field_fn: Callable[[torch.Tensor], FieldSample],
+    position: torch.Tensor,
+    moment: torch.Tensor,
+) -> torch.Tensor:
+    """Evaluate the instantaneous drift velocity of a tracer particle.
+
+    The particle is transported by the local flow velocity together with a
+    magnetic drift term obtained under a unit-mobility, overdamped (Stokes)
+    approximation: `v = u_f(x) + F(x)`, with `F = grad(m . B)` the point-
+    dipole force (Abbott, Diller, & Petruska, 2020). A proper mobility
+    coefficient - set by the sphere radius and the fluid viscosity - is
+    expected to enter once particle-scale properties join the configuration
+    model; until then, this unit-mobility choice is exact whenever the
+    field is uniform (Phase 1), since the dipole force then vanishes
+    identically and only the flow term survives.
+
+    Args:
+    - `flow_network`: Trained network mapping coordinates to velocity and
+      pressure.
+    - `field_fn`: Callable returning the magnetic field at given
+      coordinates.
+    - `position`: Tensor of shape `(1, n_dims)`, the particle's current
+      position.
+    - `moment`: Tensor of shape `(1, n_dims)`, the particle's magnetic
+      moment.
+
+    Returns:
+    - Tensor of shape `(1, n_dims)` with the drift velocity.
+    """
+    n_dims = position.shape[1]
+    with torch.no_grad():
+        flow_output = flow_network(position)
+    flow_velocity = flow_output[:, :n_dims]
+
+    position_for_force = position.clone().requires_grad_(True)
+    magnetic_drift = dipole_force(field_fn, position_for_force, moment).detach()
+
+    return flow_velocity + magnetic_drift
 
 
 def integrate_trajectory(
@@ -45,11 +116,54 @@ def integrate_trajectory(
       ordered by increasing time.
 
     Raises:
-    - `ValueError`: If `initial_states` is empty or `n_steps` is not strictly
-      positive.
+    - `ValueError`: If `initial_states` is empty, if `n_steps` is not
+      strictly positive, if `time_span` is not increasing, or if
+      `magnetic_moment` cannot be matched to each particle's coordinate
+      dimensionality.
     """
     if not initial_states:
         raise ValueError("initial_states must contain at least one particle.")
     if n_steps <= 0:
         raise ValueError("n_steps must be strictly positive.")
-    raise NotImplementedError("Implementation scheduled for Step 2.")
+    time_start, time_end = time_span
+    if time_end <= time_start:
+        raise ValueError(f"time_span must satisfy t_end > t_start; got {time_span!r}.")
+
+    step_size = (time_end - time_start) / n_steps
+    moment_tensor = torch.as_tensor(magnetic_moment)
+
+    trajectories: list[list[ParticleState]] = []
+    for particle_index, initial_state in enumerate(initial_states):
+        n_dims = initial_state.position.shape[-1]
+        moment = _select_moment(moment_tensor, particle_index, n_dims).to(
+            dtype=initial_state.position.dtype, device=initial_state.position.device
+        )
+
+        state = initial_state
+        history = [state]
+        for _ in range(n_steps):
+            position = state.position.unsqueeze(0)
+
+            # Fourth-order Runge-Kutta integration of dx/dt = v_drift(x): a
+            # standard, fixed-step choice when derivative evaluations
+            # (a network forward pass plus a small autograd call) are
+            # comparatively cheap.
+            k1 = _drift_velocity(flow_network, field_fn, position, moment)
+            k2 = _drift_velocity(flow_network, field_fn, position + 0.5 * step_size * k1, moment)
+            k3 = _drift_velocity(flow_network, field_fn, position + 0.5 * step_size * k2, moment)
+            k4 = _drift_velocity(flow_network, field_fn, position + step_size * k3, moment)
+
+            next_position = (
+                position + (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+            ).squeeze(0)
+            next_time = state.time + step_size
+            next_velocity = _drift_velocity(
+                flow_network, field_fn, next_position.unsqueeze(0), moment
+            ).squeeze(0)
+
+            state = ParticleState(position=next_position, velocity=next_velocity, time=next_time)
+            history.append(state)
+
+        trajectories.append(history)
+
+    return trajectories
