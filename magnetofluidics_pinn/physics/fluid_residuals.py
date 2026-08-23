@@ -88,8 +88,9 @@ def stokes_residual(
         )
     if not coordinates.requires_grad:
         raise ValueError(
-            "coordinates must require gradients (call `.requires_grad_(True)`) "
-            "so that the residual can be evaluated through automatic differentiation."
+            "coordinates must require gradients (call `.requires_grad_(True)`)"
+            " so that the residual can be evaluated through automatic"
+            " differentiation."
         )
     radius = coordinates[:, 0:1]
     if torch.any(radius <= 0.0):

@@ -87,6 +87,27 @@ def _drift_velocity(
     return flow_velocity + magnetic_drift
 
 
+def _get_module_device_and_dtype(
+    module: nn.Module,
+) -> tuple[torch.device, torch.dtype]:
+    """Retrieve the primary device and dtype of a neural network module.
+
+    Args:
+    - `module`: The PyTorch module to inspect.
+
+    Returns:
+    - A tuple `(device, dtype)` extracted from the module's parameters,
+      defaulting to CUDA (if available) and `torch.float32`.
+    """
+    try:
+        first_param = next(module.parameters())
+        return first_param.device, first_param.dtype
+    except StopIteration:
+        default_dev = torch.device("cuda" if torch.cuda.is_available() else
+                                   "cpu")
+        return default_dev, torch.float32
+
+
 def integrate_trajectory(
     flow_network: nn.Module,
     field_fn: Callable[[torch.Tensor], FieldSample],
@@ -130,16 +151,25 @@ def integrate_trajectory(
         raise ValueError(f"time_span must satisfy t_end > t_start; got {time_span!r}.")
 
     step_size = (time_end - time_start) / n_steps
-    moment_tensor = torch.as_tensor(magnetic_moment)
+    target_device, target_dtype = _get_module_device_and_dtype(flow_network)
+    moment_tensor = torch.as_tensor(
+        magnetic_moment, dtype=target_dtype, device=target_device
+        )
 
     trajectories: list[list[ParticleState]] = []
     for particle_index, initial_state in enumerate(initial_states):
+        init_pos = initial_state.position.to(device=target_device,
+                                             dtype=target_dtype)
+        init_vel = initial_state.velocity.to(device=target_device,
+                                             dtype=target_dtype)
         n_dims = initial_state.position.shape[-1]
         moment = _select_moment(moment_tensor, particle_index, n_dims).to(
-            dtype=initial_state.position.dtype, device=initial_state.position.device
+            dtype=target_dtype, device=target_device
         )
 
-        state = initial_state
+        state = ParticleState(
+            position=init_pos, velocity=init_vel, time=initial_state.time
+        )
         history = [state]
         for _ in range(n_steps):
             position = state.position.unsqueeze(0)
@@ -149,9 +179,12 @@ def integrate_trajectory(
             # (a network forward pass plus a small autograd call) are
             # comparatively cheap.
             k1 = _drift_velocity(flow_network, field_fn, position, moment)
-            k2 = _drift_velocity(flow_network, field_fn, position + 0.5 * step_size * k1, moment)
-            k3 = _drift_velocity(flow_network, field_fn, position + 0.5 * step_size * k2, moment)
-            k4 = _drift_velocity(flow_network, field_fn, position + step_size * k3, moment)
+            k2 = _drift_velocity(flow_network, field_fn,
+                                 position + 0.5 * step_size * k1, moment)
+            k3 = _drift_velocity(flow_network, field_fn,
+                                 position + 0.5 * step_size * k2, moment)
+            k4 = _drift_velocity(flow_network, field_fn,
+                                 position + step_size * k3, moment)
 
             next_position = (
                 position + (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
@@ -161,7 +194,9 @@ def integrate_trajectory(
                 flow_network, field_fn, next_position.unsqueeze(0), moment
             ).squeeze(0)
 
-            state = ParticleState(position=next_position, velocity=next_velocity, time=next_time)
+            state = ParticleState(position=next_position,
+                                  velocity=next_velocity,
+                                  time=next_time)
             history.append(state)
 
         trajectories.append(history)

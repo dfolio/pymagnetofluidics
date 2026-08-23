@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+import torch
+
 
 @dataclass(frozen=True)
 class DomainConfig:
@@ -109,7 +111,8 @@ class TrainingConfig:
     - `n_boundary_points`: Number of boundary collocation points per epoch.
     - `learning_rate`: Initial learning rate for the optimizer.
     - `n_epochs`: Total number of training epochs.
-    - `device`: Either `"cuda"` or `"cpu"`; resolved automatically when `None`.
+    - `device`: Target device (`"cuda"`, `"cpu"`, or `torch.device`). Defaults
+      to `"cuda"` if CUDA is available, otherwise `"cpu"`.
     - `random_seed`: Seed used for reproducible sampling and initialization.
     """
 
@@ -117,5 +120,37 @@ class TrainingConfig:
     n_boundary_points: int = 2_000
     learning_rate: float = 1.0e-3
     n_epochs: int = 20_000
-    device: Literal["cuda", "cpu"] | None = None
+    device: str | torch.device | None = None
     random_seed: int = 42
+
+    def __post_init__(self) -> None:
+        """Validate configuration parameters and resolve target device."""
+        if self.n_interior_points <= 0 or self.n_boundary_points <= 0:
+            raise ValueError(
+                "n_interior_points and n_boundary_points must be strictly"
+                "positive."
+            )
+        if self.learning_rate <= 0.0:
+            raise ValueError("learning_rate must be strictly positive.")
+        if self.n_epochs <= 0:
+            raise ValueError("n_epochs must be strictly positive.")
+
+        # CHANGED: Pure device resolution avoiding global torch.
+        # set_default_device side effects
+        resolved_device = (
+            self.device
+            if self.device is not None
+            else ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        target_device = (
+            torch.device(resolved_device)
+            if isinstance(resolved_device, str)
+            else resolved_device
+        )
+        if target_device.type not in ("cuda", "cpu"):
+            raise ValueError(
+                f"device type must be 'cuda' or 'cpu', got '{target_device.type}'."
+            )
+
+        # Dataclass is frozen; mutate through object.__setattr__
+        object.__setattr__(self, "device", target_device)
