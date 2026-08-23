@@ -15,9 +15,15 @@ from magnetofluidics_pinn.types import CollocationPoints, Domain
 # (r = 0) when drawing interior points. The axisymmetric Stokes residual
 # (see `physics.fluid_residuals.stokes_residual`) involves terms
 # proportional to `1 / r` and `1 / r**2`, which are singular exactly on the
-# axis; a small clearance avoids that removable singularity without
-# materially affecting how well the interior is covered.
-_AXIS_CLEARANCE_FRACTION = 1.0e-4
+# axis. A clearance that is too tight is not just a removable-singularity
+# concern but a numerical-stability one: at 1e-4 * radius, `1 / r**2`
+# amplifies an untrained network's (generally nonzero) `u_r` by a factor of
+# order 1e8, so any collocation point that happens to land close to the
+# axis can produce a residual outlier many orders of magnitude larger than
+# the rest of the batch, destabilizing the mean-squared PDE loss used
+# during training. 5e-2 keeps that amplification bounded (~4e2) while
+# still leaving the axis itself well-sampled.
+_AXIS_CLEARANCE_FRACTION = 5.0e-2
 
 
 def boundary_face_sizes(n_boundary: int) -> tuple[int, int, int]:
