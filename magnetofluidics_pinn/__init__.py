@@ -30,11 +30,15 @@ from magnetofluidics_pinn.config import (
     FluidConfig as FluidConfig,
     TrainingConfig as TrainingConfig,
 )
+from magnetofluidics_pinn.device_utils import resolve_device as resolve_device
 from magnetofluidics_pinn.geometry import (
     build_bifurcation_domain as build_bifurcation_domain,
     build_channel_domain as build_channel_domain,
 )
-from magnetofluidics_pinn.networks import build_mlp as build_mlp
+from magnetofluidics_pinn.networks import (
+    apply_hard_wall_constraint as apply_hard_wall_constraint,
+    build_mlp as build_mlp,
+)
 from magnetofluidics_pinn.physics import (
     dipole_force as dipole_force,
     navier_stokes_residual as navier_stokes_residual,
@@ -61,7 +65,7 @@ from magnetofluidics_pinn.visualization import (
     plot_trajectories as plot_trajectories,
 )
 
-__version__ = "0.1.1"
+__version__ = "0.1.2"
 
 __all__ = [
     "__version__",
@@ -93,6 +97,7 @@ __all__ = [
     "sample_collocation_points",
     # Networks
     "build_mlp",
+    "apply_hard_wall_constraint",
     # Training
     "compose_loss",
     "train",
@@ -106,4 +111,6 @@ __all__ = [
     "compute_scales",
     "nondimensionalize_domain",
     "redimensionalize_domain",
+    # Device management
+    "resolve_device",
 ]

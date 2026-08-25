@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from magnetofluidics_pinn.device_utils import resolve_module_device
 from magnetofluidics_pinn.types import Domain, ParticleState
 
 
@@ -41,7 +42,7 @@ def plot_streamlines(
             f"Streamline plotting currently only supports domain.kind == 'channel'; got {domain.kind!r}."
         )
 
-    network_device = next(flow_network.parameters()).device
+    network_device = resolve_module_device(flow_network)
     radial_axis = torch.linspace(0.0, domain.radius, resolution, device=network_device)
     axial_axis = torch.linspace(0.0, domain.length, resolution, device=network_device)
     radial_grid, axial_grid = torch.meshgrid(radial_axis, axial_axis, indexing="ij")

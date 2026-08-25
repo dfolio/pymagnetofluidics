@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "magnetofluidics-pinn"
-version = "0.1.0"
+# version = "0.1.0"
+dynamic = ["version"]
 description = "Physics-informed neural networks for magnetic particle transport in viscous microfluidic flows."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +42,11 @@ dev = [
 ]
 
 [tool.setuptools.packages.find]
-where = ["magnetofluidics_pinn"]
+where = ["."]
+include = ["magnetofluidics_pinn*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "magnetofluidics_pinn.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

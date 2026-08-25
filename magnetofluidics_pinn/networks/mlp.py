@@ -10,6 +10,9 @@ from __future__ import annotations
 import torch
 from torch import nn
 
+from magnetofluidics_pinn.device_utils import resolve_device
+
+
 # Maps each supported activation name to its `torch.nn` layer factory,
 # keeping `build_mlp` a simple lookup instead of a branching if/elif chain.
 _ACTIVATION_LAYERS: dict[str, type[nn.Module]] = {
@@ -36,18 +39,21 @@ def build_mlp(
       `(64, 64, 64)`.
     - `activation`: Activation function name; one of `"tanh"`, `"silu"`,
       `"relu"`.
-    - `device`: Target device, `"cuda"` or `"cpu"`. Resolved automatically to
-      `"cuda"` when available, `"cpu"` otherwise, if left as `None`.
+    - `device`: Target device, e.g. `"cuda"`, `"cuda:0"`, or `"cpu"`.
+      Resolved automatically to `"cuda"` when available, `"cpu"` otherwise,
+      if left as `None`. # CHANGED: any device string accepted by
+      `torch.device` now works (previously only exactly "cuda"/"cpu"),
+      resolved through the shared `device_utils.resolve_device`.
 
     Returns:
     - A `torch.nn.Module` instance placed on the resolved device.
 
     Raises:
     - `ValueError`: If `hidden_layers` is empty, contains a non-positive
-      width, if `activation` is unsupported, or if `device` is neither
-      `"cuda"`, `"cpu"`, nor `None`.
-    - `RuntimeError`: If `device="cuda"` is requested but no CUDA device is
-      available on this machine.
+      width, if `activation` is unsupported, or if `device` is not a valid
+      device string.
+    - `RuntimeError`: If `device` (or the auto-selected default) resolves
+      to a CUDA device but no CUDA device is available.
     """
     if len(hidden_layers) == 0:
         raise ValueError("hidden_layers must contain at least one layer size.")
@@ -55,12 +61,8 @@ def build_mlp(
         raise ValueError(f"Every entry of hidden_layers must be strictly positive; got {hidden_layers!r}.")
     if activation not in _ACTIVATION_LAYERS:
         raise ValueError(f"Unsupported activation: {activation!r}.")
-    if device is not None and device not in {"cuda", "cpu"}:
-        raise ValueError(f"device must be 'cuda' or 'cpu'; got {device!r}.")
-    if device == "cuda" and not torch.cuda.is_available():
-        raise RuntimeError("device='cuda' was requested, but no CUDA device is available.")
     
-    resolved_device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    resolved_device = resolve_device(device)
     activation_cls = _ACTIVATION_LAYERS[activation]
     
     layers: list[nn.Module] = []

@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/pymagnetofluidics.iml" filepath="$PROJECT_DIR$/.idea/pymagnetofluidics.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/magnetofluidics-pinn.iml" filepath="$PROJECT_DIR$/.idea/magnetofluidics-pinn.iml" />
     </modules>
   </component>
 </project>

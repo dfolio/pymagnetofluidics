@@ -6,8 +6,12 @@ strictly separate.
 """
 
 # NOTE: explicit `as <same_name>` re-export (PEP 484); see package __init__.py.
+from magnetofluidics_pinn.networks.constraints import (
+    apply_hard_wall_constraint as apply_hard_wall_constraint,
+)
 from magnetofluidics_pinn.networks.mlp import build_mlp as build_mlp
 
 __all__ = [
     "build_mlp",
+    "apply_hard_wall_constraint",
 ]

@@ -13,6 +13,7 @@ from typing import Callable
 import torch
 from torch import nn
 
+from magnetofluidics_pinn.device_utils import resolve_module_device
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force
 from magnetofluidics_pinn.types import FieldSample, ParticleState
 
@@ -69,12 +70,15 @@ def _drift_velocity(
     - `field_fn`: Callable returning the magnetic field at given
       coordinates.
     - `position`: Tensor of shape `(1, n_dims)`, the particle's current
-      position.
+      position, already on `flow_network`'s device (see
+      `integrate_trajectory`, which resolves this once for the whole
+      trajectory rather than on every step).
     - `moment`: Tensor of shape `(1, n_dims)`, the particle's magnetic
-      moment.
+      moment, already on the same device as `position`.
 
     Returns:
-    - Tensor of shape `(1, n_dims)` with the drift velocity.
+    - Tensor of shape `(1, n_dims)` with the drift velocity, on the same
+      device as `position`.
     """
     n_dims = position.shape[1]
     with torch.no_grad():
@@ -85,27 +89,6 @@ def _drift_velocity(
     magnetic_drift = dipole_force(field_fn, position_for_force, moment).detach()
 
     return flow_velocity + magnetic_drift
-
-
-def _get_module_device_and_dtype(
-    module: nn.Module,
-) -> tuple[torch.device, torch.dtype]:
-    """Retrieve the primary device and dtype of a neural network module.
-
-    Args:
-    - `module`: The PyTorch module to inspect.
-
-    Returns:
-    - A tuple `(device, dtype)` extracted from the module's parameters,
-      defaulting to CUDA (if available) and `torch.float32`.
-    """
-    try:
-        first_param = next(module.parameters())
-        return first_param.device, first_param.dtype
-    except StopIteration:
-        default_dev = torch.device("cuda" if torch.cuda.is_available() else
-                                   "cpu")
-        return default_dev, torch.float32
 
 
 def integrate_trajectory(
@@ -120,7 +103,12 @@ def integrate_trajectory(
 
     Args:
     - `flow_network`: Trained network mapping coordinates to velocity and
-      pressure.
+      pressure. Every computation happens on this network's device (see
+      [`device_utils.resolve_module_device`][magnetofluidics_pinn.device_utils.resolve_module_device]);
+      `initial_states` and `magnetic_moment` do not need to already be on
+      that device — they are moved there automatically — so a network
+      trained on `"cuda"` can be integrated directly from, e.g., plain CPU
+      tensors constructed with `torch.tensor(...)`.
     - `field_fn`: Callable returning a
       [`FieldSample`][magnetofluidics_pinn.types.FieldSample] for a batch of
       coordinates.
@@ -134,7 +122,7 @@ def integrate_trajectory(
     Returns:
     - A list of per-particle trajectories, each a list of
       [`ParticleState`][magnetofluidics_pinn.types.ParticleState] instances
-      ordered by increasing time.
+      ordered by increasing time and living on `flow_network`'s device.
 
     Raises:
     - `ValueError`: If `initial_states` is empty, if `n_steps` is not
@@ -150,25 +138,26 @@ def integrate_trajectory(
     if time_end <= time_start:
         raise ValueError(f"time_span must satisfy t_end > t_start; got {time_span!r}.")
 
+    # Resolve the network's device once, up front, and move every particle
+    # onto it: `flow_network(position)` requires `position` to already
+    # live where the network's parameters do, and re-deriving the device
+    # independently per step would both waste time and risk a mismatch if
+    # `flow_network` were ever moved mid-integration.
+    network_device = resolve_module_device(flow_network)
     step_size = (time_end - time_start) / n_steps
-    target_device, target_dtype = _get_module_device_and_dtype(flow_network)
-    moment_tensor = torch.as_tensor(
-        magnetic_moment, dtype=target_dtype, device=target_device
-        )
+    moment_tensor = torch.as_tensor(magnetic_moment, device=network_device)
 
     trajectories: list[list[ParticleState]] = []
     for particle_index, initial_state in enumerate(initial_states):
-        init_pos = initial_state.position.to(device=target_device,
-                                             dtype=target_dtype)
-        init_vel = initial_state.velocity.to(device=target_device,
-                                             dtype=target_dtype)
         n_dims = initial_state.position.shape[-1]
         moment = _select_moment(moment_tensor, particle_index, n_dims).to(
-            dtype=target_dtype, device=target_device
+            dtype=initial_state.position.dtype, device=network_device
         )
 
         state = ParticleState(
-            position=init_pos, velocity=init_vel, time=initial_state.time
+            position=initial_state.position.to(network_device),
+            velocity=initial_state.velocity.to(network_device),
+            time=initial_state.time,
         )
         history = [state]
         for _ in range(n_steps):
@@ -179,12 +168,9 @@ def integrate_trajectory(
             # (a network forward pass plus a small autograd call) are
             # comparatively cheap.
             k1 = _drift_velocity(flow_network, field_fn, position, moment)
-            k2 = _drift_velocity(flow_network, field_fn,
-                                 position + 0.5 * step_size * k1, moment)
-            k3 = _drift_velocity(flow_network, field_fn,
-                                 position + 0.5 * step_size * k2, moment)
-            k4 = _drift_velocity(flow_network, field_fn,
-                                 position + step_size * k3, moment)
+            k2 = _drift_velocity(flow_network, field_fn, position + 0.5 * step_size * k1, moment)
+            k3 = _drift_velocity(flow_network, field_fn, position + 0.5 * step_size * k2, moment)
+            k4 = _drift_velocity(flow_network, field_fn, position + step_size * k3, moment)
 
             next_position = (
                 position + (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
@@ -194,9 +180,7 @@ def integrate_trajectory(
                 flow_network, field_fn, next_position.unsqueeze(0), moment
             ).squeeze(0)
 
-            state = ParticleState(position=next_position,
-                                  velocity=next_velocity,
-                                  time=next_time)
+            state = ParticleState(position=next_position, velocity=next_velocity, time=next_time)
             history.append(state)
 
         trajectories.append(history)

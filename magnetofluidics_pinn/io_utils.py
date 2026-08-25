@@ -19,6 +19,8 @@ from magnetofluidics_pinn.config import (
     FluidConfig,
     TrainingConfig,
 )
+from magnetofluidics_pinn.device_utils import resolve_device
+
 
 _REQUIRED_CHECKPOINT_KEYS = frozenset(
     {"network", "domain_config", "fluid_config", "field_config", "training_config"}
@@ -65,17 +67,27 @@ def save_checkpoint(
 
 
 def load_checkpoint(
-        checkpoint_path: Path,
+    checkpoint_path: Path,
+    device: str | torch.device | None = None,
 ) -> tuple[nn.Module, DomainConfig, FluidConfig, FieldConfig, TrainingConfig]:
     """Load a trained network and its associated configuration.
 
     Args:
     - `checkpoint_path`: Path to a checkpoint produced by
       [`save_checkpoint`][magnetofluidics_pinn.io_utils.save_checkpoint].
+    - `device`: Device to load the network onto, e.g. `"cpu"`, `"cuda"`,
+      `"cuda:0"`; resolved automatically when `None`. # NEW: previously
+      `torch.load` used its default behavior of deserializing tensors onto
+      the device they were saved from, which raises if that checkpoint was
+      saved from a CUDA-resident network and is being loaded on a machine
+      without a CUDA device (or without that specific GPU index). Every
+      tensor is now explicitly placed on `device` via `map_location`,
+      independent of whichever device the checkpoint happened to be saved
+      from.
 
     Returns:
     - A tuple `(network, domain_config, fluid_config, field_config,
-      training_config)`.
+      training_config)`, with `network` on the resolved device.
 
     Raises:
     - `FileNotFoundError`: If `checkpoint_path` does not exist.
@@ -84,24 +96,31 @@ def load_checkpoint(
     """
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"No checkpoint found at {checkpoint_path!s}.")
-    
+
+    resolved_device = resolve_device(device)
     try:
         # `weights_only=False` is required because the checkpoint stores
         # full module and configuration objects, not just tensors. Only
         # load checkpoints produced by `save_checkpoint` from a trusted
         # source: unpickling arbitrary data is not safe in general.
-        payload = torch.load(checkpoint_path, weights_only=False)
+        payload = torch.load(checkpoint_path, map_location=resolved_device, weights_only=False)
     except (pickle.UnpicklingError, RuntimeError, EOFError, OSError) as error:
         raise RuntimeError(f"Failed to load checkpoint at {checkpoint_path!s}: {error}") from error
-    
+
     missing_keys = _REQUIRED_CHECKPOINT_KEYS - payload.keys()
     if missing_keys:
         raise RuntimeError(
             f"Checkpoint at {checkpoint_path!s} is missing keys: {sorted(missing_keys)}."
         )
-    
+
+    # Belt-and-suspenders: `map_location` reliably relocates the tensors
+    # `torch.load` deserializes, but this checkpoint stores a full `nn.Module`
+    # object rather than a plain state_dict, so an explicit `.to()` guards
+    # against any buffer `map_location` did not catch, across torch versions.
+    network = payload["network"].to(resolved_device)
+
     return (
-        payload["network"],
+        network,
         payload["domain_config"],
         payload["fluid_config"],
         payload["field_config"],
