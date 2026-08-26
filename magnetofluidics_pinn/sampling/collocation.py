@@ -60,6 +60,7 @@ def sample_collocation_points(
     random_seed: int,
     n_initial: int | None = None,
     device: str | torch.device | None = None,
+    dtype: torch.dtype | None = None,
 ) -> CollocationPoints:
     """Sample interior, boundary, and (optionally) initial points.
 
@@ -80,6 +81,7 @@ def sample_collocation_points(
       *different* draws (they use different underlying RNG algorithms):
       reproducibility is guaranteed per device type, not across device
       types.
+    - `dtype`: Represents the data type of the returned tensors; resolved automatically when `None`.
 
     Returns:
     - A [`CollocationPoints`][magnetofluidics_pinn.types.CollocationPoints]
@@ -112,37 +114,38 @@ def sample_collocation_points(
         )
 
     resolved_device = resolve_device(device)
+    target_dtype = dtype or torch.get_default_dtype()
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
 
     # Interior points: uniform in (r, z), keeping a small clearance around
     # the symmetry axis (see module docstring).
     r_min = domain.radius * _AXIS_CLEARANCE_FRACTION
     interior_r = r_min + (domain.radius - r_min) * torch.rand(
-        n_interior, 1, generator=generator, device=resolved_device
+        n_interior, 1, generator=generator, device=resolved_device, dtype=target_dtype
     )
-    interior_z = domain.length * torch.rand(n_interior, 1, generator=generator, device=resolved_device)
+    interior_z = domain.length * torch.rand(n_interior, 1, generator=generator, device=resolved_device, dtype=target_dtype)
     interior = torch.cat([interior_r, interior_z], dim=1)
 
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
 
     wall_points = torch.cat(
         [
-            torch.full((n_wall, 1), domain.radius, device=resolved_device),
-            domain.length * torch.rand(n_wall, 1, generator=generator, device=resolved_device),
+            torch.full((n_wall, 1), domain.radius, device=resolved_device, dtype=target_dtype),
+            domain.length * torch.rand(n_wall, 1, generator=generator, device=resolved_device, dtype=target_dtype),
         ],
         dim=1,
     )
     inlet_points = torch.cat(
         [
-            domain.radius * torch.rand(n_inlet, 1, generator=generator, device=resolved_device),
-            torch.zeros(n_inlet, 1, device=resolved_device),
+            domain.radius * torch.rand(n_inlet, 1, generator=generator, device=resolved_device, dtype=target_dtype),
+            torch.zeros(n_inlet, 1, device=resolved_device, dtype=target_dtype),
         ],
         dim=1,
     )
     outlet_points = torch.cat(
         [
-            domain.radius * torch.rand(n_outlet, 1, generator=generator, device=resolved_device),
-            torch.full((n_outlet, 1), domain.length, device=resolved_device),
+            domain.radius * torch.rand(n_outlet, 1, generator=generator, device=resolved_device, dtype=target_dtype),
+            torch.full((n_outlet, 1), domain.length, device=resolved_device, dtype=target_dtype),
         ],
         dim=1,
     )

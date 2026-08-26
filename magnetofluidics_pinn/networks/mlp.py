@@ -7,11 +7,9 @@ state, no implicit device selection beyond what is explicitly requested.
 
 from __future__ import annotations
 
-import torch
 from torch import nn
 
 from magnetofluidics_pinn.device_utils import resolve_device
-
 
 # Maps each supported activation name to its `torch.nn` layer factory,
 # keeping `build_mlp` a simple lookup instead of a branching if/elif chain.

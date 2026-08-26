@@ -26,7 +26,7 @@ def dipole_force(
     gradient is obtained through automatic differentiation of `field_fn`.
     Under a spatially uniform field, this evaluates to exactly zero, since
     `B` then carries no dependency on position for autograd to differentiate
-    through (Abbott, Diller, & Petruska, 2020).
+    through [@abbott2020magnetic].
 
     Args:
     - `field_fn`: Callable returning a

@@ -56,6 +56,28 @@ _DIMENSIONLESS_PEAK_INLET_VELOCITY = 1.0
 _DIMENSIONLESS_OUTLET_REFERENCE_PRESSURE = 0.0
 
 
+# Add:
+def _axis_regularity_loss(
+        network: nn.Module,
+        axis_coordinates: torch.Tensor,
+) -> torch.Tensor:
+    """Compute a loss term that penalizes nonzero radial velocity and
+    nonzero axial gradient of axial velocity at the axis of symmetry (r=0).
+    """
+    coordinates = axis_coordinates.clone().requires_grad_(True)
+    output = network(coordinates)
+    
+    radial_velocity = output[:, 0:1]
+    axial_velocity = output[:, 1:2]
+    (axial_gradient,) = torch.autograd.grad(
+        outputs=axial_velocity,
+        inputs=coordinates,
+        grad_outputs=torch.ones_like(axial_velocity),
+        create_graph=True,
+    )
+    return torch.mean(radial_velocity ** 2) + torch.mean(axial_gradient[:, 0:1] ** 2)
+
+
 def _pde_loss(
     network: nn.Module, coordinates: torch.Tensor, fluid_config: FluidConfig
 ) -> torch.Tensor:

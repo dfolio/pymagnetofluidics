@@ -28,6 +28,7 @@ from magnetofluidics_pinn.config import (
     DomainConfig as DomainConfig,
     FieldConfig as FieldConfig,
     FluidConfig as FluidConfig,
+    ParticleConfig as ParticleConfig,
     TrainingConfig as TrainingConfig,
 )
 from magnetofluidics_pinn.device_utils import resolve_device as resolve_device
@@ -41,6 +42,7 @@ from magnetofluidics_pinn.networks import (
 )
 from magnetofluidics_pinn.physics import (
     dipole_force as dipole_force,
+    faxen_corrected_velocity as faxen_corrected_velocity,
     navier_stokes_residual as navier_stokes_residual,
     stokes_residual as stokes_residual,
 )
@@ -65,7 +67,7 @@ from magnetofluidics_pinn.visualization import (
     plot_trajectories as plot_trajectories,
 )
 
-__version__ = "0.1.2"
+__version__ = "0.1.3"
 
 __all__ = [
     "__version__",
@@ -73,6 +75,7 @@ __all__ = [
     "DomainConfig",
     "FluidConfig",
     "FieldConfig",
+    "ParticleConfig",
     "TrainingConfig",
     # Data types
     "Domain",
@@ -93,6 +96,7 @@ __all__ = [
     "stokes_residual",
     "navier_stokes_residual",
     "dipole_force",
+    "faxen_corrected_velocity",
     # Sampling
     "sample_collocation_points",
     # Networks

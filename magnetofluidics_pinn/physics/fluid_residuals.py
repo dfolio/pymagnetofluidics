@@ -7,12 +7,10 @@ means the network's output satisfies the governing equations exactly.
 
 Phase 1 targets the axisymmetric, dimensionless Stokes (creeping-flow)
 equations in cylindrical coordinates `(r, z)`, with velocity components
-`(u_r, u_z)` and pressure `p`; see e.g. Happel & Brenner (1983), "Low
-Reynolds Number Hydrodynamics", or Leal (2007), "Advanced Transport
+`(u_r, u_z)` and pressure `p`; see e.g. [@happel1983low] or  [@leal2007advanced], "Advanced Transport
 Phenomena", for the classical derivation. With the viscous pressure scale
 used by `scaling.compute_scales`, the dimensionless viscosity is exactly 1,
 so no viscosity factor appears below.
-
 """
 
 from __future__ import annotations
@@ -88,9 +86,8 @@ def stokes_residual(
         )
     if not coordinates.requires_grad:
         raise ValueError(
-            "coordinates must require gradients (call `.requires_grad_(True)`)"
-            " so that the residual can be evaluated through automatic"
-            " differentiation."
+            "coordinates must require gradients (call `.requires_grad_(True)`) "
+            "so that the residual can be evaluated through automatic differentiation."
         )
     radius = coordinates[:, 0:1]
     if torch.any(radius <= 0.0):

@@ -1,11 +1,20 @@
 ---
 title: "Phase 1 Verification: Single Sphere, Uniform Field, Stokes Flow in Straight Microchannel"
-bibliography: references.bib
-format:
-  html:
-    code-fold: true
+html:
     toc: true
     number-sections: true
+    include-in-header:
+      text: |
+        <script>
+        window.MathJax = {
+          tex: { macros: {
+            vb: ["\\mathbf{#1}", 1], vu: ["\\hat{\\mathbf{#1}}", 1],
+            grad: ["\\nabla"], laplacian: ["\\nabla^2"],
+            vdot: ["\\cdot"], cross: ["\\times"]
+          } }
+        };
+        </script>
+bibliography: ../docs/references.bib
 jupyter: python3
 execute:
   cache: false
@@ -295,9 +304,111 @@ trained_network, history = run_instrumented_hybrid_training(
 )
 ```
 
+```{python}
+
+def plot_loss_convergence(
+    history: dict[str, list[float]],
+    adam_epochs: int | None = None,
+    log_scale: bool = True,
+) -> plt.Figure:
+    """Plots the convergence history of individual and composite loss terms.
+
+    Args:
+        history: Dictionary containing recorded loss histories for keys:
+            'step', 'pde', 'wall', 'inlet', 'outlet', and 'total'.
+        adam_epochs: Optional number of Adam warmup epochs to mark stage
+            transition from Adam to L-BFGS refinement with a vertical line.
+        log_scale: Whether to format the y-axis on a logarithmic scale.
+
+    Returns:
+        Matplotlib Figure object containing the multi-panel convergence plots.
+
+    Raises:
+        ValueError: If required loss keys are missing from the history dict.
+    """
+    required_keys = {"step", "pde", "wall", "inlet", "outlet", "total"}
+    if not required_keys.issubset(history.keys()):
+        missing = required_keys - set(history.keys())
+        raise ValueError(f"History dictionary is missing required keys: {missing}")
+
+    steps = np.asarray(history["step"])
+    loss_series = (
+        ("PDE Residual", history["pde"], "tab:blue"),
+        ("Wall BC (No-Slip)", history["wall"], "tab:orange"),
+        ("Inlet BC (Velocity)", history["inlet"], "tab:green"),
+        ("Outlet BC (Pressure)", history["outlet"], "tab:purple"),
+        ("Composite Total Loss", history["total"], "black"),
+    )
+
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    axes_flat = axes.flatten()
+
+    def render_subplot(ax: plt.Axes, title: str, values: list[float], color: str) -> None:
+        """Renders an individual loss curve onto a given subplot axis."""
+        ax.plot(steps, values, color=color, linewidth=1.5, label=title)
+        if adam_epochs is not None and adam_epochs < len(steps):
+            ax.axvline(
+                x=adam_epochs,
+                color="tab:red",
+                linestyle=":",
+                linewidth=1.2,
+                label="Adam → L-BFGS" if ax is axes_flat[0] else None,
+            )
+        if log_scale:
+            ax.set_yscale("log")
+        ax.set_xlabel("Optimization Step")
+        ax.set_ylabel("Loss Magnitude")
+        ax.set_title(title)
+        ax.grid(True, linestyle=":", alpha=0.6)
+        ax.legend(fontsize=8, loc="upper right")
+
+    # Render individual loss subplots
+    for ax, (title, series, col) in zip(axes_flat[:5], loss_series):
+        render_subplot(ax, title, series, col)
+
+    # 6th panel: Combined overlay comparison
+    combined_ax = axes_flat[5]
+    for title, series, col in loss_series:
+        linestyle = "--" if title == "Composite Total Loss" else "-"
+        combined_ax.plot(steps, series, color=col, linestyle=linestyle, linewidth=1.2, label=title)
+
+    if adam_epochs is not None and adam_epochs < len(steps):
+        combined_ax.axvline(x=adam_epochs, color="tab:red", linestyle=":", linewidth=1.2)
+
+    if log_scale:
+        combined_ax.set_yscale("log")
+    combined_ax.set_xlabel("Optimization Step")
+    combined_ax.set_ylabel("Loss Magnitude")
+    combined_ax.set_title("All Losses Overlaid")
+    combined_ax.grid(True, linestyle=":", alpha=0.6)
+    combined_ax.legend(fontsize=7, loc="upper right")
+
+    fig.suptitle("Convergence History by Loss Component", fontsize=13, y=1.00)
+    fig.tight_layout()
+    return fig
+
+
+# Generate and display the convergence figure
+fig_convergence = plot_loss_convergence(
+    history=history,
+    adam_epochs=training_config.n_epochs,
+    log_scale=True,
+)
+plt.show()
+
+# Print summary table of reduction factors
+print("\nLoss Reduction Summary (Initial -> Final):")
+for metric_name in ("pde", "wall", "inlet", "outlet", "total"):
+    initial_val = history[metric_name][0]
+    final_val = history[metric_name][-1]
+    reduction = initial_val / max(final_val, 1e-12)
+    print(f"  {metric_name.upper():<8}: {initial_val:.4e} -> {final_val:.4e}"
+          f" (Factor: {reduction:8.1f}x)")    
+```
+
 ## Quantitative Convergence & Analytical Validation {#sec-5-validation}
 
-**Context & Objective:** Fully developed Hagen-Poiseuille pipe flow exhibits three key physical invariants [@happel1983lowreynoldsnumber; @Leal2007]:
+**Context & Objective:** Fully developed Hagen-Poiseuille pipe flow exhibits three key physical invariants [@happel1983low; @leal2007advanced]:
 
 1. **Axial Invariance of Velocity Profile:** The axial velocity profile $u_z(r, z) = U_{\max}\left(1 - (r/R)^2\right)$ must remain identical across all axial cross-sections $z \in [0, L]$.
 2. **Radial Velocity Quenching:** The radial velocity component must vanish identically ($u_r(r, z) \equiv 0$) throughout the entire fluid domain.
@@ -307,8 +418,9 @@ trained_network, history = run_instrumented_hybrid_training(
 The code blocks below evaluate the trained PINN across multiple axial stations ($z = 0, 0.25L, 0.5L, 0.75L, L$) and continuous cross-sections.
 
 ```{python}
-# CHANGE: Added multi-station velocity profile evaluation, radial velocity verification, 
-# dense axial flow rate integration, and linear pressure gradient validation.
+# CHANGE: Added multi-station velocity profile evaluation, radial velocity
+# verification,  dense axial flow rate integration, and linear pressure
+# gradient validation.
 
 
 def evaluate_velocity_profiles(

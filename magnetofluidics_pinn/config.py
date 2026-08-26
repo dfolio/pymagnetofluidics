@@ -110,6 +110,17 @@ class FieldConfig:
     time_dependent: bool = False
 
 
+# Add:
+@dataclass(frozen=True)
+class ParticleConfig:
+    radius: float
+    magnetic_moment: tuple[float, float]
+    
+    def __post_init__(self) -> None:
+        if self.radius <= 0.0:
+            raise ValueError("particle radius must be strictly positive.")
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     """Configuration of the training procedure.

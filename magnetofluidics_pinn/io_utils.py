@@ -17,13 +17,14 @@ from magnetofluidics_pinn.config import (
     DomainConfig,
     FieldConfig,
     FluidConfig,
+    ParticleConfig,
     TrainingConfig,
 )
 from magnetofluidics_pinn.device_utils import resolve_device
 
 
 _REQUIRED_CHECKPOINT_KEYS = frozenset(
-    {"network", "domain_config", "fluid_config", "field_config", "training_config"}
+    {"network", "domain_config", "fluid_config", "field_config", "training_config", "particle_config"}
 )
 
 
@@ -34,6 +35,7 @@ def save_checkpoint(
         fluid_config: FluidConfig,
         field_config: FieldConfig,
         training_config: TrainingConfig,
+        particle_config: ParticleConfig,
 ) -> None:
     """Save a trained network alongside the configuration that produced it.
 
@@ -44,6 +46,7 @@ def save_checkpoint(
     - `fluid_config`: Fluid configuration used for training.
     - `field_config`: Magnetic field configuration used for training.
     - `training_config`: Training configuration used for training.
+    - `particle_config`: Particle configuration used for training.
 
     Raises:
     - `OSError`: If `checkpoint_path`'s parent directory does not exist and
@@ -61,6 +64,7 @@ def save_checkpoint(
         "domain_config"  : domain_config,
         "fluid_config"   : fluid_config,
         "field_config"   : field_config,
+        "particle_config": particle_config,
         "training_config": training_config,
     }
     torch.save(payload, checkpoint_path)
@@ -69,7 +73,7 @@ def save_checkpoint(
 def load_checkpoint(
     checkpoint_path: Path,
     device: str | torch.device | None = None,
-) -> tuple[nn.Module, DomainConfig, FluidConfig, FieldConfig, TrainingConfig]:
+) -> tuple[nn.Module, DomainConfig, FluidConfig, FieldConfig, ParticleConfig, TrainingConfig]:
     """Load a trained network and its associated configuration.
 
     Args:
@@ -86,7 +90,7 @@ def load_checkpoint(
       from.
 
     Returns:
-    - A tuple `(network, domain_config, fluid_config, field_config,
+    - A tuple `(network, domain_config, fluid_config, field_config, particle_config, training_config)`, with `network` on the resolved device.
       training_config)`, with `network` on the resolved device.
 
     Raises:
@@ -124,5 +128,6 @@ def load_checkpoint(
         payload["domain_config"],
         payload["fluid_config"],
         payload["field_config"],
+        payload["particle_config"],
         payload["training_config"],
     )
