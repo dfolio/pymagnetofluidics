@@ -149,7 +149,8 @@ class TrainingConfig:
     - `gradient_clip_norm`: Maximum gradient norm during the Adam phase, or
       `None` to disable clipping. Guards against the occasional large
       gradient spike that nested second-order autograd (needed for the PDE
-      residual) can produce, without changing the loss being optimized.
+      residual) can produce [@wang2021understanding], without changing the
+      loss being optimized.
     - `use_lbfgs_refinement`: Whether to follow the Adam phase with L-BFGS
       refinement on a larger, fixed collocation set (L-BFGS is a full-batch
       method: resampling points between its internal iterations, the way

@@ -10,7 +10,10 @@ motivated adding the L-BFGS phase: `stokes_residual` and the
 boundary-condition targets are exact (verified against the analytical
 Poiseuille solution via the method of manufactured solutions), but Adam
 alone plateaus with the PDE residual still orders of magnitude too large to
-match the analytical profile.
+match the analytical profile — boundary terms converging much faster than
+the interior residual is a documented PINN training characteristic
+[@krishnapriyan2021characterizing; @wang2021understanding], not evidence
+that the residual or boundary-condition formulas themselves are wrong.
 """
 
 from __future__ import annotations
@@ -208,9 +211,13 @@ def train(
       Phase 1's Stokes flow residual has no dependency on the magnetic
       field, so this argument is currently unused; it is kept for signature
       stability across later, coupled phases.
-    - `training_config`: Training hyperparameters — see
+    - `training_config`:Training hyperparameters — see
       [`TrainingConfig`][magnetofluidics_pinn.config.TrainingConfig] for the
-      Adam-phase and L-BFGS-refinement-phase settings.
+      Adam-phase and L-BFGS-refinement-phase settings. Note that
+      `use_lbfgs_refinement` defaults to `True` and runs regardless of
+      `n_epochs`: a small `n_epochs` (e.g., for a quick interactive check)
+      does not by itself produce a fast call — also pass
+      `use_lbfgs_refinement=False` for that.
 
     Returns:
     - A trained `torch.nn.Module` instance. The `network` argument passed in

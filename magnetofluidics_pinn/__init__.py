@@ -31,7 +31,10 @@ from magnetofluidics_pinn.config import (
     ParticleConfig as ParticleConfig,
     TrainingConfig as TrainingConfig,
 )
-from magnetofluidics_pinn.device_utils import resolve_device as resolve_device
+from magnetofluidics_pinn.device_utils import  (
+     resolve_device as resolve_device,
+     resolve_module_device as resolve_module_device,
+)
 from magnetofluidics_pinn.geometry import (
     build_bifurcation_domain as build_bifurcation_domain,
     build_channel_domain as build_channel_domain,
@@ -117,4 +120,5 @@ __all__ = [
     "redimensionalize_domain",
     # Device management
     "resolve_device",
+    "resolve_module_device",
 ]
