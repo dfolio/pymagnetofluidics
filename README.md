@@ -1,11 +1,13 @@
 ---
 bibliography: docs/references.bib
 ---
-# `magnetofluidic_pinn`
+# `pymagnetofluidics`
 
 Physics-informed neural networks (PINNs) [@raissi2019physics; @cai2021physics]
 for predicting the motion of magnetic particles transported by a viscous flow
 inside a microfluidic vessel, under a prescribed magnetic field.
+
+Note: The name of the project, `pymagnetofluidics`, is a placeholder. Future prospect may include other models such as the Fourier Neural Operator (FNO) [@li2021fourier].
 
 ## Scope
 
@@ -21,8 +23,6 @@ The package couples two physical models:
    from that prescribed field and used to drive particle trajectories
    [@abbott2020magnetic].
 
-
-
 ## Installation (editable, development mode)
 
 ```bash
@@ -32,7 +32,7 @@ pip install -e ".[dev]"
 ## Package layout
 
 ```bash
-magnetofluidics_pinn/
+pymagnetofluidics/
 ├── pyproject.toml
 ├── README.md
 ├── docs/
