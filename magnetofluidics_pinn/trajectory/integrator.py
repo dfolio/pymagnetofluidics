@@ -27,6 +27,24 @@ problem (the domain geometry itself becomes a function of the particle's
 position, effectively adding it as a network input), consistent with this
 package's phased roadmap deferring particle-scale flow perturbation past
 Phase 1's single-tracer scope, rather than an oversight in this module.
+
+**Units and dtype.** `magnetic_moment` and every position fed to
+`flow_network` are expected to already be dimensionless, matching whatever
+the network was trained on (see
+[`scaling.nondimensionalize_particle`][magnetofluidics_pinn.scaling.nondimensionalize_particle]
+for the particle radius specifically). `initial_states` and
+`magnetic_moment` also do not need to already match `flow_network`'s
+device *or* dtype — both are resolved from the network once, up front, and
+every new tensor this module creates is matched to them, so a network
+moved to, e.g., `"cuda"` and/or `torch.float64` can still be driven
+directly from plain CPU, default-dtype tensors.
+
+**Field uniformity is enforced, not just assumed.** Since the drift model
+above is only dimensionally correct for a uniform field (see the caveat
+two paragraphs up), `integrate_trajectory` probes `field_fn` at two
+distinct points before integrating anything and raises
+`NotImplementedError` if they disagree, rather than silently producing a
+dimensionally-inconsistent trajectory for a non-uniform field.
 """
 
 from __future__ import annotations
@@ -36,10 +54,58 @@ from typing import Callable
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.device_utils import resolve_module_device
+from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.physics.hydrodynamic_drag import faxen_corrected_velocity
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force
 from magnetofluidics_pinn.types import FieldSample, ParticleState
+
+# Offset (in every coordinate) used to probe whether `field_fn` is actually
+# spatially uniform; see `_assert_uniform_field`. Small enough to stay a
+# local probe, large enough not to be lost to floating-point noise.
+_UNIFORMITY_PROBE_OFFSET = 0.1234
+
+
+def _assert_uniform_field(
+    field_fn: Callable[[torch.Tensor], FieldSample], reference_position: torch.Tensor
+) -> None:
+    """Verify `field_fn` gives the same field at two distinct nearby points.
+
+    The current drift model, `v = u(x) + F(x)` with unit mobility, is only
+    dimensionally consistent when the magnetic force `F` is identically
+    zero, i.e., when the field is spatially uniform (see this module's
+    docstring). `gradient_field` and `biot_savart_field` both already raise
+    `NotImplementedError`, so this check exists for the case those don't
+    cover: a user-supplied, genuinely non-uniform `field_fn`, which would
+    otherwise silently produce a dimensionally incorrect trajectory instead
+    of failing loudly.
+
+    Args:
+    - `field_fn`: Callable returning a
+      [`FieldSample`][magnetofluidics_pinn.types.FieldSample] for a batch of
+      coordinates.
+    - `reference_position`: Tensor of shape `(1, n_dims)` near which to
+      probe; typically the first particle's initial position.
+
+    Raises:
+    - `NotImplementedError`: If the field differs between the two probed
+      points by more than a small numerical tolerance.
+    """
+    probe_a = reference_position
+    probe_b = reference_position + _UNIFORMITY_PROBE_OFFSET
+    with torch.no_grad():
+        field_a = field_fn(probe_a).field
+        field_b = field_fn(probe_b).field
+    if not torch.allclose(field_a, field_b, atol=1.0e-8, rtol=1.0e-5):
+        raise NotImplementedError(
+            "integrate_trajectory detected a spatially-varying (non-uniform) "
+            "magnetic field. The current unit-mobility drift model "
+            "(v = u(x) + F(x)) is only dimensionally consistent when "
+            "F = grad(m . B) is identically zero, i.e. for a uniform field: "
+            "a non-uniform field requires a fully nondimensionalized "
+            "mobility model this package does not implement yet (see this "
+            "module's docstring). Non-uniform-field trajectory integration "
+            "is not yet supported."
+        )
 
 
 def _select_moment(
@@ -81,9 +147,9 @@ def _drift_velocity(
 
     The particle is transported by the (optionally Faxén-corrected) local
     flow velocity together with a magnetic drift term obtained under a
-    unit-mobility, overdamped (Stokes) approximation: $v = u(x) + F(x)$,
-    with $F = \nabla (m . B)$ the point-dipole force [@abbott2020magnetic].
-    A proper translational mobility coefficient - set by
+    unit-mobility, overdamped (Stokes) approximation: `v = u(x) + F(x)`,
+    with `F = grad(m . B)` the point-dipole force [@abbott2020magnetic]. A
+    proper translational mobility coefficient - set by
     the particle radius and the fluid viscosity - is expected to enter the
     magnetic term once particle-scale properties join the configuration
     model more broadly; until then, this unit-mobility choice is exact
@@ -96,11 +162,11 @@ def _drift_velocity(
     - `field_fn`: Callable returning the magnetic field at given
       coordinates.
     - `position`: Tensor of shape `(1, n_dims)`, the particle's current
-      position, already on `flow_network`'s device (see
-      `integrate_trajectory`, which resolves this once for the whole
+      position, already on `flow_network`'s device and dtype (see
+      `integrate_trajectory`, which resolves both once for the whole
       trajectory rather than on every step).
     - `moment`: Tensor of shape `(1, n_dims)`, the particle's magnetic
-      moment, already on the same device as `position`.
+      moment, already on the same device and dtype as `position`.
     - `particle_radius`: Radius used for the Faxén correction to the flow
       term; `0.0` skips the correction (plain point-particle velocity).
 
@@ -172,6 +238,8 @@ def integrate_trajectory(
       strictly positive, if `time_span` is not increasing, if
       `particle_radius` is negative, or if `magnetic_moment` cannot be
       matched to each particle's coordinate dimensionality.
+    - `NotImplementedError`: If `field_fn` is not spatially uniform (see
+      `_assert_uniform_field`).
     """
     if not initial_states:
         raise ValueError("initial_states must contain at least one particle.")
@@ -183,25 +251,31 @@ def integrate_trajectory(
     if particle_radius < 0.0:
         raise ValueError(f"particle_radius must be non-negative; got {particle_radius!r}.")
 
-    # Resolve the network's device once, up front, and move every particle
-    # onto it: `flow_network(position)` requires `position` to already
-    # live where the network's parameters do, and re-deriving the device
-    # independently per step would both waste time and risk a mismatch if
-    # `flow_network` were ever moved mid-integration.
+    # Resolve the network's device and dtype once, up front, and move every
+    # particle onto both: `flow_network(position)` requires `position` to
+    # already match where the network's parameters live *and* what dtype
+    # they use, and re-deriving either independently per step would both
+    # waste time and risk a mismatch if `flow_network` were ever changed
+    # mid-integration.
     network_device = resolve_module_device(flow_network)
+    network_dtype = resolve_module_dtype(flow_network)
     step_size = (time_end - time_start) / n_steps
-    moment_tensor = torch.as_tensor(magnetic_moment, device=network_device)
+    moment_tensor = torch.as_tensor(magnetic_moment, device=network_device, dtype=network_dtype)
+
+    _assert_uniform_field(
+        field_fn, initial_states[0].position.to(device=network_device, dtype=network_dtype).unsqueeze(0)
+    )
 
     trajectories: list[list[ParticleState]] = []
     for particle_index, initial_state in enumerate(initial_states):
         n_dims = initial_state.position.shape[-1]
         moment = _select_moment(moment_tensor, particle_index, n_dims).to(
-            dtype=initial_state.position.dtype, device=network_device
+            dtype=network_dtype, device=network_device
         )
 
         state = ParticleState(
-            position=initial_state.position.to(network_device),
-            velocity=initial_state.velocity.to(network_device),
+            position=initial_state.position.to(device=network_device, dtype=network_dtype),
+            velocity=initial_state.velocity.to(device=network_device, dtype=network_dtype),
             time=initial_state.time,
         )
         history = [state]

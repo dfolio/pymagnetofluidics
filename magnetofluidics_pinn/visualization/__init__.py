@@ -9,9 +9,11 @@ global plotting state.
 from magnetofluidics_pinn.visualization.plotting import (
     plot_streamlines as plot_streamlines,
     plot_trajectories as plot_trajectories,
+    plot_training_history as plot_training_history,
 )
 
 __all__ = [
     "plot_streamlines",
     "plot_trajectories",
+    "plot_training_history",
 ]

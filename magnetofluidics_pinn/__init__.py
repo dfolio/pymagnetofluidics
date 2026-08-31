@@ -31,9 +31,10 @@ from magnetofluidics_pinn.config import (
     ParticleConfig as ParticleConfig,
     TrainingConfig as TrainingConfig,
 )
-from magnetofluidics_pinn.device_utils import  (
-     resolve_device as resolve_device,
-     resolve_module_device as resolve_module_device,
+from magnetofluidics_pinn.device_utils import (
+    resolve_device as resolve_device,
+    resolve_module_device as resolve_module_device,
+    resolve_module_dtype as resolve_module_dtype,
 )
 from magnetofluidics_pinn.geometry import (
     build_bifurcation_domain as build_bifurcation_domain,
@@ -52,12 +53,17 @@ from magnetofluidics_pinn.physics import (
 from magnetofluidics_pinn.sampling import (
     sample_collocation_points as sample_collocation_points,
 )
-# NEW: normalization utilities, required to keep solvers dimensionless while
+# Normalization utilities, required to keep solvers dimensionless while
 # accepting/reporting physical (SI) quantities at the package boundary.
 from magnetofluidics_pinn.scaling import (compute_scales as compute_scales,
                                           nondimensionalize_domain as nondimensionalize_domain,
+                                          nondimensionalize_particle as nondimensionalize_particle,
                                           redimensionalize_domain as redimensionalize_domain, Scales as Scales)
-from magnetofluidics_pinn.training import compose_loss as compose_loss, train as train
+from magnetofluidics_pinn.training import (compose_loss as compose_loss,
+                                           train as train,
+                                           LossHistory as LossHistory,
+                                           TrainingHistory as TrainingHistory,
+                                           )
 from magnetofluidics_pinn.trajectory import integrate_trajectory as integrate_trajectory
 from magnetofluidics_pinn.types import (
     CollocationPoints as CollocationPoints,
@@ -68,9 +74,10 @@ from magnetofluidics_pinn.types import (
 from magnetofluidics_pinn.visualization import (
     plot_streamlines as plot_streamlines,
     plot_trajectories as plot_trajectories,
+    plot_training_history as plot_training_history,
 )
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 __all__ = [
     "__version__",
@@ -108,17 +115,22 @@ __all__ = [
     # Training
     "compose_loss",
     "train",
+    "LossHistory",
+    "TrainingHistory",
     # Trajectory
     "integrate_trajectory",
     # Visualization
     "plot_streamlines",
     "plot_trajectories",
+    "plot_training_history",
     # Scaling
     "Scales",
     "compute_scales",
     "nondimensionalize_domain",
     "redimensionalize_domain",
+    "nondimensionalize_particle",
     # Device management
     "resolve_device",
     "resolve_module_device",
+    "resolve_module_dtype",
 ]

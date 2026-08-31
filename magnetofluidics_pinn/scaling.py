@@ -23,21 +23,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from magnetofluidics_pinn.config import FieldConfig, FluidConfig
+from magnetofluidics_pinn.config import FieldConfig, FluidConfig, ParticleConfig
 from magnetofluidics_pinn.types import Domain
 
 
 @dataclass(frozen=True)
 class Scales:
-    """Characteristic physical scales used to nondimensionalize the problem.
+    r"""Characteristic physical scales used to nondimensionalize the problem.
 
     Args:
     - `length`: Characteristic length, in `meter` (from
       `FluidConfig.reference_length`).
     - `velocity`: Characteristic velocity, in `meter-per-second` (from
       `FluidConfig.reference_velocity`).
-    - `time`: Characteristic time, in `second`, derived as `length /
-      velocity`.
+    - `time`: Characteristic time, in `second`, derived as
+      $\text{length} / \text{velocity}$.
     - `pressure`: Characteristic pressure, in `pascal`, derived from the
       viscous stress scale `dynamic_viscosity * velocity / length`, the
       natural pressure scale for Stokes flow.
@@ -236,3 +236,40 @@ def redimensionalize_magnetic_field(field_dimensionless: float, scales: Scales) 
     - The physical magnetic field magnitude, in `tesla`.
     """
     return field_dimensionless * scales.magnetic_field
+
+
+def nondimensionalize_particle(particle_config: ParticleConfig, scales: Scales) -> float:
+    r"""Convert a physical particle radius to the dimensionless value used elsewhere.
+
+    Args:
+    - `particle_config`: Physical particle configuration; only `radius` is
+      used here (see the note on `magnetic_moment` below).
+    - `scales`: Characteristic scales, as returned by
+      [`compute_scales`][magnetofluidics_pinn.scaling.compute_scales].
+
+    Returns:
+    - The dimensionless particle radius $a / L$ (with $L$ =
+      `scales.length`), suitable for
+      [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]'s
+      `particle_radius` argument and
+      [`physics.hydrodynamic_drag.faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity]'s
+      `particle_radius` argument.
+
+    Note:
+    - `particle_config.magnetic_moment` is *not* converted here, on
+      purpose. `dipole_force` computes $\mathbf{F} = \nabla(\mathbf{m}
+      \cdot \mathbf{B})$ and the current trajectory integrator adds that
+      force directly to velocity under an explicit unit-mobility
+      assumption (see
+      [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]).
+      A dimensionally consistent conversion for `magnetic_moment` requires
+      a translational mobility (from the particle radius and the fluid
+      viscosity) that is not yet part of this package's scaling model;
+      inventing one here would silently imply a level of physical
+      correctness the non-uniform-field path does not actually have.
+      `magnetic_moment` must currently be supplied directly, already in
+      whatever dimensionless units are consistent with that unit-mobility
+      assumption - exact only when the field is uniform, per
+      `trajectory.integrate_trajectory`'s docstring.
+    """
+    return particle_config.radius / scales.length

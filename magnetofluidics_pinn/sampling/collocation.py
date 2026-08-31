@@ -34,10 +34,9 @@ def boundary_face_sizes(n_boundary: int) -> tuple[int, int, int]:
     (`r = domain.radius`), the inlet cross-section (`z = 0`), and the outlet
     cross-section (`z = domain.length`). This helper is shared by
     [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points]
-    and by the training loop, which needs to know how
-    `CollocationPoints.boundary` is laid out (wall-points-first, then inlet
-    points, then outlet points) to apply the matching boundary condition to
-    each subset.
+    and by the training loop, which needs to know how `CollocationPoints.boundary`
+    is laid out (wall points first, then inlet points, then outlet points) in
+    order to apply the matching boundary condition to each subset.
 
     Args:
     - `n_boundary`: Total number of boundary collocation points to allocate.
@@ -60,7 +59,6 @@ def sample_collocation_points(
     random_seed: int,
     n_initial: int | None = None,
     device: str | torch.device | None = None,
-    dtype: torch.dtype | None = None,
 ) -> CollocationPoints:
     """Sample interior, boundary, and (optionally) initial points.
 
@@ -73,15 +71,13 @@ def sample_collocation_points(
       steady-state problems (e.g., Stokes flow).
     - `device`: Device the returned tensors are created on directly, e.g.
       `"cuda"`, `"cuda:0"`, or `"cpu"`; resolved automatically when `None`.
-      # CHANGED: tensors are now created directly on the resolved device
-      (auto-selecting CUDA when available, matching `build_mlp` and
-      `train`), rather than unconditionally on the CPU. This avoids a
-      CPU -> GPU copy every epoch when training on a CUDA device. Note
-      that a CPU generator and a CUDA generator seeded identically produce
-      *different* draws (they use different underlying RNG algorithms):
-      reproducibility is guaranteed per device type, not across device
-      types.
-    - `dtype`: Represents the data type of the returned tensors; resolved automatically when `None`.
+      Tensors are created directly on this device (auto-selecting CUDA
+      when available, matching `build_mlp` and `train`) rather than
+      unconditionally on the CPU, avoiding a CPU -> GPU copy every epoch
+      when training on a CUDA device. Note that a CPU generator and a CUDA
+      generator seeded identically produce *different* draws (they use
+      different underlying RNG algorithms): reproducibility is guaranteed
+      per device type, not across device types.
 
     Returns:
     - A [`CollocationPoints`][magnetofluidics_pinn.types.CollocationPoints]
@@ -114,42 +110,47 @@ def sample_collocation_points(
         )
 
     resolved_device = resolve_device(device)
-    target_dtype = dtype or torch.get_default_dtype()
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
 
-    # Interior points: uniform in (r, z), keeping a small clearance around
-    # the symmetry axis (see module docstring).
+    # Interior points: uniform in z, but *volume*-uniform in r rather than
+    # linearly uniform. Revolving an annulus at radius r around the axis
+    # gives it measure proportional to r dr, so drawing r linearly from
+    # Uniform(r_min, R) over-samples the region near the axis and
+    # under-samples the region near the wall relative to how much of the
+    # domain's actual volume each represents - exactly the wall-adjacent
+    # region where accuracy matters most for mass conservation (see
+    # `physics.fluid_residuals`). Inverting the CDF of the r dr measure,
+    # F(r) = (r^2 - r_min^2) / (R^2 - r_min^2), gives the correct draw:
+    # r = sqrt(r_min^2 + (R^2 - r_min^2) * xi), xi ~ Uniform(0, 1).
     r_min = domain.radius * _AXIS_CLEARANCE_FRACTION
-    interior_r = r_min + (domain.radius - r_min) * torch.rand(
-        n_interior, 1, generator=generator, device=resolved_device, dtype=target_dtype
-    )
-    interior_z = domain.length * torch.rand(n_interior, 1, generator=generator, device=resolved_device, dtype=target_dtype)
+    xi = torch.rand(n_interior, 1, generator=generator, device=resolved_device)
+    interior_r = torch.sqrt(r_min**2 + (domain.radius**2 - r_min**2) * xi)
+    interior_z = domain.length * torch.rand(n_interior, 1, generator=generator, device=resolved_device)
     interior = torch.cat([interior_r, interior_z], dim=1)
 
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
 
     wall_points = torch.cat(
         [
-            torch.full((n_wall, 1), domain.radius, device=resolved_device, dtype=target_dtype),
-            domain.length * torch.rand(n_wall, 1, generator=generator, device=resolved_device, dtype=target_dtype),
+            torch.full((n_wall, 1), domain.radius, device=resolved_device),
+            domain.length * torch.rand(n_wall, 1, generator=generator, device=resolved_device),
         ],
         dim=1,
     )
     inlet_points = torch.cat(
         [
-            domain.radius * torch.rand(n_inlet, 1, generator=generator, device=resolved_device, dtype=target_dtype),
-            torch.zeros(n_inlet, 1, device=resolved_device, dtype=target_dtype),
+            domain.radius * torch.rand(n_inlet, 1, generator=generator, device=resolved_device),
+            torch.zeros(n_inlet, 1, device=resolved_device),
         ],
         dim=1,
     )
     outlet_points = torch.cat(
         [
-            domain.radius * torch.rand(n_outlet, 1, generator=generator, device=resolved_device, dtype=target_dtype),
-            torch.full((n_outlet, 1), domain.length, device=resolved_device, dtype=target_dtype),
+            domain.radius * torch.rand(n_outlet, 1, generator=generator, device=resolved_device),
+            torch.full((n_outlet, 1), domain.length, device=resolved_device),
         ],
         dim=1,
     )
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
 
     return CollocationPoints(interior=interior, boundary=boundary, initial=None)
-

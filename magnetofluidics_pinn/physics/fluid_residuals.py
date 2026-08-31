@@ -7,8 +7,8 @@ means the network's output satisfies the governing equations exactly.
 
 Phase 1 targets the axisymmetric, dimensionless Stokes (creeping-flow)
 equations in cylindrical coordinates `(r, z)`, with velocity components
-`(u_r, u_z)` and pressure `p`; see e.g. [@happel1983low] or  [@leal2007advanced], "Advanced Transport
-Phenomena", for the classical derivation. With the viscous pressure scale
+`(u_r, u_z)` and pressure `p`; see e.g. [@happel1983low] or
+[@leal2007advanced] for the classical derivation. With the viscous pressure scale
 used by `scaling.compute_scales`, the dimensionless viscosity is exactly 1,
 so no viscosity factor appears below.
 """
@@ -45,14 +45,15 @@ def _gradient(output: torch.Tensor, coordinates: torch.Tensor) -> torch.Tensor:
 
 
 def stokes_residual(
-        network: Callable[[torch.Tensor], torch.Tensor],
-        coordinates: torch.Tensor,
-        fluid_config: FluidConfig,
+    network: Callable[[torch.Tensor], torch.Tensor],
+    coordinates: torch.Tensor,
+    fluid_config: FluidConfig,
 ) -> torch.Tensor:
-    """Evaluate the incompressible Stokes-flow residual.
+    r"""Evaluate the incompressible Stokes-flow residual.
 
-    Enforces continuity, `div(u) = 0`, and the steady momentum balance,
-    `-grad(p) + laplacian(u) = 0`, in dimensionless form, at each coordinate.
+    Enforces continuity, $\nabla \cdot \mathbf{u} = 0$, and the steady
+    momentum balance, $-\nabla p + \nabla^2 \mathbf{u} = 0$, in
+    dimensionless form, at each coordinate.
 
     Args:
     - `network`: Callable mapping coordinates of shape `(n_points, n_dims)`
@@ -95,7 +96,7 @@ def stokes_residual(
             "stokes_residual received coordinates on or across the symmetry "
             "axis (r <= 0); exclude the axis when sampling interior points."
         )
-    
+
     output = network(coordinates)
     if output.shape[1] != 3:
         raise ValueError(
@@ -104,48 +105,48 @@ def stokes_residual(
     velocity_r = output[:, 0:1]
     velocity_z = output[:, 1:2]
     pressure = output[:, 2:3]
-    
+
     grad_velocity_r = _gradient(velocity_r, coordinates)
     grad_velocity_z = _gradient(velocity_z, coordinates)
     grad_pressure = _gradient(pressure, coordinates)
-    
+
     d_velocity_r_dr = grad_velocity_r[:, 0:1]
     d_velocity_r_dz = grad_velocity_r[:, 1:2]
     d_velocity_z_dr = grad_velocity_z[:, 0:1]
     d_velocity_z_dz = grad_velocity_z[:, 1:2]
     dp_dr = grad_pressure[:, 0:1]
     dp_dz = grad_pressure[:, 1:2]
-    
+
     d2_velocity_r_dr2 = _gradient(d_velocity_r_dr, coordinates)[:, 0:1]
     d2_velocity_r_dz2 = _gradient(d_velocity_r_dz, coordinates)[:, 1:2]
     d2_velocity_z_dr2 = _gradient(d_velocity_z_dr, coordinates)[:, 0:1]
     d2_velocity_z_dz2 = _gradient(d_velocity_z_dz, coordinates)[:, 1:2]
-    
+
     # Axisymmetric continuity: (1/r) d(r u_r)/dr + d(u_z)/dz
     #                         = d(u_r)/dr + u_r/r + d(u_z)/dz.
     continuity_residual = d_velocity_r_dr + velocity_r / radius + d_velocity_z_dz
-    
+
     # r-momentum: the Laplacian of an axisymmetric vector field's radial
     # component carries an extra -u_r/r**2 term relative to a scalar
     # Laplacian.
     momentum_r_residual = (
-            -dp_dr
-            + d2_velocity_r_dr2
-            + d_velocity_r_dr / radius
-            - velocity_r / radius ** 2
-            + d2_velocity_r_dz2
+        -dp_dr
+        + d2_velocity_r_dr2
+        + d_velocity_r_dr / radius
+        - velocity_r / radius**2
+        + d2_velocity_r_dz2
     )
-    
+
     # z-momentum: the axial component behaves like a scalar Laplacian.
     momentum_z_residual = -dp_dz + d2_velocity_z_dr2 + d_velocity_z_dr / radius + d2_velocity_z_dz2
-    
+
     return torch.cat([momentum_r_residual, momentum_z_residual, continuity_residual], dim=1)
 
 
 def navier_stokes_residual(
-        network: Callable[[torch.Tensor], torch.Tensor],
-        coordinates: torch.Tensor,
-        fluid_config: FluidConfig,
+    network: Callable[[torch.Tensor], torch.Tensor],
+    coordinates: torch.Tensor,
+    fluid_config: FluidConfig,
 ) -> torch.Tensor:
     """Evaluate the incompressible, unsteady Navier-Stokes residual.
 

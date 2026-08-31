@@ -3,16 +3,27 @@
 Every stage of the pipeline (geometry, sampling, network, training) is
 parameterized by one of the frozen dataclasses defined here. Passing
 configuration explicitly, rather than through global state, keeps every
-downstream function pure and independently testable.
+downstream function pure and independently testable
+
+.Every config below validates itself in `__post_init__`: constructing an
+invalid one raises immediately, rather than surfacing as a confusing
+failure much later (e.g., inside `scaling.compute_scales` or a training
+loop many collocation points and epochs downstream of the actual mistake).
 """
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
-import torch
 from magnetofluidics_pinn.device_utils import resolve_device
+
+# Numerical tolerance for "is this vector a unit vector" checks; loose
+# enough to tolerate float rounding, tight enough to catch a genuinely
+# mis-specified direction. Matches the tolerance used at the point of use
+# in `boundary_conditions.magnetic_field_bc.uniform_field`.
+_UNIT_NORM_TOLERANCE = 1.0e-6
 
 
 @dataclass(frozen=True)
@@ -34,12 +45,32 @@ class DomainConfig:
       hundred micrometers, so around `1.0e-4`).
     - `branch_angle`: Branch half-angle in radians, required only when
       `kind == "bifurcation"`.
+      
+    Raises:
+    - `ValueError`: If `length` or `radius` is not finite and strictly
+      positive, if `kind == "bifurcation"` and `branch_angle` is not a
+      finite number, or if `kind == "channel"` and `branch_angle` is not
+      `None`.
     """
-
+    
     kind: Literal["channel", "bifurcation"] = "channel"
     length: float = 3.0e-3  # m
     radius: float = 7.5e-4  # m
     branch_angle: float | None = None
+    
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.length) or self.length <= 0.0:
+            raise ValueError(f"length must be finite and strictly positive; got {self.length!r}.")
+        if not math.isfinite(self.radius) or self.radius <= 0.0:
+            raise ValueError(f"radius must be finite and strictly positive; got {self.radius!r}.")
+        if self.kind == "bifurcation":
+            if self.branch_angle is None or not math.isfinite(self.branch_angle):
+                raise ValueError("kind='bifurcation' requires a finite branch_angle.")
+        elif self.branch_angle is not None:
+            raise ValueError(
+                "branch_angle is only meaningful when kind='bifurcation'; "
+                f"got kind={self.kind!r} with branch_angle={self.branch_angle!r}."
+            )
 
 
 @dataclass(frozen=True)
@@ -68,8 +99,12 @@ class FluidConfig:
     - `reference_length`: Characteristic length scale, in `meter`, used to
       nondimensionalize every spatial coordinate. Defaults to the vessel
       radius order of magnitude (a few hundred micrometers).
+      
+    Raises:
+    - `ValueError`: If `dynamic_viscosity`, `density`, `reference_velocity`,
+      or `reference_length` is not finite and strictly positive.
     """
-
+    
     regime: Literal["stokes", "navier_stokes"] = "stokes"
     dynamic_viscosity: float = 1.0e-3
     density: float = 1.0e3
@@ -77,14 +112,11 @@ class FluidConfig:
     reference_length: float = DomainConfig.radius
     
     def __post_init__(self) -> None:
-        if self.dynamic_viscosity <= 0.0:
-            raise ValueError("dynamic_viscosity must be strictly positive.")
-        if self.reference_velocity <= 0.0:
-            raise ValueError("reference_velocity must be strictly positive.")
-        if self.reference_length <= 0.0:
-            raise ValueError("reference_length must be strictly positive.")
-        if self.regime == "navier_stokes" and self.density <= 0.0:
-            raise ValueError("density must be strictly positive for Navier-Stokes flow.")
+        for field_name in ("dynamic_viscosity", "density", "reference_velocity", "reference_length"):
+            value = getattr(self, field_name)
+            if not math.isfinite(value) or value <= 0.0:
+                raise ValueError(f"{field_name} must be finite and strictly positive; got {value!r}.")
+
 
 @dataclass(frozen=True)
 class FieldConfig:
@@ -102,23 +134,87 @@ class FieldConfig:
     - `orientation`: Unit vector giving the field direction, used when
       `source == "uniform"`.
     - `time_dependent`: Whether the field varies with time.
+    
+    Raises:
+    - `ValueError`: If `magnitude` is not finite and strictly positive, or
+      if `orientation` is not (approximately) a unit vector.
+      
+    TODO: manage 2D/3D fields
     """
-
+    
     source: Literal["uniform", "gradient", "biot_savart"] = "uniform"
     magnitude: float = 1.0e-2
     orientation: tuple[float, float] = (1.0, 0.0)
     time_dependent: bool = False
-
-
-# Add:
-@dataclass(frozen=True)
-class ParticleConfig:
-    radius: float
-    magnetic_moment: tuple[float, float]
     
     def __post_init__(self) -> None:
-        if self.radius <= 0.0:
-            raise ValueError("particle radius must be strictly positive.")
+        if not math.isfinite(self.magnitude) or self.magnitude <= 0.0:
+            raise ValueError(f"magnitude must be finite and strictly positive; got {self.magnitude!r}.")
+        if not all(math.isfinite(component) for component in self.orientation):
+            raise ValueError(f"orientation components must be finite; got {self.orientation!r}.")
+        orientation_norm = math.hypot(*self.orientation)
+        if abs(orientation_norm - 1.0) > _UNIT_NORM_TOLERANCE:
+            raise ValueError(
+                f"orientation must be a unit vector; got a norm of {orientation_norm:.6g}."
+            )
+
+
+@dataclass(frozen=True)
+class ParticleConfig:
+    """Physical properties of the single magnetic microrobot tracked in Phase 1.
+
+    All fields follow the MKSA/SI convention, matching `DomainConfig` and
+    `FluidConfig`. Neither is consumed directly by
+    [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]:
+    call
+    [`scaling.nondimensionalize_particle`][magnetofluidics_pinn.scaling.nondimensionalize_particle]
+    first to obtain the dimensionless radius that function's own
+    `particle_radius` argument expects — see that function's docstring for
+    why `magnetic_moment` is deliberately *not* handled the same way yet.
+
+    Args:
+    - `kind`: The shape of the particle, either "spherical", "swarms", or "cylinder".
+    - `radius`: Particle radius, in meter (e.g., a few micrometers, so
+      around `1.0e-6` to `1.0e-5`). Used only for the Faxén-law finite-size
+      correction to the ambient flow velocity
+      ([`physics.hydrodynamic_drag`][magnetofluidics_pinn.physics.hydrodynamic_drag]);
+      `0.0` recovers the exact point-particle limit.
+    - `magnetic_moment`: Magnetic dipole moment vector `(m_r, m_z)`, in
+      ampere-square-meter (`A m^2`), giving both the particle's magnetic
+      "strength" and its (fixed, for Phase 1) orientation. Passed to
+      [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]
+      as its `magnetic_moment` argument only once already expressed in the
+      dimensionless units that function's docstring describes — this
+      config field records the *physical* moment for bookkeeping, but does
+      not itself perform that conversion (see the caveat above).
+    - `position`: Initial position of the particle, in meter (e.g., `(0.0, 0.0)` for the center of the domain).
+
+    Raises:
+    - `ValueError`: If `radius` is not finite and non-negative, if either
+      component of `magnetic_moment` is not finite, or if
+      `magnetic_moment` is the zero vector.
+      
+    Todo: manage 2D/3D position
+    """
+    
+    kind: Literal["spherical", "swarms", "cylinder"] = "spherical"
+    radius: float = 0.0
+    length: float = 0.0
+    number: int = 1
+    magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)
+    position: tuple[float, float] = (0.0, 0.0)
+    
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.radius) or self.radius < 0.0:
+            raise ValueError(f"radius must be finite and non-negative; got {self.radius!r}.")
+        if not all(math.isfinite(component) for component in self.magnetic_moment):
+            raise ValueError(f"magnetic_moment components must be finite; got {self.magnetic_moment!r}.")
+        if math.hypot(*self.magnetic_moment) <= 0.0:
+            raise ValueError("magnetic_moment must be non-zero.")
+        if self.kind == "swarms" and self.number <= 0:
+            raise ValueError(f"number of particles must be positive for swarms; got {self.number!r}.")
+        if self.kind == "cylinder" and self.length <= 0:
+            raise ValueError(f"length of cylinder must be positive; got {self.length!r}.")
 
 
 @dataclass(frozen=True)
@@ -127,9 +223,9 @@ class TrainingConfig:
 
     The default recipe is Adam (for global exploration) followed by L-BFGS
     (for local refinement), matching the original PINN training procedure
-    (Raissi, Perdikaris, & Karniadakis, 2019). # NEW: L-BFGS refinement and
-    gradient clipping were added after a manufactured-solution audit traced
-    Phase 1's convergence gap to optimization difficulty, not a formulation
+    [@raissi2019physics]. L-BFGS refinement and gradient clipping were
+    added after a manufactured-solution audit traced Phase 1's convergence
+    gap to optimization difficulty, not a formulation
     error (`stokes_residual` and the boundary-condition targets are exact
     for the analytical Poiseuille solution) — Adam alone plateaus with the
     PDE residual still orders of magnitude too large; adding an L-BFGS
@@ -166,7 +262,7 @@ class TrainingConfig:
     - `lbfgs_iterations_per_round`: `max_iter` passed to `torch.optim.LBFGS`
       for each round.
     """
-
+    
     n_interior_points: int = 10_000
     n_boundary_points: int = 2_000
     n_axis_points: int = 512
@@ -180,7 +276,7 @@ class TrainingConfig:
     lbfgs_n_boundary_points: int = 450
     lbfgs_rounds: int = 4
     lbfgs_iterations_per_round: int = 500
-
+    
     def __post_init__(self) -> None:
         """Validate configuration parameters and resolve target device."""
         if self.n_interior_points <= 0 or self.n_boundary_points <= 0:

@@ -21,13 +21,15 @@ Concretely:
   exactly once, at the top of the function, and place every tensor they
   subsequently create on that single resolved device.
 
-This avoids two failure modes that otherwise recur throughout a project
-like this one: (1) duplicated, slightly-inconsistent
+This avoids failure modes that otherwise recur throughout a project like
+this one: (1) duplicated, slightly-inconsistent
 `device or ("cuda" if torch.cuda.is_available() else "cpu")` boilerplate
-scattered across modules, and (2) silent cross-device tensor mismatches
-(e.g., a trained network living on `cuda:0` being called with CPU-resident
-coordinates), which `torch` reports only at the point of failure, often far
-from the actual root cause.
+scattered across modules, (2) silent cross-device tensor mismatches (e.g.,
+a trained network living on `cuda:0` being called with CPU-resident
+coordinates), and (3) silent dtype mismatches (e.g., a network moved to
+`torch.float64` being called with the default-`float32` tensors a fresh
+`torch.linspace(...)` or `ParticleState` produces) - all of which `torch`
+reports only at the point of failure, often far from the actual root cause.
 """
 
 from __future__ import annotations
@@ -104,4 +106,32 @@ def resolve_module_device(module: nn.Module) -> torch.device:
     except StopIteration as error:
         raise ValueError(
             "module has no parameters; its device cannot be inferred."
+        ) from error
+
+def resolve_module_dtype(module: nn.Module) -> torch.dtype:
+    """Infer the floating-point dtype a module's parameters currently use.
+
+    Used alongside
+    [`resolve_module_device`][magnetofluidics_pinn.device_utils.resolve_module_device]
+    whenever a function needs to feed a new tensor into an already-
+    constructed module: matching only the device is not enough if that
+    module was ever moved to a non-default dtype (e.g. via `.double()`),
+    since `torch` raises just as readily on a dtype mismatch as on a
+    device mismatch.
+
+    Args:
+    - `module`: Any `torch.nn.Module` instance.
+
+    Returns:
+    - The `torch.dtype` of the module's first parameter.
+
+    Raises:
+    - `ValueError`: If `module` has no parameters, so its dtype cannot be
+      inferred.
+    """
+    try:
+        return next(module.parameters()).dtype
+    except StopIteration as error:
+        raise ValueError(
+            "module has no parameters; its dtype cannot be inferred."
         ) from error
