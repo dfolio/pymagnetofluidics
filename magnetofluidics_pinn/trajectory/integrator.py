@@ -51,13 +51,16 @@ from __future__ import annotations
 
 from typing import Callable
 
+import numpy as np
 import torch
 from torch import nn
+from scipy.integrate import solve_ivp
 
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.physics.hydrodynamic_drag import faxen_corrected_velocity
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force
-from magnetofluidics_pinn.types import FieldSample, ParticleState
+from magnetofluidics_pinn.types import FieldSample, ParticleState, Domain
+from magnetofluidics_pinn.config import DomainConfig, ParticleConfig
 
 # Offset (in every coordinate) used to probe whether `field_fn` is actually
 # spatially uniform; see `_assert_uniform_field`. Small enough to stay a
@@ -142,6 +145,7 @@ def _drift_velocity(
     position: torch.Tensor,
     moment: torch.Tensor,
     particle_radius: float,
+    mobility_tensor: torch.Tensor,
 ) -> torch.Tensor:
     """Evaluate the instantaneous drift velocity of a tracer particle.
 
@@ -186,128 +190,202 @@ def _drift_velocity(
         flow_velocity = flow_output[:, :n_dims]
 
     position_for_force = position.clone().requires_grad_(True)
-    magnetic_drift = dipole_force(field_fn, position_for_force, moment).detach()
+    magnetic_force  = dipole_force(field_fn, position_for_force, moment).detach()
+    magnetic_drift = torch.matmul(magnetic_force, mobility_tensor.T)
 
     return flow_velocity + magnetic_drift
+
+
+def _enforce_surface_boundary_constraint(
+        position: torch.Tensor,
+        particle_radius: float,
+        channel_radius: float
+) -> tuple[torch.Tensor, bool]:
+    """Structurally confines the centre of the particle within the domain.
+
+    Prevents the surface of the particle from penetrating the outer wall (`r = R`).
+    """
+    r_coord = position[0]
+    z_coord = position[1]
+    
+    # Limite physique pour le centre d'une forme sphérique : R_eff = R - a
+    effective_radius = channel_radius - particle_radius
+    
+    if r_coord >= effective_radius:
+        # Collision de surface détectée : projection sur la limite de contact
+        constrained_position = torch.tensor([effective_radius, z_coord], device=position.device, dtype=position.dtype)
+        return constrained_position, True
+    
+    return position, False
 
 
 def integrate_trajectory(
     flow_network: nn.Module,
     field_fn: Callable[[torch.Tensor], FieldSample],
+    domain_config: DomainConfig,
+    particle_config: ParticleConfig,
     initial_states: list[ParticleState],
-    magnetic_moment: torch.Tensor,
+    mobility_tensor: torch.Tensor,
     time_span: tuple[float, float],
-    n_steps: int,
-    particle_radius: float = 0.0,
+    r_tol: float = 1.0e-6,
+    a_tol: float = 1.0e-8,
 ) -> list[list[ParticleState]]:
-    """Integrate the trajectories of one or several magnetic particles.
+    """Integrate the trajectories of one or several magnetic particles using SciPy's adaptive IVP solvers.
 
     Args:
-    - `flow_network`: Trained network mapping coordinates to velocity and
-      pressure. Every computation happens on this network's device (see
-      [`device_utils.resolve_module_device`][magnetofluidics_pinn.device_utils.resolve_module_device]);
-      `initial_states` and `magnetic_moment` do not need to already be on
-      that device — they are moved there automatically — so a network
-      trained on `"cuda"` can be integrated directly from, e.g., plain CPU
-      tensors constructed with `torch.tensor(...)`.
-    - `field_fn`: Callable returning a
-      [`FieldSample`][magnetofluidics_pinn.types.FieldSample] for a batch of
-      coordinates.
-    - `initial_states`: One [`ParticleState`][magnetofluidics_pinn.types.ParticleState]
-      per particle, at the initial time.
-    - `magnetic_moment`: Tensor of shape `(n_particles, n_dims)` or
-      `(n_dims,)` with each particle's magnetic moment.
-    - `time_span`: Tuple `(t_start, t_end)` bounding the integration.
-    - `n_steps`: Number of integration steps.
-    - `particle_radius`: Dimensionless particle radius `a`, used for the
-      Faxén-law correction (see
-      [`physics.hydrodynamic_drag.faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity])
-      to the flow velocity the particle is advected by. `0.0` (the default)
-      recovers the exact point-particle limit. Only accurate for `a` small
-      relative to the channel radius and to the flow's local radius of
-      curvature — see this module's docstring for what a non-small particle
-      radius would actually require.
+        - `flow_network`: Trained network mapping coordinates to velocity and pressure.
+        - `field_fn`: Callable returning a FieldSample for a batch of coordinates.
+        - `domain_config`: Physical configuration setting vessel length and radius scales.
+        - `particle_config`: Particle configuration containing shape and surface boundary limits.
+        - `initial_states`: List of initial ParticleState structures, one per particle.
+        - `mobility_tensor`: Tensor of shape `(n_particles, n_dims, n_dims)` for transport coupling.
+        - `time_span`: Tuple `(t_start, t_end)` bounding the integration interval.
+        - `r_tol`: Relative error tolerance passed to the adaptive numerical solver.
+        - `a_tol`: Absolute error tolerance passed to the adaptive numerical solver.
 
     Returns:
-    - A list of per-particle trajectories, each a list of
-      [`ParticleState`][magnetofluidics_pinn.types.ParticleState] instances
-      ordered by increasing time and living on `flow_network`'s device.
+        - A list of per-particle trajectories, each containing a sequence of ParticleState instances
+          ordered by increasing time and residing on the flow network's operational device.
 
     Raises:
-    - `ValueError`: If `initial_states` is empty, if `n_steps` is not
-      strictly positive, if `time_span` is not increasing, if
-      `particle_radius` is negative, or if `magnetic_moment` cannot be
-      matched to each particle's coordinate dimensionality.
-    - `NotImplementedError`: If `field_fn` is not spatially uniform (see
-      `_assert_uniform_field`).
+        - `ValueError`: If `initial_states` is empty or if the `time_span` interval bounds are invalid.
+        - `NotImplementedError`: If `field_fn` is not spatially uniform (see `_assert_uniform_field`).
     """
     if not initial_states:
         raise ValueError("initial_states must contain at least one particle.")
-    if n_steps <= 0:
-        raise ValueError("n_steps must be strictly positive.")
+    # if n_steps <= 0:
+    #     raise ValueError("n_steps must be strictly positive.")
     time_start, time_end = time_span
     if time_end <= time_start:
         raise ValueError(f"time_span must satisfy t_end > t_start; got {time_span!r}.")
-    if particle_radius < 0.0:
-        raise ValueError(f"particle_radius must be non-negative; got {particle_radius!r}.")
-
-    # Resolve the network's device and dtype once, up front, and move every
-    # particle onto both: `flow_network(position)` requires `position` to
-    # already match where the network's parameters live *and* what dtype
-    # they use, and re-deriving either independently per step would both
-    # waste time and risk a mismatch if `flow_network` were ever changed
-    # mid-integration.
+    
+    # Resolve execution context properties once up-front to eliminate device shifting overhead
     network_device = resolve_module_device(flow_network)
     network_dtype = resolve_module_dtype(flow_network)
-    step_size = (time_end - time_start) / n_steps
-    moment_tensor = torch.as_tensor(magnetic_moment, device=network_device, dtype=network_dtype)
-
+    
+    # Compute non-dimensionalized surface and domain safety bounds
+    r_max_particle = particle_config.max_surface_extension / domain_config.radius
+    channel_radius_nd = 1.0
+    effective_wall_limit = channel_radius_nd - r_max_particle
+    
+    a_nd = particle_config.radius / domain_config.radius
+    moment_tensor = torch.as_tensor(particle_config.magnetic_moment, device=network_device,
+                                    dtype=network_dtype).unsqueeze(0)
+    
+    # Enforce field uniformity checks prior to launching structural solvers
     _assert_uniform_field(
         field_fn, initial_states[0].position.to(device=network_device, dtype=network_dtype).unsqueeze(0)
     )
-
+    
+    def make_ode_system(p_index: int) -> Callable[[float, np.ndarray], np.ndarray]:
+        """Closure factory tracking the structural parameters of an individual particle index."""
+        # Isolate the specific particle's mobility tensor slice and move it onto the active device
+        current_mobility = mobility_tensor[p_index].to(device=network_device, dtype=network_dtype)
+        
+        def ode_system(t: float, y: np.ndarray) -> np.ndarray:
+            pos_tensor = torch.tensor(y, device=network_device, dtype=network_dtype).unsqueeze(0)
+            
+            # 1. Hydrodynamic flow advection contribution (with optional Faxen Laplacian correction)
+            if a_nd > 0.0:
+                pos_flow = pos_tensor.clone().requires_grad_(True)
+                u_flow = faxen_corrected_velocity(flow_network, pos_flow, a_nd).detach()
+            else:
+                with torch.no_grad():
+                    u_flow = flow_network(pos_tensor)[:, :2]
+            
+            # 2. Magnetic forcing contribution mapped through the adimensionless mobility tensor
+            pos_force = pos_tensor.clone().requires_grad_(True)
+            f_mag = dipole_force(field_fn, pos_force, moment_tensor).detach()
+            u_mag = torch.matmul(f_mag, current_mobility.T)
+            
+            # Reduce contributions and unpack vector into standard NumPy format
+            v_drift = (u_flow + u_mag).squeeze(0).cpu().numpy()
+            return v_drift
+        
+        return ode_system
+    
+    def wall_collision_event(t: float, y: np.ndarray) -> float:
+        """Détecte l'impact de la surface de la particule contre la paroi du canal."""
+        # Renvoie 0 lorsque la surface externe touche la paroi
+        return effective_wall_limit - y[0]
+    
+    wall_collision_event.terminal = True  # Stop the integration immediately upon impact
+    wall_collision_event.direction = -1   # Detection only when approaching the wall
+    
     trajectories: list[list[ParticleState]] = []
-    for particle_index, initial_state in enumerate(initial_states):
-        n_dims = initial_state.position.shape[-1]
-        moment = _select_moment(moment_tensor, particle_index, n_dims).to(
-            dtype=network_dtype, device=network_device
+    for particle_index, particle_state in enumerate(initial_states):
+        y0 = np.array(particle_state.position, dtype=np.float64)
+        active_ode = make_ode_system(particle_index)
+        
+        # Execute SciPy's adaptive fifth-order Runge-Kutta Cash-Karp variant (RK45)
+        sol = solve_ivp(
+            fun=active_ode,
+            t_span=time_span,
+            y0=y0,
+            method="RK45",
+            events=wall_collision_event,
+            rtol=r_tol,
+            atol=a_tol
         )
-
-        state = ParticleState(
-            position=initial_state.position.to(device=network_device, dtype=network_dtype),
-            velocity=initial_state.velocity.to(device=network_device, dtype=network_dtype),
-            time=initial_state.time,
-        )
-        history = [state]
-        for _ in range(n_steps):
-            position = state.position.unsqueeze(0)
-
-            # Fourth-order Runge-Kutta integration of dx/dt = v_drift(x): a
-            # standard, fixed-step choice when derivative evaluations
-            # (a network forward pass plus a small autograd call) are
-            # comparatively cheap.
-            k1 = _drift_velocity(flow_network, field_fn, position, moment, particle_radius)
-            k2 = _drift_velocity(
-                flow_network, field_fn, position + 0.5 * step_size * k1, moment, particle_radius
+        
+        history: list[ParticleState] = []
+        for i in range(len(sol.t)):
+            pos_np = sol.y[:, i]
+            t_val = sol.t[i]
+            v_np = active_ode(t_val, pos_np)
+            
+            state = ParticleState(
+                position=torch.tensor(pos_np, device=network_device, dtype=network_dtype),
+                velocity=torch.tensor(v_np, device=network_device, dtype=network_dtype),
+                time=t_val
             )
-            k3 = _drift_velocity(
-                flow_network, field_fn, position + 0.5 * step_size * k2, moment, particle_radius
-            )
-            k4 = _drift_velocity(
-                flow_network, field_fn, position + step_size * k3, moment, particle_radius
-            )
-
-            next_position = (
-                position + (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
-            ).squeeze(0)
-            next_time = state.time + step_size
-            next_velocity = _drift_velocity(
-                flow_network, field_fn, next_position.unsqueeze(0), moment, particle_radius
-            ).squeeze(0)
-
-            state = ParticleState(position=next_position, velocity=next_velocity, time=next_time)
             history.append(state)
-
+        
         trajectories.append(history)
+    
+    return trajectories
+        
+    # for particle_index, initial_state in enumerate(initial_states):
+        # n_dims = initial_state.position.shape[-1]
+        # moment = _select_moment(moment_tensor, particle_index, n_dims).to(
+        #     dtype=network_dtype, device=network_device
+        # )
+        #
+        # state = ParticleState(
+        #     position=initial_state.position.to(device=network_device, dtype=network_dtype),
+        #     velocity=initial_state.velocity.to(device=network_device, dtype=network_dtype),
+        #     time=initial_state.time,
+        # )
+        # history = [state]
+        # for _ in range(n_steps):
+        #     position = state.position.unsqueeze(0)
+        #
+        #     # Fourth-order Runge-Kutta integration of dx/dt = v_drift(x): a
+        #     # standard, fixed-step choice when derivative evaluations
+        #     # (a network forward pass plus a small autograd call) are
+        #     # comparatively cheap.
+        #     k1 = _drift_velocity(flow_network, field_fn, position, moment, particle_radius)
+        #     k2 = _drift_velocity(
+        #         flow_network, field_fn, position + 0.5 * step_size * k1, moment, particle_radius
+        #     )
+        #     k3 = _drift_velocity(
+        #         flow_network, field_fn, position + 0.5 * step_size * k2, moment, particle_radius
+        #     )
+        #     k4 = _drift_velocity(
+        #         flow_network, field_fn, position + step_size * k3, moment, particle_radius
+        #     )
+        #
+        #     next_position = (
+        #         position + (step_size / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        #     ).squeeze(0)
+        #     next_time = state.time + step_size
+        #     next_velocity = _drift_velocity(
+        #         flow_network, field_fn, next_position.unsqueeze(0), moment, particle_radius
+        #     ).squeeze(0)
+        #
+        #     state = ParticleState(position=next_position, velocity=next_velocity, time=next_time)
+        #     history.append(state)
+
+        # trajectories.append(history)
 
     return trajectories

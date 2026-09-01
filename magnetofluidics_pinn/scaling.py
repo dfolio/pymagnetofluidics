@@ -22,6 +22,8 @@ randomness, no I/O, no side effects.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import numpy as np
+import torch
 
 from magnetofluidics_pinn.config import FieldConfig, FluidConfig, ParticleConfig
 from magnetofluidics_pinn.types import Domain
@@ -273,3 +275,38 @@ def nondimensionalize_particle(particle_config: ParticleConfig, scales: Scales) 
       `trajectory.integrate_trajectory`'s docstring.
     """
     return particle_config.radius / scales.length
+
+
+def compute_mobility_scale(fluid_config: FluidConfig) -> float:
+    """Calculates the characteristic hydrodynamic mobility scale (SI).
+
+    $$M_{ref} = 1 / (6 * \pi * \mu * L_{ref})$$
+    """
+    return 1.0 / (6.0 * np.pi * fluid_config.dynamic_viscosity * fluid_config.reference_length)
+
+
+def nondimensionalize_mobility(particle_config: ParticleConfig, fluid_config: FluidConfig,
+                               scales: Scales) -> torch.Tensor:
+    """Generates the dimensionless mobility tensor based on the particle’s shape.
+
+    Takes the surface configuration/shape into account to construct M*.
+    For a sphere:  $M^* = diag(1/a^*, 1/a^*)$
+    """
+    a_nd = particle_config.radius / scales.length
+    kind = getattr(particle_config, "kind", "spherical")
+    
+    if kind in ["sphere", "spherical"]:
+        # Adimensional isotropic Stroke mobility
+        mobility_scalar = 1.0 / a_nd
+        return torch.diag(torch.tensor([mobility_scalar, mobility_scalar]))
+    
+    # elif kind == "spheroid":
+        # aspect_ratio = particle_config.aspect_ratio  # ex: longueur / diamètre
+        # Calculation of parallel and perpendicular drag coefficients
+        # S_parallel, S_perpendicular = compute_oberbeck_factors(aspect_ratio)
+        # M_parallel = 1.0 / (a_nd * S_parallel)
+        # M_perp = 1.0 / (a_nd * S_perpendicular)
+        # return torch.diag(torch.tensor([M_perp, M_parallel])) # Aligné sur le repère local
+        pass
+    
+    raise NotImplementedError(f"The '{kind}' shape type is not yet supported.")

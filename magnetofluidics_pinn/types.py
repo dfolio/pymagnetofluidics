@@ -102,7 +102,7 @@ class ParticleState:
     - `velocity`: Tensor of shape `(n_dims,)` giving the particle velocity.
     - `time`: Scalar simulation time associated with this state.
     """
-
+    
     position: torch.Tensor
     velocity: torch.Tensor
     time: float

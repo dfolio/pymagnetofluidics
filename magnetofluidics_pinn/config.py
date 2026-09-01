@@ -173,7 +173,8 @@ class ParticleConfig:
     why `magnetic_moment` is deliberately *not* handled the same way yet.
 
     Args:
-    - `kind`: The shape of the particle, either "spherical", "swarms", or "cylinder".
+    - `kind`: The shape of the particle, either "spherical", "swarms",
+      "cylinder", or "spheroid".
     - `radius`: Particle radius, in meter (e.g., a few micrometers, so
       around `1.0e-6` to `1.0e-5`). Used only for the Faxén-law finite-size
       correction to the ambient flow velocity
@@ -197,9 +198,10 @@ class ParticleConfig:
     Todo: manage 2D/3D position
     """
     
-    kind: Literal["spherical", "swarms", "cylinder"] = "spherical"
+    kind: Literal["spherical", "swarms", "cylinder", "spheroid"] = "spherical"
     radius: float = 0.0
     length: float = 0.0
+    aspect_ratio: float = 1.0
     number: int = 1
     magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)
     position: tuple[float, float] = (0.0, 0.0)
@@ -216,6 +218,13 @@ class ParticleConfig:
         if self.kind == "cylinder" and self.length <= 0:
             raise ValueError(f"length of cylinder must be positive; got {self.length!r}.")
 
+    @property
+    def max_surface_extension(self) -> float:
+        """Returns the maximum radial extension from the centre of mass."""
+        if self.kind == "cylinder":
+            return math.hypot(self.radius, self.length / 2.0)
+        return self.radius
+    
 
 @dataclass(frozen=True)
 class TrainingConfig:

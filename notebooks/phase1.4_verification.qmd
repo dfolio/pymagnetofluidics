@@ -365,34 +365,52 @@ Spatial tolerance is defined as $1.0\,\mu\mathrm{m}$ physically ($1.0\times 10^{
 
 ```{python}
 #| label: fig-trajectories
-#| fig-cap: "Particle trajectories advected through the reconstructed velocity field compared with analytical Poiseuille paths."
+#| fig-cap: "Particle trajectories advected through the reconstructed velocity field using the adaptive SciPy solver compared with analytical Poiseuille paths."
+
+# Define a uniform magnetic field function
 field_fn = lambda x: mfp.uniform_field(x, magnitude=field_config.magnitude, orientation=field_config.orientation)
 initial_radii = (0.2 * R, 0.5 * R, 0.8 * R)
-z0, t_span, n_steps = 0.15 * L, (0.0, 1.0), 80
+z0, t_span = 0.15 * L, (0.0, 1.0)
 
+# Create structural initial states for the solver
 initial_states = [
     mfp.ParticleState(position=torch.tensor([r0, z0]), velocity=torch.zeros(2), time=0.0)
     for r0 in initial_radii
 ]
 
+# Instantiate a ParticleConfig tracking the physical and shape parameters
+# Setting radius=0.0 to evaluate the point-particle tracer limit
+particle_config_point = mfp.ParticleConfig(
+    kind="spherical",
+    radius=0.0,
+    magnetic_moment=tuple(field_config.orientation),
+    position=(0.0, 0.0)
+)
+
+# Build a 3D mobility tensor of shape (n_particles, n_dims, n_dims)
+# For point particles, we supply an identity matrix per particle as a baseline
+n_particles = len(initial_radii)
+mobility_tensor_point = torch.eye(2).unsqueeze(0).expand(n_particles, -1, -1)
+
+# Execute the new adaptive trajectory integrator using SciPy solver
 trajectories = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=field_fn,
+    domain_config=domain_config,
+    particle_config=particle_config_point,
     initial_states=initial_states,
-    magnetic_moment=torch.tensor([1.0, 0.0]),
+    mobility_tensor=mobility_tensor_point,
     time_span=t_span,
-    n_steps=n_steps,
-    particle_radius=0.0,
+    r_tol=1.0e-6,
+    a_tol=1.0e-8
 )
 
+# Visualization and validation mapping
 fig, ax = plt.subplots(figsize=(8, 3.5))
 for r0, traj in zip(initial_radii, trajectories):
     pos = np.array([s.position.detach().cpu().numpy() for s in traj])
     times = np.array([s.time for s in traj])
     z_analytical = z0 + (1.0 - (r0 / R) ** 2) * times
-
-    dr_max = float(np.max(np.abs(pos[:, 0] - r0)))
-    dz_end = float(abs(pos[-1, 1] - z_analytical[-1]))
 
     ax.plot(pos[:, 1], pos[:, 0], "-", linewidth=2, label=f"PINN $r_0={r0/R:.1f}R$")
     ax.plot(z_analytical, np.full_like(z_analytical, r0), "k--", linewidth=1.0, alpha=0.7)
@@ -400,13 +418,13 @@ for r0, traj in zip(initial_radii, trajectories):
 ax.axhline(0.0, color="black", linestyle="--", linewidth=0.8)
 ax.axhline(R, color="black", linestyle="-", linewidth=1.2)
 ax.set(xlim=(0.0, L), ylim=(0.0, R * 1.05), xlabel="Axial position $z$", ylabel="Radial position $r$",
-       title="Passive Tracer Advection (Dashed: Analytical Trajectory)")
+       title="Passive Tracer Advection with Adaptive Time-Stepping")
 ax.legend(fontsize=8, loc="upper center", ncol=3)
 ax.grid(True, linestyle=":", alpha=0.5)
 fig.tight_layout()
 plt.show()
 
-# Verification check against micrometer tolerance
+# Verification check against microscale tolerance limits
 tol_nondim = 1.0e-6 / fluid_config.reference_length
 print(f"Trajectory Advection Precision (Tolerance: {tol_nondim:.3e} dimensionless units):")
 for r0, traj in zip(initial_radii, trajectories):
@@ -416,35 +434,50 @@ for r0, traj in zip(initial_radii, trajectories):
     dr = float(np.max(np.abs(pos[:, 0] - r0)))
     dz = float(abs(pos[-1, 1] - z_exact[-1]))
     status_str = "PASS" if max(dr, dz) <= tol_nondim else "WARNING"
-    print(f"  Radius r0 = {r0/R:.1f}R | Max |r - r0| = {dr:.3e} | Final |z - z_exact| = {dz:.3e} | [{status_str}]")
+    print(f" Radius r0 = {r0/R:.1f}R | Max |r - r0| = {dr:.3e} | Final |z - z_exact| = {dz:.3e} | [{status_str}]")
 ```
 
 ```{python}
 #| label: fig-faxen
-#| fig-cap: "Comparison of point tracer vs. Faxén-corrected finite-size particle trajectory (a = 0.15 R)."
+#| fig-cap: "Comparison of point tracer vs. Faxén-corrected finite-size particle trajectory (a = 0.15 R) computed via solve_ivp."
+
 r_test_faxen = 0.4 * R
+z_init_faxen = 0.2 * L
+
 init_state_faxen = mfp.ParticleState(
-    position=torch.tensor([r_test_faxen, 0.2 * L]), velocity=torch.zeros(2), time=0.0
+    position=torch.tensor([r_test_faxen, z_init_faxen]), velocity=torch.zeros(2), time=0.0
 )
 
+# 1. Evaluate point particle trajectory (a = 0)
+particle_config_pt = mfp.ParticleConfig(kind="spherical", radius=0.0)
+mobility_pt = torch.eye(2).unsqueeze(0)
 traj_point = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=field_fn,
+    domain_config=domain_config,
+    particle_config=particle_config_pt,
     initial_states=[init_state_faxen],
-    magnetic_moment=torch.tensor([1.0, 0.0]),
-    time_span=(0.0, 1.0),
-    n_steps=40,
-    particle_radius=0.0,
+    mobility_tensor=mobility_pt,
+    time_span=(0.0, 1.0)
 )[0]
+
+# 2. Evaluate finite-size particle trajectory with physical mobility tensor (M* = Id / a*)
+radius_finite = 0.15 * R
+particle_config_finite = mfp.ParticleConfig(kind="spherical", radius=radius_finite)
+
+# Compute the dimensionless mobility scalar according to Stokes drag law: M* = 1 / a*
+a_nd_finite = radius_finite / R
+mobility_scalar_finite = 1.0 / a_nd_finite
+mobility_finite = (torch.eye(2) * mobility_scalar_finite).unsqueeze(0)
 
 traj_finite = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=field_fn,
+    domain_config=domain_config,
+    particle_config=particle_config_finite,
     initial_states=[init_state_faxen],
-    magnetic_moment=torch.tensor([1.0, 0.0]),
-    time_span=(0.0, 1.0),
-    n_steps=40,
-    particle_radius=0.15 * R,
+    mobility_tensor=mobility_finite,
+    time_span=(0.0, 1.0)
 )[0]
 
 z_pt = [s.position[1].item() for s in traj_point]
@@ -454,17 +487,17 @@ r_fn = [s.position[0].item() for s in traj_finite]
 
 fig, ax = plt.subplots(figsize=(7, 3.5))
 ax.plot(z_pt, r_pt, "o-", markersize=3, label="Point tracer ($a = 0$)")
-ax.plot(z_fn, r_fn, "s-", markersize=3, label="Finite tracer ($a = 0.15R$, Faxén)")
+ax.plot(z_fn, r_fn, "s-", markersize=3, label="Finite tracer ($a = 0.15R$, Faxén + Mobility)")
 ax.axhline(R, color="black", linewidth=1.2)
 ax.axhline(0, color="black", linestyle="--", linewidth=0.8)
 ax.set(xlim=(0, L), ylim=(0, R * 1.05), xlabel="Axial position $z$", ylabel="Radial position $r$",
-       title="Hydrodynamic Finite-Size Retardation (Faxén Correction)")
+       title="Hydrodynamic Finite-Size Retardation & Surface Verification")
 ax.legend(fontsize=8)
 ax.grid(True, linestyle=":", alpha=0.5)
 fig.tight_layout()
 plt.show()
 
-# Analytical retardation check: Delta u_z = -(2/3) * (a/R)^2 = -(2/3) * (0.15)^2 = -0.0150
+# Analytical retardation check: Delta u_z = -(2/3) * (a/R)^2
 computed_retardation = (z_pt[-1] - z_fn[-1]) / 1.0
 theoretical_retardation = (2.0 / 3.0) * (0.15**2)
 print(f"Axial velocity retardation Delta u_z: Computed = {computed_retardation:.4f}, Theoretical = {theoretical_retardation:.4f}")
@@ -513,6 +546,103 @@ for ax, (field_data, title, cmap, norm_type) in zip(axes.flat, panels):
     ax.set(title=title, xlabel="Axial position $z^*$", ylabel="Radial position $r^*$")
     fig.colorbar(im, ax=ax, pad=0.02)
 
+plt.show()
+```
+
+## Surface Boundary Condition Verification
+
+```{python}
+# 1. CONTEXT & PHYSICAL CONFIGURATION
+R_domain = domain.radius  # 1.0
+L_domain = domain.length  # 4.0
+
+# Define a particle with a significant radius to force a wall collision
+# Release position is close to the external wall (r = 0.85)
+particle_radius_nd = 0.20 * R_domain  # Large finite size (a* = 0.2)
+r_initial = 0.85 * R_domain
+z_initial = 0.10 * L_domain
+
+# Theoretical contact line for the center of mass:
+# r_collision = R - a = 1.0 - 0.2 = 0.8
+effective_wall_limit = R_domain - particle_radius_nd
+print(f"--- Surface Boundary Check ---")
+print(f"Particle Radius (a*): {particle_radius_nd:.2f}")
+print(f"Initial Position: r0 = {r_initial:.2e}, z0 = {z_initial:.2e}")
+print(f"Theoretical Collision Boundary (R* - a*): {effective_wall_limit:.2f}")
+
+# Instantiate the Extended ParticleConfig
+particle_config_boundary = mfp.ParticleConfig(
+    kind="spherical",
+    radius=particle_radius_nd * fluid_config.reference_length,  # Dimensional (m)
+    magnetic_moment=(1.0e-13, 0.0),  # Aligned moment
+    position=(r_initial, z_initial)
+)
+
+# Define initial solver state
+initial_state = [mfp.ParticleState(
+    position=torch.tensor([r_initial, z_initial]), 
+    velocity=torch.zeros(2), 
+    time=0.0
+)]
+
+# 2. ENFORCE DEFLECTION WITH MAGNETIC FORCE
+# To test the wall collision event, we apply a custom field function 
+# that drives the particle outwards towards the wall (positive radial force)
+def repulsive_field_fn(coords: torch.Tensor) -> mfp.FieldSample:
+    """Custom fields mapping to generate outward radial deflection."""
+    # Simulates a local forcing driving r to increase
+    field_tensor = torch.zeros((coords.shape[0], 3), device=coords.device, dtype=coords.dtype)
+    field_tensor[:, 0] = coords[:, 0] * 5.0  # Linear gradient driving outward drift
+    return mfp.FieldSample(field=field_tensor)
+
+
+# Compute Stokes mobility matrix for the finite sphere: M* = Id / a*
+mobility_scalar = 1.0 / particle_radius_nd
+mobility_tensor_boundary = (torch.eye(2) * mobility_scalar).unsqueeze(0)
+
+# 3. ADAPTIVE INTEGRATION & EVENT TRIGGER
+# Execute the trajectory integrator
+trajectory_result = mfp.integrate_trajectory(
+    flow_network=trained_network,
+    field_fn=repulsive_field_fn,
+    domain_config=domain_config,
+    particle_config=particle_config_boundary,
+    initial_states=initial_state,
+    mobility_tensor=mobility_tensor_boundary,
+    time_span=(0.0, 2.0)  # Generous time span to ensure contact
+)[0]
+
+# Extract final state coordinates
+final_position = trajectory_result[-1].position.cpu().numpy()
+final_time = trajectory_result[-1].time
+
+print(f"\n--- Solver Execution Results ---")
+print(f"Integration terminated at t = {final_time:.4f} s")
+print(f"Final Center Position: r = {final_position[0]:.4f}, z = {final_position[1]:.4f}")
+
+# Absolute error verification against the physical constraint boundary
+collision_error = abs(final_position[0] - effective_wall_limit)
+print(f"Absolute Distance to Contact Boundary: {collision_error:.4e}")
+
+if final_position[0] <= effective_wall_limit + 1e-5:
+    print("Verification: [PASS] Solver properly intercepted the wall collision event.")
+else:
+    print("Verification: [WARNING] Particle bypassed the physical boundary boundary.")
+    
+# 4. PLOT SURFACE BOUNDARY INTERCEPTION
+pos_history = np.array([s.position.cpu().numpy() for s in trajectory_result])
+
+fig, ax = plt.subplots(figsize=(7, 3.5))
+ax.plot(pos_history[:, 1], pos_history[:, 0], "g-", linewidth=2.5, label="Center of Mass Path")
+ax.axhline(R_domain, color="black", linewidth=1.5, label="Microchannel Wall ($r = R$)")
+ax.axhline(effective_wall_limit, color="tab:red", linestyle=":", linewidth=1.5, label="Contact Boundary ($r = R - a$)")
+ax.plot(final_position[1], final_position[0], "ro", markersize=6, label="Terminal Impact Point")
+
+ax.set(xlim=(z_initial, pos_history[-1, 1] * 1.1), ylim=(0.5, R_domain * 1.05),
+       xlabel="Axial position $z$", ylabel="Radial position $r$",
+       title="Surface Boundary Condition Validation via solve_ivp Events")
+ax.legend(fontsize=8, loc="lower left")
+ax.grid(True, linestyle=":", alpha=0.5)
 plt.show()
 ```
 
