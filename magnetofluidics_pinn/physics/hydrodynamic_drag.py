@@ -49,27 +49,7 @@ from typing import Callable
 
 import torch
 
-
-def _gradient(output: torch.Tensor, coordinates: torch.Tensor) -> torch.Tensor:
-    """Differentiate a scalar field with respect to its input coordinates.
-
-    Args:
-    - `output`: Tensor of shape `(n_points, 1)`, a scalar field evaluated at
-      `coordinates`.
-    - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
-      gradients.
-
-    Returns:
-    - Tensor of shape `(n_points, n_dims)` with `d(output) / d(coordinates)`.
-    """
-    (gradient,) = torch.autograd.grad(
-        outputs=output,
-        inputs=coordinates,
-        grad_outputs=torch.ones_like(output),
-        create_graph=True,
-        retain_graph=True,
-    )
-    return gradient
+from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 
 
 def faxen_corrected_velocity(
@@ -123,15 +103,15 @@ def faxen_corrected_velocity(
         # wasted) second-derivative pass entirely.
         return torch.cat([velocity_r, velocity_z], dim=1)
 
-    grad_velocity_r = _gradient(velocity_r, positions_for_grad)
-    grad_velocity_z = _gradient(velocity_z, positions_for_grad)
+    grad_velocity_r = scalar_field_gradient(velocity_r, positions_for_grad)
+    grad_velocity_z = scalar_field_gradient(velocity_z, positions_for_grad)
     d_vr_dr, d_vr_dz = grad_velocity_r[:, 0:1], grad_velocity_r[:, 1:2]
     d_vz_dr, d_vz_dz = grad_velocity_z[:, 0:1], grad_velocity_z[:, 1:2]
 
-    d2_vr_dr2 = _gradient(d_vr_dr, positions_for_grad)[:, 0:1]
-    d2_vr_dz2 = _gradient(d_vr_dz, positions_for_grad)[:, 1:2]
-    d2_vz_dr2 = _gradient(d_vz_dr, positions_for_grad)[:, 0:1]
-    d2_vz_dz2 = _gradient(d_vz_dz, positions_for_grad)[:, 1:2]
+    d2_vr_dr2 = scalar_field_gradient(d_vr_dr, positions_for_grad)[:, 0:1]
+    d2_vr_dz2 = scalar_field_gradient(d_vr_dz, positions_for_grad)[:, 1:2]
+    d2_vz_dr2 = scalar_field_gradient(d_vz_dr, positions_for_grad)[:, 0:1]
+    d2_vz_dz2 = scalar_field_gradient(d_vz_dz, positions_for_grad)[:, 1:2]
 
     # Same axisymmetric vector-Laplacian operator as the viscous term in
     # `stokes_residual`'s momentum equations, evaluated here at the

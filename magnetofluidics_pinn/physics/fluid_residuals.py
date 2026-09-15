@@ -19,29 +19,8 @@ from typing import Callable
 
 import torch
 
+from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 from magnetofluidics_pinn.config import FluidConfig
-
-
-def _gradient(output: torch.Tensor, coordinates: torch.Tensor) -> torch.Tensor:
-    """Differentiate a scalar field with respect to its input coordinates.
-
-    Args:
-    - `output`: Tensor of shape `(n_points, 1)`, a scalar field evaluated at
-      `coordinates`.
-    - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
-      gradients.
-
-    Returns:
-    - Tensor of shape `(n_points, n_dims)` with `d(output) / d(coordinates)`.
-    """
-    (gradient,) = torch.autograd.grad(
-        outputs=output,
-        inputs=coordinates,
-        grad_outputs=torch.ones_like(output),
-        create_graph=True,
-        retain_graph=True,
-    )
-    return gradient
 
 
 def stokes_residual(
@@ -106,9 +85,9 @@ def stokes_residual(
     velocity_z = output[:, 1:2]
     pressure = output[:, 2:3]
 
-    grad_velocity_r = _gradient(velocity_r, coordinates)
-    grad_velocity_z = _gradient(velocity_z, coordinates)
-    grad_pressure = _gradient(pressure, coordinates)
+    grad_velocity_r = scalar_field_gradient(velocity_r, coordinates)
+    grad_velocity_z = scalar_field_gradient(velocity_z, coordinates)
+    grad_pressure = scalar_field_gradient(pressure, coordinates)
 
     d_velocity_r_dr = grad_velocity_r[:, 0:1]
     d_velocity_r_dz = grad_velocity_r[:, 1:2]
@@ -117,10 +96,10 @@ def stokes_residual(
     dp_dr = grad_pressure[:, 0:1]
     dp_dz = grad_pressure[:, 1:2]
 
-    d2_velocity_r_dr2 = _gradient(d_velocity_r_dr, coordinates)[:, 0:1]
-    d2_velocity_r_dz2 = _gradient(d_velocity_r_dz, coordinates)[:, 1:2]
-    d2_velocity_z_dr2 = _gradient(d_velocity_z_dr, coordinates)[:, 0:1]
-    d2_velocity_z_dz2 = _gradient(d_velocity_z_dz, coordinates)[:, 1:2]
+    d2_velocity_r_dr2 = scalar_field_gradient(d_velocity_r_dr, coordinates)[:, 0:1]
+    d2_velocity_r_dz2 = scalar_field_gradient(d_velocity_r_dz, coordinates)[:, 1:2]
+    d2_velocity_z_dr2 = scalar_field_gradient(d_velocity_z_dr, coordinates)[:, 0:1]
+    d2_velocity_z_dz2 = scalar_field_gradient(d_velocity_z_dz, coordinates)[:, 1:2]
 
     # Axisymmetric continuity: (1/r) d(r u_r)/dr + d(u_z)/dz
     #                         = d(u_r)/dr + u_r/r + d(u_z)/dz.
