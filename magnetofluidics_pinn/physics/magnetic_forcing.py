@@ -66,8 +66,18 @@ def dipole_force(
     positions_for_grad = (
         positions if positions.requires_grad else positions.clone().requires_grad_(True)
     )
-
+    
     field_sample = field_fn(positions_for_grad)
+    # CHANGED: validate against what dipole_force actually needs (matching
+    # `positions`), rather than relying transitively on FieldSample's own
+    # self-consistency check plus an assumption that field_fn set
+    # coordinates == positions_for_grad.
+    if field_sample.field.shape != positions.shape:
+        raise ValueError(
+            "field_fn must return a FieldSample whose field has the same shape as "
+            f"positions; got field shape {tuple(field_sample.field.shape)} vs positions "
+            f"shape {tuple(positions.shape)}."
+        )
     potential = torch.sum(moment * field_sample.field, dim=1, keepdim=True)
 
     if not potential.requires_grad:
