@@ -91,6 +91,19 @@ class FieldSample:
 
     coordinates: torch.Tensor
     field: torch.Tensor
+    
+    def __post_init__(self) -> None:
+        # CHANGED: a malformed custom `field_fn` (e.g. wrong shape, or a
+        # forgotten `coordinates`) previously surfaced far from where it
+        # was actually built — inside `_assert_uniform_field` or
+        # `dipole_force` — as a generic TypeError or a broadcast error.
+        if self.field.shape != self.coordinates.shape:
+            raise ValueError(
+                "FieldSample.field must have the same shape as FieldSample.coordinates "
+                f"(the field is evaluated at, and must match the dimensionality of, "
+                f"those coordinates); got field shape {tuple(self.field.shape)} vs "
+                f"coordinates shape {tuple(self.coordinates.shape)}."
+            )
 
 
 @dataclass(frozen=True)
