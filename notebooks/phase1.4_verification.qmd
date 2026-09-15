@@ -32,7 +32,8 @@ jupyter: python3
 
 ## Overview
 
-This notebook establishes the numerical verification of the Phase 1 (v0.1.4) Physics-Informed Neural Network (PINN) [@raissi2019physics] for steady, axisymmetric Stokes flow and passive magnetic tracer advection in a straight 
+This notebook establishes the numerical verification of the Phase 1 (v0.1.4) Physics-Informed Neural Network (PINN) 
+[@raissi2019physics] for steady, axisymmetric Stokes flow and passive magnetic tracer advection in a straight 
 cylindrical microchannel.
 
 ### Physical and Mathematical Formulation
@@ -59,19 +60,20 @@ $$\begin{aligned}
 \end{aligned}$$
 where $\nabla^2 \equiv \frac{1}{r}\frac{\partial}{\partial r}\left(r\frac{\partial}{\partial r}\right) + \frac{\partial^2}{\partial z^2}$.
 
-Using characteristic scales $R_0$, $U_0$, and $p_0 = \mu U_0 / R_0$, the dimensionless geometry is $R^* = 1.0$ and $L^* = 4.0$. The exact Hagen--Poiseuille solution with outlet gauge pressure $p^*(r^*, L^*) = 0$ is:
-
-$$u_r^*(r^*, z^*) = 0, \quad u_z^*(r^*, z^*) = 1 - (r^*)^2, \quad p^*(r^*, z^*) = -4(z^* - L^*), \quad Q^* = \frac{\pi (R^*)^2}{2} \approx 1.5708.$$
+<!-- CHANGED: the analytical solution used to be stated twice, redundantly, and both times dropped the R*-dependence of u_z* and p* — invisible only because R*=1 in this particular run. It is now stated once, generally, matching `poiseuille_solution` exactly for any R*. -->
+Using the reference scales $R_0$, $U_{\mathrm{ref}}$, and $p_0 = \mu U_{\mathrm{ref}} / R_0$, coordinates and fields are nondimensionalized as $r^* = r/R_0$, $z^* = z/R_0$, $\vb{u}^* = \vb{u}/U_{\mathrm{ref}}$, and $p^* = p/p_0$, giving $R^* = 1.0$ and $L^* = 4.0$ for the present geometry. At the channel wall ($r^*=R^*$), no-slip enforces $u_r(R,z) = u_z(R,z) = 0$. With outlet gauge pressure $p^*(r^*, L^*) = 0$, the exact Hagen–Poiseuille solution is, for a general dimensionless radius $R^*$:
+$$
+u_r^*(r^*, z^*) = 0, \quad
+u_z^*(r^*, z^*) = 1 - \left(\frac{r^*}{R^*}\right)^{2}, \quad
+p^*(r^*, z^*) = \frac{4\left(L^* - z^*\right)}{\left(R^*\right)^{2}}, \quad
+Q^* = \frac{\pi \left(R^*\right)^{2}}{2} \approx 1.5708.
+$$
 
 ### Pole Regularity and Boundary Conditions
 
 Smoothness across the coordinate singularity at $r = 0$ requires:
 1. $u_r(0, z) = 0$ (no cross-axis flow; $u_r = \mathcal{O}(r)$ as $r \to 0$).
 2. $\left.\frac{\partial u_z}{\partial r}\right|_{r=0} = 0$ and $\left.\frac{\partial p}{\partial r}\right|_{r=0} = 0$ (even parity in $r$).
-
-At the channel wall ($r = R$), no-slip enforces $u_r(R, z) = 0$ and $u_z(R, z) = 0$. Using the scale transformation $r^* = r/R_0$, $z^* = z/R_0$, $\vb{u}^* = \vb{u}/U_{\mathrm{ref}}$, and $p^* = p/(\mu U_{\mathrm{ref}}/R_0)$, the exact Hagen--Poiseuille solution is:
-
-$$u_r^*(r^*, z^*) = 0, \quad u_z^*(r^*, z^*) = 1 - (r^*)^2, \quad p^*(r^*, z^*) = 4(L^* - z^*), \quad Q^* = \frac{\pi}{2} \approx 1.5708.$$
 
 <!--
 This is a narrated, executable analysis, not the formal `pytest` suite: it
@@ -155,8 +157,15 @@ coords_check = torch.stack((rr_check.reshape(-1), zz_check.reshape(-1)), dim=1).
 exact_residual = mfp.stokes_residual(poiseuille_solution, coords_check,
                                      fluid_config)
 max_residual_norm = exact_residual.abs().max().item()
-print("max |Stokes residual| for exact Poiseuille field:", max_residual_norm)
-# assert max_residual_norm < 1e-6, f"Analytical Stokes residual is non-zero: check differential operators: {max_residual_norm:.2e}"
+
+# CHANGED: this used to print the residual without ever comparing it to a
+# tolerance (the `assert` was commented out), so a regression would pass
+# silently. Reported the same PASS/WARNING way as the later acceptance
+# table, so the check always fires without hard-stopping the render.
+formulation_tolerance = 1.0e-6
+formulation_status = "PASS" if max_residual_norm < formulation_tolerance else "WARNING"
+print(f"max |Stokes residual| for exact Poiseuille field: {max_residual_norm:.3e} "
+      f"(tolerance {formulation_tolerance:.1e}) [{formulation_status}]")
 ```
 
 ## Network Construction and Hard Wall Constraint
@@ -179,6 +188,7 @@ with torch.no_grad():
     at_wall = network(torch.stack([torch.full_like(check_z, R), check_z], dim=1))
 print("u_r at r=0 (exactly 0 by construction):", at_axis[:, 0].detach().cpu().numpy())
 print("u_r at r=R (exactly 0 by construction):", at_wall[:, 0].detach().cpu().numpy())
+wall_hard_constraint_max_ur = float(at_wall[:, 0].abs().max().item())  # CHANGED: stored for the summary table below.
 
 # Smooth axisymmetric scalar fields are even in r, so their first radial
 # derivatives vanish at the axis. This is an architectural, pre-training check.
@@ -239,6 +249,7 @@ history.print_summary()
 ## Hydrodynamic Verification Against Poiseuille Flow
 
 We assess the learned solution across multiple cross-sections $z \in [0.1L, 0.9L]$ on an independent evaluation grid:
+
 1. **Axial Velocity Profile:** Relative $L_2$ error against $u_z(r) = 1 - (r/R)^2$.
 2. **Radial Leakage:** $\max |u_r(r, z)| \to 0$.
 3. **Mass Flow Invariance:** $Q(z) = \int_0^R u_z(r, z)\,2\pi r\,dr \equiv \frac{\pi}{2}$.
@@ -396,13 +407,15 @@ mobility_tensor_point = torch.eye(2).unsqueeze(0).expand(n_particles, -1, -1)
 trajectories = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=field_fn,
-    domain_config=domain_config,
+    domain=domain,      # CHANGED: was domain_config=domain_config
+    scales=scales,      # CHANGED: new required argument
     particle_config=particle_config_point,
     initial_states=initial_states,
     mobility_tensor=mobility_tensor_point,
     time_span=t_span,
     r_tol=1.0e-6,
-    a_tol=1.0e-8
+    a_tol=1.0e-8,
+    verbose = True,
 )
 
 # Visualization and validation mapping
@@ -426,6 +439,7 @@ plt.show()
 
 # Verification check against microscale tolerance limits
 tol_nondim = 1.0e-6 / fluid_config.reference_length
+particle_errors = []  # CHANGED: collected for the consolidated summary table below.
 print(f"Trajectory Advection Precision (Tolerance: {tol_nondim:.3e} dimensionless units):")
 for r0, traj in zip(initial_radii, trajectories):
     pos = np.array([s.position.detach().cpu().numpy() for s in traj])
@@ -433,8 +447,11 @@ for r0, traj in zip(initial_radii, trajectories):
     z_exact = z0 + (1.0 - (r0 / R) ** 2) * times
     dr = float(np.max(np.abs(pos[:, 0] - r0)))
     dz = float(abs(pos[-1, 1] - z_exact[-1]))
+    particle_errors.append(max(dr, dz))
     status_str = "PASS" if max(dr, dz) <= tol_nondim else "WARNING"
     print(f" Radius r0 = {r0/R:.1f}R | Max |r - r0| = {dr:.3e} | Final |z - z_exact| = {dz:.3e} | [{status_str}]")
+
+particle_kinematics_max_error = max(particle_errors)  # CHANGED
 ```
 
 ```{python}
@@ -449,31 +466,42 @@ init_state_faxen = mfp.ParticleState(
 )
 
 # 1. Evaluate point particle trajectory (a = 0)
+print("1. Start particles trajectory integration...")
 particle_config_pt = mfp.ParticleConfig(kind="spherical", radius=0.0)
 mobility_pt = torch.eye(2).unsqueeze(0)
 traj_point = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=field_fn,
-    domain_config=domain_config,
+    domain=domain,      # CHANGED
+    scales=scales,      # CHANGED
     particle_config=particle_config_pt,
     initial_states=[init_state_faxen],
     mobility_tensor=mobility_pt,
-    time_span=(0.0, 1.0)
+    time_span=(0.0, 1.0),
+    verbose = True,
 )[0]
 
 # 2. Evaluate finite-size particle trajectory with physical mobility tensor (M* = Id / a*)
-radius_finite = 0.15 * R
-particle_config_finite = mfp.ParticleConfig(kind="spherical", radius=radius_finite)
+radius_finite_nd = 0.15 * R  # CHANGED: renamed — R is already dimensionless here.
+# CHANGED (bug fix): `ParticleConfig.radius` is a *physical* radius in
+# meters (see `scaling.nondimensionalize_particle`). The previous version
+# passed the dimensionless `radius_finite` straight through, which
+# `integrate_trajectory` then divided by the reference length again,
+# inflating the effective a* by a factor of ~1/reference_length (~1300x
+# here). Converting back to meters keeps this cell consistent with the
+# "Surface Boundary Condition Verification" section below, which already
+# does this correctly.
+particle_config_finite = mfp.ParticleConfig(kind="spherical", radius=radius_finite_nd * fluid_config.reference_length)
 
-# Compute the dimensionless mobility scalar according to Stokes drag law: M* = 1 / a*
-a_nd_finite = radius_finite / R
+a_nd_finite = radius_finite_nd / R
 mobility_scalar_finite = 1.0 / a_nd_finite
 mobility_finite = (torch.eye(2) * mobility_scalar_finite).unsqueeze(0)
 
 traj_finite = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=field_fn,
-    domain_config=domain_config,
+    domain=domain,      # CHANGED
+    scales=scales,      # CHANGED
     particle_config=particle_config_finite,
     initial_states=[init_state_faxen],
     mobility_tensor=mobility_finite,
@@ -555,11 +583,18 @@ plt.show()
 # 1. CONTEXT & PHYSICAL CONFIGURATION
 R_domain = domain.radius  # 1.0
 L_domain = domain.length  # 4.0
+verbose = True  # Print solver progress and event triggers
 
-# Define a particle with a significant radius to force a wall collision
-# Release position is close to the external wall (r = 0.85)
+# Define a particle with a significant radius to force a wall collision.
 particle_radius_nd = 0.20 * R_domain  # Large finite size (a* = 0.2)
-r_initial = 0.85 * R_domain
+# CHANGED (bug fix): r_initial used to be 0.85*R_domain, i.e. already past
+# effective_wall_limit (= R_domain - particle_radius_nd = 0.80) — the
+# particle's surface was initialized already overlapping the wall, so the
+# collision event in block 3 could never actually fire (no sign crossing
+# occurs when the trajectory starts, and stays, past the threshold).
+# Released well inside the boundary instead, so the outward push has to
+# visibly cross it.
+r_initial = 0.50 * R_domain
 z_initial = 0.10 * L_domain
 
 # Theoretical contact line for the center of mass:
@@ -571,10 +606,14 @@ print(f"Initial Position: r0 = {r_initial:.2e}, z0 = {z_initial:.2e}")
 print(f"Theoretical Collision Boundary (R* - a*): {effective_wall_limit:.2f}")
 
 # Instantiate the Extended ParticleConfig
+# CHANGED: this moment is deliberately large and non-physical (unlike the
+# SI-realistic 1e-13 moment used in "Particle Trajectory Integration"
+# above) — this cell tests the wall-collision *event*, not a
+# physically-meaningful magnitude.
 particle_config_boundary = mfp.ParticleConfig(
     kind="spherical",
     radius=particle_radius_nd * fluid_config.reference_length,  # Dimensional (m)
-    magnetic_moment=(1.0e-13, 0.0),  # Aligned moment
+    magnetic_moment=(0.5, 0.0),  # Synthetic, deliberately strong
     position=(r_initial, z_initial)
 )
 
@@ -585,15 +624,21 @@ initial_state = [mfp.ParticleState(
     time=0.0
 )]
 
-# 2. ENFORCE DEFLECTION WITH MAGNETIC FORCE
-# To test the wall collision event, we apply a custom field function 
-# that drives the particle outwards towards the wall (positive radial force)
+# 2. ENFORCE DEFLECTION WITH A SYNTHETIC, NON-UNIFORM FIELD
+# This field is deliberately non-uniform (it varies with r), which
+# integrate_trajectory only accepts when explicitly told to via
+# enforce_uniform_field=False below: a uniform field would exert exactly
+# zero dipole force (F = grad(m . B) = 0 for constant B), so it could
+# never push the particle anywhere, and this package does not otherwise
+# validate a non-uniform field's dimensional correctness outside this
+# kind of deliberate, synthetic test.
 def repulsive_field_fn(coords: torch.Tensor) -> mfp.FieldSample:
-    """Custom fields mapping to generate outward radial deflection."""
-    # Simulates a local forcing driving r to increase
-    field_tensor = torch.zeros((coords.shape[0], 3), device=coords.device, dtype=coords.dtype)
-    field_tensor[:, 0] = coords[:, 0] * 5.0  # Linear gradient driving outward drift
-    return mfp.FieldSample(field=field_tensor)
+    """Synthetic, non-physical field used only to exercise the wall-collision event."""
+    # CHANGED (bug fix): a FieldSample requires `coordinates` too, and its
+    # `field` must match `coords`'s 2 columns (r, z), not 3.
+    field_tensor = torch.zeros((coords.shape[0], 2), device=coords.device, dtype=coords.dtype)
+    field_tensor[:, 0] = coords[:, 0]  # Linear gradient driving outward drift
+    return mfp.FieldSample(coordinates=coords, field=field_tensor)
 
 
 # Compute Stokes mobility matrix for the finite sphere: M* = Id / a*
@@ -601,15 +646,17 @@ mobility_scalar = 1.0 / particle_radius_nd
 mobility_tensor_boundary = (torch.eye(2) * mobility_scalar).unsqueeze(0)
 
 # 3. ADAPTIVE INTEGRATION & EVENT TRIGGER
-# Execute the trajectory integrator
 trajectory_result = mfp.integrate_trajectory(
     flow_network=trained_network,
     field_fn=repulsive_field_fn,
-    domain_config=domain_config,
+    domain=domain,                  # CHANGED: was domain_config=domain_config
+    scales=scales,                  # CHANGED
     particle_config=particle_config_boundary,
     initial_states=initial_state,
     mobility_tensor=mobility_tensor_boundary,
-    time_span=(0.0, 2.0)  # Generous time span to ensure contact
+    time_span=(0.0, 2.0),  # Generous time span to ensure contact
+    enforce_uniform_field=False,  # CHANGED: deliberately synthetic, non-uniform test field.
+    verbose = verbose,
 )[0]
 
 # Extract final state coordinates
@@ -620,14 +667,13 @@ print(f"\n--- Solver Execution Results ---")
 print(f"Integration terminated at t = {final_time:.4f} s")
 print(f"Final Center Position: r = {final_position[0]:.4f}, z = {final_position[1]:.4f}")
 
-# Absolute error verification against the physical constraint boundary
 collision_error = abs(final_position[0] - effective_wall_limit)
 print(f"Absolute Distance to Contact Boundary: {collision_error:.4e}")
 
 if final_position[0] <= effective_wall_limit + 1e-5:
     print("Verification: [PASS] Solver properly intercepted the wall collision event.")
 else:
-    print("Verification: [WARNING] Particle bypassed the physical boundary boundary.")
+    print("Verification: [WARNING] Particle bypassed the physical boundary.")
     
 # 4. PLOT SURFACE BOUNDARY INTERCEPTION
 pos_history = np.array([s.position.cpu().numpy() for s in trajectory_result])
@@ -638,7 +684,10 @@ ax.axhline(R_domain, color="black", linewidth=1.5, label="Microchannel Wall ($r 
 ax.axhline(effective_wall_limit, color="tab:red", linestyle=":", linewidth=1.5, label="Contact Boundary ($r = R - a$)")
 ax.plot(final_position[1], final_position[0], "ro", markersize=6, label="Terminal Impact Point")
 
-ax.set(xlim=(z_initial, pos_history[-1, 1] * 1.1), ylim=(0.5, R_domain * 1.05),
+# CHANGED: ylim was hardcoded to (0.5, ...), tied to the old r_initial=0.85;
+# derived from the actual trajectory instead so it stays correct regardless
+# of r_initial.
+ax.set(xlim=(z_initial, pos_history[-1, 1] * 1.1), ylim=(pos_history[:, 0].min() - 0.05, R_domain * 1.05),
        xlabel="Axial position $z$", ylabel="Radial position $r$",
        title="Surface Boundary Condition Validation via solve_ivp Events")
 ax.legend(fontsize=8, loc="lower left")
@@ -650,20 +699,51 @@ plt.show()
 
 ### Quantitative Verification Summary
 
-| Verification Stage | Method / Target | Numerical Outcome | Status |
-|:---|:---|:---|:---|
-| **Differential Operators** | Analytical Poiseuille residual | $\max \|\text{Residual}\| < 1.0 \times 10^{-7}$ | **PASS** |
-| **Wall No-Slip Condition** | Hard constraint $u_r = (1 - r/R)\tilde{u}_r$ | $\max |u_r(R, z)| = 0.000$ | **PASS** |
-| **Axial Velocity Accuracy** | Relative $L_2$ error vs. parabola | $1.8 \times 10^{-2} \le 5.0 \times 10^{-2}$ | **PASS** |
-| **Mass Flow Invariance** | Cross-sectional flux $Q(z)$ span | $6.4 \times 10^{-3} \le 2.0 \times 10^{-2}$ | **PASS** |
-| **Axial Pressure Gradient** | Linear regression slope vs. theory ($-4.0$) | Error $= 1.2 \times 10^{-2} \le 5.0 \times 10^{-2}$ | **PASS** |
-| **Particle Kinematics** | Trajectory deviation ($1.0\,\mu\mathrm{m}$ bound) | Max spatial error $< 4.5 \times 10^{-4}$ | **PASS** |
+```{python}
+#| label: acceptance-summary
+#| tbl-cap: "Phase 1 verification outcomes, computed live from the cells above rather than transcribed by hand."
+import pandas as pd
+
+verification_checks = {
+    "Differential operators (exact Poiseuille residual)": (max_residual_norm, formulation_tolerance),
+    "Hard wall constraint (max |u_r(R, z)|)": (wall_hard_constraint_max_ur, 1.0e-6),
+    "Axial velocity relative L2 error": criteria["Axial Velocity Relative L2 Error"],
+    "Max radial leakage |u_r|": criteria["Max Radial Leakage |u_r|"],
+    "Flow rate axial variation span": criteria["Flow Rate Axial Variation Span"],
+    "Centerline pressure gradient error": criteria["Centerline Pressure Gradient Error"],
+    "Held-out Stokes residual RMS": criteria["Held-out Stokes Residual RMS"],
+    "Particle kinematics (max trajectory deviation)": (particle_kinematics_max_error, tol_nondim),
+}
+
+summary_rows = [
+    {
+        "Verification stage": name,
+        "Computed": f"{value:.3e}",
+        "Tolerance": f"{tolerance:.3e}",
+        "Status": "PASS" if value <= tolerance else "WARNING",
+    }
+    for name, (value, tolerance) in verification_checks.items()
+]
+pd.DataFrame(summary_rows).set_index("Verification stage")
+```
 
 ### Conclusions
 
 1. **Mathematical Consistency:** Exact Poiseuille substitution confirms that the differential operators and boundary conditions in `magnetofluidics_pinn` match theory to machine precision.
 2. **Constraint Enforcement:** Structurally constraining $u_r(R, z) \equiv 0$ resolves false numerical leakage and maintains constant volumetric flux along the microchannel.
 3. **Trajectory Fidelity:** The combination of Adam warmup and L-BFGS refinement reproduces the Hagen--Poiseuille field with sufficient accuracy that particle advection errors remain well within physical sub-micrometer tolerances.
+
+## Scope and Limitations
+
+This notebook verifies Phase 1 of `magnetofluidics_pinn` only: a single point-like (or Faxén-corrected finite) tracer, advected by a steady Stokes flow in a straight channel, under a spatially uniform magnetic field. Several capabilities named in the project's overall goal are not yet exercised here, because they are not yet implemented:
+
+- **Bifurcated vessels** (`geometry.build_bifurcation_domain`) and the associated non-uniform, branch-angle-dependent flow — currently a `NotImplementedError` stub.
+- **Unsteady, inertial flow** (`physics.navier_stokes_residual`) for higher-Reynolds-number regimes — currently a `NotImplementedError` stub.
+- **Non-uniform magnetic fields** (`gradient_field`, `biot_savart_field`) and the resulting non-zero dipole force — currently `NotImplementedError` stubs; `integrate_trajectory` also actively rejects a non-uniform `field_fn` at runtime.
+- **Particle swarms.** `integrate_trajectory` accepts a list of initial states and a per-particle mobility tensor, but a single `ParticleConfig` (radius, magnetic moment) is currently shared across every particle in that list; heterogeneous swarms are not yet supported.
+- **Animated visualization** of particle motion relative to the flow — only static streamline and trajectory plots exist today.
+
+None of the checks above should be read as evidence for these unimplemented paths; they are scoped strictly to the single-tracer, steady-Stokes, uniform-field, straight-channel case.
 
 ## References
 
