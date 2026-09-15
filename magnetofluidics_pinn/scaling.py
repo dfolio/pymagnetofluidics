@@ -280,7 +280,7 @@ def nondimensionalize_particle(particle_config: ParticleConfig, scales: Scales) 
 def compute_mobility_scale(fluid_config: FluidConfig) -> float:
     """Calculates the characteristic hydrodynamic mobility scale (SI).
 
-    $$M_{ref} = 1 / (6 * \pi * \mu * L_{ref})$$
+    $$M_{ref} = 1 / (6 * \\pi * \\mu * L_{ref})$$
     """
     return 1.0 / (6.0 * np.pi * fluid_config.dynamic_viscosity * fluid_config.reference_length)
 
