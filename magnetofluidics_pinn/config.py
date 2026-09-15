@@ -246,6 +246,11 @@ class TrainingConfig:
       epoch.
     - `n_boundary_points`: Number of boundary collocation points per Adam
       epoch.
+    - `n_axis_points`: Reserved for a future symmetry-axis collocation
+      scheme; not yet consumed by `sampling` or `training` (axis and wall
+      regularity are currently enforced structurally instead, via
+      `networks.apply_hard_wall_constraint`). Kept here so an eventual
+      soft-axis-penalty alternative doesn't require a config schema change.
     - `learning_rate`: Initial learning rate for the Adam phase.
     - `n_epochs`: Number of Adam epochs.
     - `device`: Any device string accepted by `torch.device` (e.g. `"cpu"`,
