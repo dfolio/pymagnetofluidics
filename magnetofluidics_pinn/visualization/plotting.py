@@ -121,23 +121,23 @@ def plot_trajectories(
 def plot_training_history(
     history: TrainingHistory,
     log_scale: bool = True,
-) -> plt.Figure:
-    """Plots loss convergence histories across Adam and L-BFGS training phases.
+) -> matplotlib.figure.Figure:
+    """Plot loss convergence histories across the Adam and L-BFGS training phases.
 
     Concatenates Adam epoch steps with L-BFGS evaluation steps, drawing a stage
     demarcation boundary if L-BFGS refinement was executed.
 
     Args:
-        history: A `TrainingHistory` instance containing `.adam` and `.lbfgs`
-            `LossHistory` tuples.
-        log_scale: Whether to set the y-axis of each subplot to a logarithmic scale.
-            Defaults to True.
+    - `history`: A `TrainingHistory` instance containing `.adam` and `.lbfgs`
+      `LossHistory` tuples.
+    - `log_scale`: Whether to set the y-axis of each subplot to a logarithmic
+      scale. Defaults to `True`.
 
     Returns:
-        A Matplotlib `Figure` instance containing the multi-panel loss curves.
+    - A `matplotlib.figure.Figure` instance containing the multi-panel loss curves.
 
     Raises:
-        ValueError: If both Adam and L-BFGS histories are empty.
+    - `ValueError`: If both Adam and L-BFGS histories are empty.
     """
     n_adam = len(history.adam.step)
     n_lbfgs = len(history.lbfgs.step)
