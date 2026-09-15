@@ -7,7 +7,9 @@ Physics-informed neural networks (PINNs) [@raissi2019physics; @cai2021physics]
 for predicting the motion of magnetic particles transported by a viscous flow
 inside a microfluidic vessel, under a prescribed magnetic field.
 
-Note: The name of the project, `pymagnetofluidics`, is a placeholder. Future prospect may include other models such as the Fourier Neural Operator (FNO) [@li2021fourier].
+Note: The name of the project, `pymagnetofluidics`, is a placeholder. Future prospects
+may include other model classes, such as the Fourier Neural Operator (FNO) [@li2021fno],
+including its geometry-aware extensions [@li2021fourier] for the bifurcated-vessel case.
 
 ## Scope
 
@@ -65,7 +67,7 @@ pymagnetofluidics/
 │   │   ├── losses.py              # functional loss composition
 │   │   └── trainer.py             # Adam + L-BFGS training loop
 │   ├── trajectory/
-│   │   └── integrator.py          # particle-path RK4 integration
+│   │   └── integrator.py          # adaptive particle-path integration (SciPy solve_ivp, RK45/Dormand-Prince)
 │   └── visualization/
 │       └── plotting.py            # streamlines, trajectories
 └── tests/
@@ -75,13 +77,15 @@ pymagnetofluidics/
 ## Status
 
 - **Phase 1** — single sphere, uniform $\mathbf{B}$, Stokes flow, straight
-   channel — implemented and verified.** Interior residual, boundary
+   channel — implemented and verified. Interior residual, boundary
    conditions, network, sampling, training (Adam + L-BFGS refinement
    [@raissi2019physics]), and particle trajectory integration
    (with an optional Faxén-law finite-size correction
    [@faxen1922widerstand; @kim2005microhydrodynamics; @maxey1983equation])
-   are complete; see `notebooks/phase1_verification.qmd` for the full,
-   executable verification against the analytical Poiseuille solution.
+   are complete; see `notebooks/phase1.4_verification.qmd` for the current,
+   executable verification against the analytical Poiseuille solution
+   (`notebooks/phase1_verification.qmd` predates the present `integrate_trajectory`
+   API and is kept only for history).
 
 - **Phase 2** — particle swarm (tens of particles), still Stokes, non-uniform $\mathbf{B}$.
 - **Phase 3** — Navier–Stokes flow, bifurcated geometry, time-dependent magnetic actuation.
