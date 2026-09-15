@@ -16,6 +16,8 @@ Submodules remain independently importable (e.g.,
 # (PEP 484). Without it, static analyzers (PyCharm, mypy --no-implicit-reexport)
 # cannot distinguish "re-exported public API" from "leftover unused import" and
 # flag every symbol as unreferenced, even though `__all__` lists them.
+from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient as scalar_field_gradient
+
 from magnetofluidics_pinn.boundary_conditions import (
     biot_savart_field as biot_savart_field,
     gradient_field as gradient_field,
@@ -77,10 +79,12 @@ from magnetofluidics_pinn.visualization import (
     plot_training_history as plot_training_history,
 )
 
-__version__ = "0.1.4"
+__version__ = "0.1.5"
 
 __all__ = [
     "__version__",
+    # Autodiff
+    "scalar_field_gradient",
     # Configuration
     "DomainConfig",
     "FluidConfig",
