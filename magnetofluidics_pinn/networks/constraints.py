@@ -7,23 +7,14 @@ most of Phase 1's boundary conditions that approximation is harmless. Two
 conditions at the symmetry axis and the wall are the exception, and are
 enforced here structurally rather than through the loss:
 
-- **No-slip at the wall**, $u_r(R, z) = 0$. The axisymmetric continuity
+- **No-penetration at the wall**, $u_r(R, z) = 0$. (The tangential
+  no-slip condition, $u_z(R, z) = 0$, is a separate statement, left to the
+  soft boundary loss in `training.trainer`, since it does not share the
+  accumulation pathology described next.) The axisymmetric continuity
   equation integrates to $dQ/dz = 2 \pi R\, u_r(R, z)$ ($Q$ being the
   volumetric flow rate), so *any* small, systematically-signed residual
   radial velocity at the wall accumulates, over the length of the channel,
   into a large violation of mass conservation far from the wall.
-- **Regularity on the symmetry axis**, $u_r(0, z) = 0$ *and*
-  $\partial u_z/\partial r|_{r=0} = 0$. Neither is a Poiseuille-specific
-  condition: both hold for *any* smooth axisymmetric flow. Physically, a
-  point $(r, \theta, z)$ and $(r, \theta + \pi, z)$ in cylindrical
-  coordinates are the same physical point when $r < 0$ is reinterpreted as
-  the mirrored angle — so for the underlying 3D Cartesian field to be
-  smooth, a scalar like $u_z$ or $p$ must be an *even* function of $r$
-  (forcing every odd-order $r$-derivative, including the first, to vanish
-  at $r=0$), while $u_r$, whose direction itself reverses under that same
-  relabeling, must be an *odd* function of $r$ (forcing $u_r(0,z)=0$). See
-  e.g. [@batchelor1967introduction], section 2.2, for the general
-  regularity conditions at a cylindrical coordinate pole.
 
 `apply_hard_wall_constraint` enforces all three conditions
 ($u_r(0,z)=0$, $u_r(R,z)=0$, $\partial u_z/\partial r|_{r=0}=0$, and, as a
