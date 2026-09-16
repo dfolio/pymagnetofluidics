@@ -42,8 +42,9 @@ def dipole_force(
       each particle.
 
     Raises:
-    - `ValueError`: If `positions` is not a 2-D tensor, or if
-      `magnetic_moment` cannot be broadcast to `positions`'s shape.
+    - `ValueError`: If `positions` is not a 2-D tensor, if `magnetic_moment`
+      cannot be broadcast to `positions`'s shape, or if `field_fn` returns a
+      `FieldSample` whose `field` does not match `positions`'s shape.
     """
     if positions.ndim != 2:
         raise ValueError(
@@ -68,10 +69,6 @@ def dipole_force(
     )
     
     field_sample = field_fn(positions_for_grad)
-    # CHANGED: validate against what dipole_force actually needs (matching
-    # `positions`), rather than relying transitively on FieldSample's own
-    # self-consistency check plus an assumption that field_fn set
-    # coordinates == positions_for_grad.
     if field_sample.field.shape != positions.shape:
         raise ValueError(
             "field_fn must return a FieldSample whose field has the same shape as "

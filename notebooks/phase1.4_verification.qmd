@@ -45,7 +45,7 @@ L = 4.0 * R    # 3 mm
 
 n_epochs = 400
 lbfgs_rounds = 4
-lbfgs_iterations_per_round = 300
+lbfgs_iterations_per_round = 400
 ```
 
 Consider an incompressible Newtonian fluid with dynamic viscosity $\mu$ and density $\rho$ in a straight cylinder of 

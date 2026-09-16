@@ -31,7 +31,7 @@ class Domain:
     the dimensionless counterpart that `sampling` and `physics` expect, and
     [`scaling.redimensionalize_domain`]
     [magnetofluidics_pinn.scaling.redimensionalize_domain] to convert back
-    for plotting. # CHANGED: clarified physical vs. dimensionless usage.
+    for plotting.
 
     Args:
     - `kind`: Either `"channel"` for a straight vessel or `"bifurcation"` for
@@ -57,7 +57,6 @@ class CollocationPoints:
     All tensors are dimensionless: `sampling.sample_collocation_points`
     always draws from an already-nondimensionalized `Domain`, so the
     network, autograd, and PDE residuals never see raw SI magnitudes.
-    # CHANGED: clarified dimensionless convention.
 
     Args:
     - `interior`: Tensor of shape `(n_interior, n_dims)` sampled inside the
@@ -80,7 +79,7 @@ class FieldSample:
     Both `coordinates` and `field` are dimensionless here: field-generating
     functions in `boundary_conditions.magnetic_field_bc` accept physical (SI)
     parameters but return values already normalized by
-    `scaling.compute_scales`. # CHANGED: clarified dimensionless convention.
+    `scaling.compute_scales`.
 
     Args:
     - `coordinates`: Tensor of shape `(n_points, n_dims)` where the field is
@@ -93,10 +92,6 @@ class FieldSample:
     field: torch.Tensor
     
     def __post_init__(self) -> None:
-        # CHANGED: a malformed custom `field_fn` (e.g. wrong shape, or a
-        # forgotten `coordinates`) previously surfaced far from where it
-        # was actually built — inside `_assert_uniform_field` or
-        # `dipole_force` — as a generic TypeError or a broadcast error.
         if self.field.shape != self.coordinates.shape:
             raise ValueError(
                 "FieldSample.field must have the same shape as FieldSample.coordinates "
@@ -114,8 +109,19 @@ class ParticleState:
     - `position`: Tensor of shape `(n_dims,)` giving the particle position.
     - `velocity`: Tensor of shape `(n_dims,)` giving the particle velocity.
     - `time`: Scalar simulation time associated with this state.
+    
+    Raises:
+    - `ValueError`: If `velocity` does not have the same shape as `position`.
     """
     
     position: torch.Tensor
     velocity: torch.Tensor
     time: float
+    
+    def __post_init__(self) -> None:
+        if self.velocity.shape != self.position.shape:
+            raise ValueError(
+                "ParticleState.velocity must have the same shape as ParticleState.position; "
+                f"got velocity shape {tuple(self.velocity.shape)} vs position shape "
+                f"{tuple(self.position.shape)}."
+            )

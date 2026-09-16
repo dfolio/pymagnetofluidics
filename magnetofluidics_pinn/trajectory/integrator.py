@@ -44,7 +44,12 @@ above is only dimensionally correct for a uniform field (see the caveat
 two paragraphs up), `integrate_trajectory` probes `field_fn` at two
 distinct points before integrating anything and raises
 `NotImplementedError` if they disagree, rather than silently producing a
-dimensionally-inconsistent trajectory for a non-uniform field.
+dimensionally-inconsistent trajectory for a non-uniform field. This check
+can be switched off via `enforce_uniform_field=False`, for a deliberately
+synthetic, non-physical `field_fn` used only to exercise this function's
+mechanics (e.g. the wall-collision event below) — not for a
+physically-meaningful non-uniform field, which this package does not yet
+validate.
 
 **Nondimensionalization.** `domain` and `scales` are passed in separately
 (rather than the raw, physical `DomainConfig`) so that every internal
@@ -256,7 +261,7 @@ def integrate_trajectory(
     initial_states: list[ParticleState],
     mobility_tensor: torch.Tensor,
     time_span: tuple[float, float],
-    enforce_uniform_field: bool = True,  # CHANGED: new argument to control uniformity check
+    enforce_uniform_field: bool = True,
     r_tol: float = 1.0e-6,
     a_tol: float = 1.0e-8,
     verbose: bool = False,
@@ -310,9 +315,6 @@ def integrate_trajectory(
     if time_end <= time_start:
         raise ValueError(f"time_span must satisfy t_end > t_start; got {time_span!r}.")
 
-    # CHANGED: explicit shape validation for initial_states/mobility_tensor,
-    # replacing what used to be an unhandled IndexError deep inside the
-    # per-particle closure with a clear, immediate ValueError.
     n_dims = initial_states[0].position.shape[-1]
     if any(state.position.shape != (n_dims,) for state in initial_states):
         raise ValueError(
@@ -329,11 +331,6 @@ def integrate_trajectory(
     network_device = resolve_module_device(flow_network)
     network_dtype = resolve_module_dtype(flow_network)
 
-    # CHANGED: nondimensionalize both the wall-collision threshold and the
-    # particle radius against `scales.length` (via `nondimensionalize_particle`),
-    # not against `domain_config.radius`; see the module docstring's
-    # "Nondimensionalization" note for why these previously coincided only
-    # by coincidence.
     r_max_particle = particle_config.max_surface_extension / scales.length
     effective_wall_limit = domain.radius - r_max_particle
     a_nd = nondimensionalize_particle(particle_config, scales)
@@ -342,9 +339,6 @@ def integrate_trajectory(
         particle_config.magnetic_moment, device=network_device, dtype=network_dtype
     ).unsqueeze(0)
     
-    # CHANGED: enforce_uniform_field is a deliberate, opt-in escape hatch for
-    # synthetic test/demonstration fields; every other call site should
-    # leave it at its default (True).
     if enforce_uniform_field:
         # Enforce field uniformity checks prior to launching structural solvers
         _assert_uniform_field(
@@ -388,9 +382,6 @@ def integrate_trajectory(
 
     trajectories: list[list[ParticleState]] = []
     for particle_index, particle_state in enumerate(initial_states):
-        # CHANGED: convert via .detach().cpu(), not np.array(tensor, ...)
-        # directly, so a CUDA-resident initial state no longer raises inside
-        # NumPy conversion.
         y0 = particle_state.position.detach().cpu().numpy().astype(np.float64)
         active_ode = make_ode_system(particle_index)
         
@@ -409,10 +400,6 @@ def integrate_trajectory(
             atol=a_tol,
         )
 
-        # CHANGED: surface a genuine integration failure instead of silently
-        # returning a partial or empty trajectory. Reaching the terminal
-        # wall-collision event is `success=True` (status=1), so this does
-        # not fire on an expected collision.
         if not sol.success:
             raise RuntimeError(
                 f"solve_ivp failed to integrate particle {particle_index}: {sol.message}"

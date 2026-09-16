@@ -25,6 +25,12 @@ from magnetofluidics_pinn.device_utils import resolve_device
 # in `boundary_conditions.magnetic_field_bc.uniform_field`.
 _UNIT_NORM_TOLERANCE = 1.0e-6
 
+# CHANGED: was `reference_length: float = DomainConfig.radius`, which looked
+# dynamically linked to DomainConfig's default but was actually baked to a
+# plain float at class-definition time — identical runtime behavior to a
+# literal, just less honest about it.
+_DEFAULT_REFERENCE_LENGTH = 7.5e-4  # meter; matches DomainConfig.radius's own default
+
 
 @dataclass(frozen=True)
 class DomainConfig:
@@ -109,8 +115,8 @@ class FluidConfig:
     dynamic_viscosity: float = 1.0e-3
     density: float = 1.0e3
     reference_velocity: float = 1.0e-3
-    reference_length: float = DomainConfig.radius
-    
+    reference_length: float = _DEFAULT_REFERENCE_LENGTH
+
     def __post_init__(self) -> None:
         for field_name in ("dynamic_viscosity", "density", "reference_velocity", "reference_length"):
             value = getattr(self, field_name)
@@ -172,7 +178,7 @@ class ParticleConfig:
     `particle_radius` argument expects — see that function's docstring for
     why `magnetic_moment` is deliberately *not* handled the same way yet.
 
-    Args:
+        Args:
     - `kind`: The shape of the particle, either "spherical", "swarms",
       "cylinder", or "spheroid".
     - `radius`: Particle radius, in meter (e.g., a few micrometers, so
@@ -180,6 +186,19 @@ class ParticleConfig:
       correction to the ambient flow velocity
       ([`physics.hydrodynamic_drag`][magnetofluidics_pinn.physics.hydrodynamic_drag]);
       `0.0` recovers the exact point-particle limit.
+    - `length`: Cylinder length, in meter. Only meaningful (and required to
+      be strictly positive) when `kind == "cylinder"`; unused otherwise.
+    - `aspect_ratio`: Length-to-diameter ratio, for a future spheroidal drag
+      model. Not yet consumed by `max_surface_extension` or by any Faxén-type
+      correction — `kind == "spheroid"` currently falls back to the spherical
+      case (see that property's implementation).
+    - `number`: Number of particles the configuration nominally represents,
+      for `kind == "swarms"`. Not yet consumed downstream —
+      `magnetofluidics_pinn` currently applies one `ParticleConfig` per call
+      to
+      [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]
+      regardless of `initial_states`'s length, so a genuinely heterogeneous
+      swarm is not yet supported (see that function's docstring).
     - `magnetic_moment`: Magnetic dipole moment vector `(m_r, m_z)`, in
       ampere-square-meter (`A m^2`), giving both the particle's magnetic
       "strength" and its (fixed, for Phase 1) orientation. Passed to
@@ -192,8 +211,10 @@ class ParticleConfig:
 
     Raises:
     - `ValueError`: If `radius` is not finite and non-negative, if either
-      component of `magnetic_moment` is not finite, or if
-      `magnetic_moment` is the zero vector.
+      component of `magnetic_moment` is not finite, if `magnetic_moment` is
+      the zero vector, if `kind == "swarms"` and `number` is not strictly
+      positive, or if `kind == "cylinder"` and `length` is not strictly
+      positive.
       
     Todo: manage 2D/3D position
     """
