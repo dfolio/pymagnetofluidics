@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from magnetofluidics_pinn.config import FieldConfig, FluidConfig, ParticleConfig
+from magnetofluidics_pinn.config import MagneticFieldConfig, FluidConfig, ParticleConfig
 from magnetofluidics_pinn.types import Domain
 
 
@@ -54,7 +54,7 @@ class Scales:
     magnetic_field: float
 
 
-def compute_scales(fluid_config: FluidConfig, field_config: FieldConfig) -> Scales:
+def compute_scales(fluid_config: FluidConfig, field_config: MagneticFieldConfig) -> Scales:
     """Derive the characteristic scales from the fluid and field configuration.
 
     Args:

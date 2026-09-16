@@ -31,7 +31,7 @@ from magnetofluidics_pinn.boundary_conditions.flow_bc import (
     no_slip_condition,
     outlet_pressure_condition,
 )
-from magnetofluidics_pinn.config import FieldConfig, FluidConfig, TrainingConfig
+from magnetofluidics_pinn.config import MagneticFieldConfig, FluidConfig, TrainingConfig
 from magnetofluidics_pinn.device_utils import resolve_device
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.collocation import (
@@ -318,7 +318,7 @@ def train(
         network: nn.Module,
         domain: Domain,
         fluid_config: FluidConfig,
-        field_config: FieldConfig,
+        field_config: MagneticFieldConfig,
         training_config: TrainingConfig,
         verbose: bool = False,
         log_every: int = 100,

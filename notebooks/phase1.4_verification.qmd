@@ -376,7 +376,7 @@ Spatial tolerance is defined as $1.0\,\mu\mathrm{m}$ physically ($1.0\times 10^{
 
 ```{python}
 #| label: fig-trajectories
-#| fig-cap: "Particle trajectories advected through the reconstructed velocity field using the adaptive SciPy solver compared with analytical Poiseuille paths."
+#| fig-cap: "Particle trajectories advected through the reconstructed velocity field using the adaptive `SciPy` solver compared with analytical Poiseuille paths."
 
 # Define a uniform magnetic field function
 field_fn = lambda x: mfp.uniform_field(x, magnitude=field_config.magnitude, orientation=field_config.orientation)

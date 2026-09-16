@@ -77,7 +77,7 @@ from scipy.integrate import solve_ivp
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.physics.hydrodynamic_drag import faxen_corrected_velocity
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force
-from magnetofluidics_pinn.types import FieldSample, ParticleState, Domain
+from magnetofluidics_pinn.types import MagneticFieldSample, ParticleState, Domain
 from magnetofluidics_pinn.config import ParticleConfig
 from magnetofluidics_pinn.scaling import Scales, nondimensionalize_particle
 
@@ -88,7 +88,7 @@ _UNIFORMITY_PROBE_OFFSET = 0.1234
 
 
 def _assert_uniform_field(
-    field_fn: Callable[[torch.Tensor], FieldSample], reference_position: torch.Tensor
+    field_fn: Callable[[torch.Tensor], MagneticFieldSample], reference_position: torch.Tensor
 ) -> None:
     """Verify `field_fn` gives the same field at two distinct nearby points.
 
@@ -254,7 +254,7 @@ def _format_trajectory_line(
 
 def integrate_trajectory(
     flow_network: nn.Module,
-    field_fn: Callable[[torch.Tensor], FieldSample],
+    field_fn: Callable[[torch.Tensor], MagneticFieldSample],
     domain: Domain,
     scales: Scales,
     particle_config: ParticleConfig,

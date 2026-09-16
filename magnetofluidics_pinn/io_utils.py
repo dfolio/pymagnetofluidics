@@ -31,7 +31,7 @@ from torch import nn
 
 from magnetofluidics_pinn.config import (
     DomainConfig,
-    FieldConfig,
+    MagneticFieldConfig,
     FluidConfig,
     ParticleConfig,
     TrainingConfig,
@@ -66,7 +66,7 @@ _REQUIRED_CHECKPOINT_KEYS = frozenset(
 _SAFE_CHECKPOINT_GLOBALS: list[type] = [
     DomainConfig,
     FluidConfig,
-    FieldConfig,
+    MagneticFieldConfig,
     ParticleConfig,
     TrainingConfig,
 ]
@@ -129,7 +129,7 @@ def save_checkpoint(
     architecture: NetworkArchitecture,
     domain_config: DomainConfig,
     fluid_config: FluidConfig,
-    field_config: FieldConfig,
+    field_config: MagneticFieldConfig,
     particle_config: ParticleConfig,
     training_config: TrainingConfig,
 ) -> None:
@@ -178,7 +178,7 @@ def save_checkpoint(
 def load_checkpoint(
     checkpoint_path: Path,
     device: str | torch.device | None = None,
-) -> tuple[nn.Module, DomainConfig, FluidConfig, FieldConfig, ParticleConfig, TrainingConfig]:
+) -> tuple[nn.Module, DomainConfig, FluidConfig, MagneticFieldConfig, ParticleConfig, TrainingConfig]:
     """Load a trained network and its associated configuration.
 
     Args:

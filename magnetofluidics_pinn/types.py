@@ -73,7 +73,7 @@ class CollocationPoints:
 
 
 @dataclass(frozen=True)
-class FieldSample:
+class MagneticFieldSample:
     """Prescribed magnetic field evaluated at a set of coordinates.
 
     Both `coordinates` and `field` are dimensionless here: field-generating
@@ -94,7 +94,7 @@ class FieldSample:
     def __post_init__(self) -> None:
         if self.field.shape != self.coordinates.shape:
             raise ValueError(
-                "FieldSample.field must have the same shape as FieldSample.coordinates "
+                "MagneticFieldSample.field must have the same shape as MagneticFieldSample.coordinates "
                 f"(the field is evaluated at, and must match the dimensionality of, "
                 f"those coordinates); got field shape {tuple(self.field.shape)} vs "
                 f"coordinates shape {tuple(self.coordinates.shape)}."

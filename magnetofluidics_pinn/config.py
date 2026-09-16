@@ -112,9 +112,9 @@ class FluidConfig:
     """
     
     regime: Literal["stokes", "navier_stokes"] = "stokes"
-    dynamic_viscosity: float = 1.0e-3
-    density: float = 1.0e3
-    reference_velocity: float = 1.0e-3
+    dynamic_viscosity: float = 1.0e-3   # [Pa.s]
+    density: float = 1.0e3              # [kg/m^3]
+    reference_velocity: float = 1.0e-3  # [m/s]
     reference_length: float = _DEFAULT_REFERENCE_LENGTH
 
     def __post_init__(self) -> None:
@@ -125,7 +125,7 @@ class FluidConfig:
 
 
 @dataclass(frozen=True)
-class FieldConfig:
+class MagneticFieldConfig:
     """Configuration of the prescribed magnetic field input.
 
     `magnitude` already follows the MKSA/SI convention (`tesla`); no further
@@ -149,7 +149,7 @@ class FieldConfig:
     """
     
     source: Literal["uniform", "gradient", "biot_savart"] = "uniform"
-    magnitude: float = 1.0e-2
+    magnitude: float = 1.0e-2  # [T]
     orientation: tuple[float, float] = (1.0, 0.0)
     time_dependent: bool = False
     
@@ -220,12 +220,12 @@ class ParticleConfig:
     """
     
     kind: Literal["spherical", "swarms", "cylinder", "spheroid"] = "spherical"
-    radius: float = 0.0
-    length: float = 0.0
+    radius: float = 0.0       # [m]
+    length: float = 0.0       # [m]
     aspect_ratio: float = 1.0
     number: int = 1
-    magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)
-    position: tuple[float, float] = (0.0, 0.0)
+    magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)  # [A m^2]
+    position: tuple[float, float] = (0.0, 0.0)             # [m]
     
     def __post_init__(self) -> None:
         if not math.isfinite(self.radius) or self.radius < 0.0:

@@ -28,7 +28,7 @@ from magnetofluidics_pinn.boundary_conditions import (
 )
 from magnetofluidics_pinn.config import (
     DomainConfig as DomainConfig,
-    FieldConfig as FieldConfig,
+    MagneticFieldConfig as FieldConfig,
     FluidConfig as FluidConfig,
     ParticleConfig as ParticleConfig,
     TrainingConfig as TrainingConfig,
@@ -70,7 +70,7 @@ from magnetofluidics_pinn.trajectory import integrate_trajectory as integrate_tr
 from magnetofluidics_pinn.types import (
     CollocationPoints as CollocationPoints,
     Domain as Domain,
-    FieldSample as FieldSample,
+    MagneticFieldSample as FieldSample,
     ParticleState as ParticleState,
 )
 from magnetofluidics_pinn.visualization import (
@@ -88,13 +88,13 @@ __all__ = [
     # Configuration
     "DomainConfig",
     "FluidConfig",
-    "FieldConfig",
+    "MagneticFieldConfig",
     "ParticleConfig",
     "TrainingConfig",
     # Data types
     "Domain",
     "CollocationPoints",
-    "FieldSample",
+    "MagneticFieldSample",
     "ParticleState",
     # Geometry
     "build_channel_domain",

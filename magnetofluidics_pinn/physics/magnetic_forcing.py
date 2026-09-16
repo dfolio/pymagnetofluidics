@@ -12,17 +12,17 @@ from typing import Callable
 
 import torch
 
-from magnetofluidics_pinn.types import FieldSample
+from magnetofluidics_pinn.types import MagneticFieldSample
 
 
 def dipole_force(
-    field_fn: Callable[[torch.Tensor], FieldSample],
+    field_fn: Callable[[torch.Tensor], MagneticFieldSample],
     positions: torch.Tensor,
     magnetic_moment: torch.Tensor,
 ) -> torch.Tensor:
     """Compute the dipole force on particles at given positions.
 
-    Uses the point-dipole approximation, `F = grad(m . B)`, where the field
+    Uses the point-dipole approximation, $F = (m\\nabla) B$, where the field
     gradient is obtained through automatic differentiation of `field_fn`.
     Under a spatially uniform field, this evaluates to exactly zero, since
     `B` then carries no dependency on position for autograd to differentiate
@@ -30,7 +30,7 @@ def dipole_force(
 
     Args:
     - `field_fn`: Callable returning a
-      [`FieldSample`][magnetofluidics_pinn.types.FieldSample] for a batch of
+      [`MagneticFieldSample`][magnetofluidics_pinn.types.MagneticFieldSample] for a batch of
       coordinates, e.g., `uniform_field` or `biot_savart_field`.
     - `positions`: Tensor of shape `(n_particles, n_dims)`, requiring
       gradients, with each particle's position.
@@ -44,7 +44,7 @@ def dipole_force(
     Raises:
     - `ValueError`: If `positions` is not a 2-D tensor, if `magnetic_moment`
       cannot be broadcast to `positions`'s shape, or if `field_fn` returns a
-      `FieldSample` whose `field` does not match `positions`'s shape.
+      `MagneticFieldSample` whose `field` does not match `positions`'s shape.
     """
     if positions.ndim != 2:
         raise ValueError(
@@ -71,7 +71,7 @@ def dipole_force(
     field_sample = field_fn(positions_for_grad)
     if field_sample.field.shape != positions.shape:
         raise ValueError(
-            "field_fn must return a FieldSample whose field has the same shape as "
+            "field_fn must return a `MagneticFieldSample` whose field has the same shape as "
             f"positions; got field shape {tuple(field_sample.field.shape)} vs positions "
             f"shape {tuple(positions.shape)}."
         )
