@@ -212,6 +212,8 @@ followed by `{python} lbfgs_rounds` rounds of quasi-Newton L-BFGS refinement on 
 training_config = mfp.TrainingConfig(
     n_interior_points=600,
     n_boundary_points=90,
+    residual_form= "r_weighted",
+    axis_clearance_fraction=0.0,
     learning_rate=1.0e-3,
     n_epochs=n_epochs,
     device=DEVICE,

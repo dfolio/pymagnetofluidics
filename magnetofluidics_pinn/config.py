@@ -346,6 +346,29 @@ class TrainingConfig:
       regularity are currently enforced structurally instead, via
       `networks.apply_hard_wall_constraint`). Kept here so an eventual
       soft-axis-penalty alternative doesn't require a config schema change.
+    - `residual_form`: NEW. Which form of the interior PDE residual
+      `training.trainer` evaluates, passed straight through to
+      [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
+      / [`navier_stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.navier_stokes_residual].
+      `"standard"` (the default) reproduces every prior release's behavior
+      exactly. `"r_weighted"` evaluates the same equations pre-multiplied by
+      $r$ (continuity, $z$-momentum) or $r^2$ ($r$-momentum), which removes
+      their $1/r$, $1/r^2$ singularity at the symmetry axis analytically
+      instead of by sampling away from it, at the cost of implicitly
+      down-weighting how hard the PDE residual is enforced near the axis
+      relative to near the wall (the multiplier itself shrinks the residual
+      there, independent of accuracy) — see that function's docstring for
+      the full derivation and this trade-off.
+    - `axis_clearance_fraction`: NEW. Overrides
+      [`sampling.collocation._AXIS_CLEARANCE_FRACTION`]
+      [magnetofluidics_pinn.sampling.collocation.sample_collocation_points]'s
+      default clearance band (as a fraction of `domain.radius`) kept clear
+      of the symmetry axis when drawing interior points. `None` (the
+      default) keeps that module default and reproduces every prior
+      release's sampling exactly. An explicit value lets interior points be
+      drawn closer to (down to flush with, at `0.0`) the axis, which is
+      only numerically safe under `residual_form="r_weighted"` — see the
+      cross-field check in `__post_init__`.
     - `learning_rate`: Initial learning rate for the Adam phase.
     - `n_epochs`: Number of Adam epochs.
     - `device`: Any device string accepted by `torch.device` (e.g. `"cpu"`,
