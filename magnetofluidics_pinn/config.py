@@ -122,8 +122,35 @@ class FluidConfig:
             value = getattr(self, field_name)
             if not math.isfinite(value) or value <= 0.0:
                 raise ValueError(f"{field_name} must be finite and strictly positive; got {value!r}.")
+    
+    # NEW: Reynolds number, needed by `physics.fluid_residuals.navier_stokes_residual`
+    # to weight the unsteady/convective terms against the (unit, by this
+    # package's own viscous pressure scaling) dimensionless viscosity. Kept
+    # as a derived property rather than a stored field, so it can never
+    # drift out of sync with the four fields it is computed from.
+    @property
+    def reynolds(self) -> float:
+        r"""Reynolds number of the flow, $Re = \rho U_c L_c / \mu$.
 
+        Uses the same characteristic velocity and length
+        ([`scaling.compute_scales`][magnetofluidics_pinn.scaling.compute_scales]
+        scales `velocity`/`length` with) as every other nondimensionalization
+        in this package, so this is exactly the coefficient that must
+        multiply the unsteady and convective terms of the dimensionless
+        Navier-Stokes momentum equation once it is expressed on the same
+        *viscous* pressure scale $P_c = \mu U_c / L_c$ that
+        [`physics.fluid_residuals.stokes_residual`]
+        [magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
+        already assumes (dimensionless viscosity exactly $1$).
 
+        Returns:
+        - The (dimensionless) Reynolds number
+          $Re = \rho U_c L_c / \mu$, always strictly positive since every
+          factor is validated strictly positive in `__post_init__`.
+        """
+        return (self.density * self.reference_velocity * self.reference_length) / self.dynamic_viscosity
+    
+    
 @dataclass(frozen=True)
 class MagneticFieldConfig:
     """Configuration of the prescribed magnetic field input.
@@ -348,6 +375,12 @@ class TrainingConfig:
     n_interior_points: int = 10_000
     n_boundary_points: int = 2_000
     n_axis_points: int = 512
+    # NEW: axis/singularity-treatment knobs, grouped with n_axis_points
+    # since all three concern how the symmetry axis is handled, even
+    # though residual_form and axis_clearance_fraction address a different
+    # mechanism (see each field's docstring above).
+    residual_form: Literal["standard", "r_weighted"] = "standard"
+    axis_clearance_fraction: float | None = None
     learning_rate: float = 1.0e-3
     n_epochs: int = 20_000
     device: str | None = None
@@ -380,6 +413,25 @@ class TrainingConfig:
             raise ValueError("n_boundary_points must be at least 3.")
         if self.n_axis_points <= 0:
             raise ValueError("n_axis_points must be strictly positive.")
+        # NEW: axis_clearance_fraction range check, and its cross-field
+        # interaction with residual_form. A "standard" residual is singular
+        # exactly at r=0 (see stokes_residual's own r <= 0 check) and
+        # numerically fragile arbitrarily close to it, so shrinking the
+        # clearance all the way to 0.0 is only accepted under the
+        # "r_weighted" form, which was built precisely to tolerate that.
+        if self.axis_clearance_fraction is not None:
+            if not math.isfinite(self.axis_clearance_fraction) or not (0.0 <= self.axis_clearance_fraction < 1.0):
+                raise ValueError(
+                    "axis_clearance_fraction must be finite and lie in [0.0, 1.0); "
+                    f"got {self.axis_clearance_fraction!r}."
+                )
+            if self.axis_clearance_fraction == 0.0 and self.residual_form == "standard":
+                raise ValueError(
+                    "axis_clearance_fraction=0.0 (sampling flush to the symmetry axis) "
+                    "is only numerically safe with residual_form='r_weighted', since the "
+                    "'standard' residual is singular at r=0. Either raise "
+                    "axis_clearance_fraction above 0.0 or set residual_form='r_weighted'."
+                )
         if self.learning_rate <= 0.0:
             raise ValueError("learning_rate must be strictly positive.")
         if self.n_epochs <= 0:
