@@ -5,64 +5,128 @@ and pressure) and a set of coordinates, and returns the pointwise PDE
 residual through automatic differentiation. A residual of zero everywhere
 means the network's output satisfies the governing equations exactly.
 
+
 Phase 1 targets the axisymmetric, dimensionless Stokes (creeping-flow)
 equations in cylindrical coordinates `(r, z)`, with velocity components
 `(u_r, u_z)` and pressure `p`; see e.g. [@happel1983low] or
-[@leal2007advanced] for the classical derivation. With the viscous pressure scale
-used by `scaling.compute_scales`, the dimensionless viscosity is exactly 1,
-so no viscosity factor appears below.
+[@leal2007advanced] for the classical derivation. Phase 3 extends this to
+the unsteady, convective (Navier-Stokes) case in `(r, z, t)`. With the
+viscous pressure scale used by `scaling.compute_scales`, the dimensionless
+viscosity is exactly 1 in both cases, so no viscosity factor appears below
+— only, for `navier_stokes_residual`, the Reynolds number weighting the
+unsteady and convective terms (see
+[`FluidConfig.reynolds`][magnetofluidics_pinn.config.FluidConfig.reynolds]).
+
+**Axis singularity, two ways.** Both `1 / r` and `1 / r^2` terms appear
+below (the axisymmetric vector Laplacian's radial component, and the
+continuity equation), which are singular at the symmetry axis, `r = 0`.
+Every residual function here supports two mutually-exclusive strategies for
+that, selected via `residual_form`:
+
+- `"standard"` (the default, and the only form every release before this
+  one implemented): evaluate the equations exactly as written above, and
+  require `r > 0` at every collocation point — i.e., rely on the caller
+  (typically
+  [`sampling.sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points]'s
+  `_AXIS_CLEARANCE_FRACTION`) to never draw a point on, or numerically too
+  close to, the axis.
+- `"r_weighted"`: evaluate the same equations pre-multiplied through by $r$
+  (continuity, $z$-momentum) or $r^2$ ($r$-momentum), which removes the
+  singularity analytically — every term above becomes a regular (if,
+  towards $r=0$, vanishing) function of $r$ — so `r = 0` is an admissible
+  collocation point. This is not a strict improvement over `"standard"`:
+  because the loss minimizes $\\mathbb{E}[(r \\cdot \\text{residual})^2]$
+  (or $r^2$), the multiplier itself shrinks the residual towards the axis
+  independent of how well the underlying, unmultiplied equation is
+  actually satisfied there, i.e. the PDE is enforced with *less relative
+  weight* near $r=0$ than near the wall. What it buys is the ability to
+  sample and enforce the PDE at all in the thin annulus between the axis
+  and `"standard"`'s exclusion band, where today nothing is checked.
+ 
+Neither strategy substitutes for
+[`networks.apply_hard_wall_constraint`][magnetofluidics_pinn.networks.constraints.apply_hard_wall_constraint]:
+that wrapper enforces the axis and wall *boundary conditions*
+($u_r(0,z)=u_r(R,z)=0$,
+$\\partial u_z/\\partial r|_{r=0}=0$) structurally, by construction of the
+network itself; `residual_form` only concerns how safely the *interior* PDE
+residual can be *evaluated* close to the axis. The two are complementary
+and are expected to be used together.
 """
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Literal, NamedTuple
 
 import torch
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 from magnetofluidics_pinn.config import FluidConfig
 
+# The two supported interior-residual singularity treatments; shared between
+# `stokes_residual` and `navier_stokes_residual` so both validate and
+# document the option identically rather than drifting apart.
+_RESIDUAL_FORMS = ("standard", "r_weighted")
 
-def stokes_residual(
-    network: Callable[[torch.Tensor], torch.Tensor],
-    coordinates: torch.Tensor,
-    fluid_config: FluidConfig,
-) -> torch.Tensor:
-    r"""Evaluate the incompressible Stokes-flow residual.
 
-    Enforces continuity, $\nabla \cdot \mathbf{u} = 0$, and the steady
-    momentum balance, $-\nabla p + \nabla^2 \mathbf{u} = 0$, in
-    dimensionless form, at each coordinate.
+class _FlowDerivatives(NamedTuple):
+    """Container for network outputs and spatial derivatives."""
+
+    velocity_r: torch.Tensor
+    velocity_z: torch.Tensor
+    pressure: torch.Tensor
+    d_velocity_r_dr: torch.Tensor
+    d_velocity_r_dz: torch.Tensor
+    d_velocity_z_dr: torch.Tensor
+    d_velocity_z_dz: torch.Tensor
+    dp_dr: torch.Tensor
+    dp_dz: torch.Tensor
+    d2_velocity_r_dr2: torch.Tensor
+    d2_velocity_r_dz2: torch.Tensor
+    d2_velocity_z_dr2: torch.Tensor
+    d2_velocity_z_dz2: torch.Tensor
+    grad_velocity_r: torch.Tensor
+    grad_velocity_z: torch.Tensor
+
+
+def _validate_residual_form(residual_form: str) -> None:
+    """Validate `residual_form` against the two values every residual function accepts.
 
     Args:
-    - `network`: Callable mapping coordinates of shape `(n_points, n_dims)`
-      to a tensor of shape `(n_points, n_dims + 1)`, the last column being
-      pressure and the preceding columns being velocity components.
-    - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
-      gradients, sampled inside the domain.
-    - `fluid_config`: Fluid configuration; must have `regime == "stokes"`.
-
-    Returns:
-    - Tensor of shape `(n_points, n_dims + 1)` with the continuity residual
-      in the last column and the momentum residuals in the preceding
-      columns.
+    - `residual_form`: The value passed by the caller.
 
     Raises:
-    - `ValueError`: If `fluid_config.regime` is not `"stokes"`, if
-      `coordinates` does not have shape `(n_points, 2)` (the axisymmetric
-      `(r, z)` convention this function implements), if `coordinates` does
-      not require gradients, if any radial coordinate is on or across the
-      symmetry axis (`r <= 0`, where the residual is singular), or if
-      `network`'s output does not have exactly 3 columns (`u_r`, `u_z`, `p`).
+    - `ValueError`: If `residual_form` is not one of `"standard"` or
+      `"r_weighted"`.
     """
-    if fluid_config.regime != "stokes":
+    if residual_form not in _RESIDUAL_FORMS:
         raise ValueError(
-            f"Expected a Stokes fluid configuration, got regime={fluid_config.regime!r}."
+            f"residual_form must be one of {_RESIDUAL_FORMS!r}; got {residual_form!r}."
         )
-    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+    
+
+def _validate_inputs(
+    coordinates: torch.Tensor,
+    expected_dim: int,
+    residual_form: str,
+    function_name: str,
+) -> torch.Tensor:
+    """Validate coordinates and residual form, returning the radial coordinates tensor.
+
+    Args:
+    - `coordinates`: Coordinate tensor requiring gradients.
+    - `expected_dim`: Expected coordinate dimensions (2 for (r, z), 3 for (r, z, t)).
+    - `residual_form`: Singularity treatment strategy.
+    - `function_name`: Caller function name for descriptive error reporting.
+
+    Returns:
+    - Radial coordinate tensor of shape `(n_points, 1)`.
+    """
+    _validate_residual_form(residual_form)
+    if coordinates.ndim != 2 or coordinates.shape[1] != expected_dim:
+        dim_str = "(r, z)" if expected_dim == 2 else "(r, z, t)"
         raise ValueError(
-            "coordinates must have shape (n_points, 2) for the axisymmetric "
-            f"(r, z) formulation; got {tuple(coordinates.shape)}."
+            f"coordinates must have shape (n_points, {expected_dim}) for the axisymmetric "
+            f"{dim_str} formulation; got {tuple(coordinates.shape)}."
         )
     if not coordinates.requires_grad:
         raise ValueError(
@@ -70,12 +134,26 @@ def stokes_residual(
             "so that the residual can be evaluated through automatic differentiation."
         )
     radius = coordinates[:, 0:1]
-    if torch.any(radius <= 0.0):
+    if residual_form == "standard":
+        if torch.any(radius <= 0.0):
+            raise ValueError(
+                f"{function_name} received coordinates on or across the symmetry "
+                "axis (r <= 0) under residual_form='standard'; exclude the axis "
+                "when sampling interior points, or use residual_form='r_weighted'."
+            )
+    elif torch.any(radius < 0.0):
         raise ValueError(
-            "stokes_residual received coordinates on or across the symmetry "
-            "axis (r <= 0); exclude the axis when sampling interior points."
+            f"{function_name} received a negative radial coordinate under "
+            f"residual_form={residual_form!r}; r must be non-negative."
         )
+    return radius
 
+
+def _compute_derivatives(
+    network: Callable[[torch.Tensor], torch.Tensor],
+    coordinates: torch.Tensor,
+) -> _FlowDerivatives:
+    """Evaluate network and compute first and second spatial derivatives."""
     output = network(coordinates)
     if output.shape[1] != 3:
         raise ValueError(
@@ -101,58 +179,277 @@ def stokes_residual(
     d2_velocity_z_dr2 = scalar_field_gradient(d_velocity_z_dr, coordinates)[:, 0:1]
     d2_velocity_z_dz2 = scalar_field_gradient(d_velocity_z_dz, coordinates)[:, 1:2]
 
-    # Axisymmetric continuity: (1/r) d(r u_r)/dr + d(u_z)/dz
-    #                         = d(u_r)/dr + u_r/r + d(u_z)/dz.
-    continuity_residual = d_velocity_r_dr + velocity_r / radius + d_velocity_z_dz
-
-    # r-momentum: the Laplacian of an axisymmetric vector field's radial
-    # component carries an extra -u_r/r**2 term relative to a scalar
-    # Laplacian.
-    momentum_r_residual = (
-        -dp_dr
-        + d2_velocity_r_dr2
-        + d_velocity_r_dr / radius
-        - velocity_r / radius**2
-        + d2_velocity_r_dz2
+    return _FlowDerivatives(
+        velocity_r=velocity_r,
+        velocity_z=velocity_z,
+        pressure=pressure,
+        d_velocity_r_dr=d_velocity_r_dr,
+        d_velocity_r_dz=d_velocity_r_dz,
+        d_velocity_z_dr=d_velocity_z_dr,
+        d_velocity_z_dz=d_velocity_z_dz,
+        dp_dr=dp_dr,
+        dp_dz=dp_dz,
+        d2_velocity_r_dr2=d2_velocity_r_dr2,
+        d2_velocity_r_dz2=d2_velocity_r_dz2,
+        d2_velocity_z_dr2=d2_velocity_z_dr2,
+        d2_velocity_z_dz2=d2_velocity_z_dz2,
+        grad_velocity_r=grad_velocity_r,
+        grad_velocity_z=grad_velocity_z,
     )
 
-    # z-momentum: the axial component behaves like a scalar Laplacian.
-    momentum_z_residual = -dp_dz + d2_velocity_z_dr2 + d_velocity_z_dr / radius + d2_velocity_z_dz2
 
-    return torch.cat([momentum_r_residual, momentum_z_residual, continuity_residual], dim=1)
+def _continuity_residual(
+    velocity_r: torch.Tensor,
+    d_velocity_r_dr: torch.Tensor,
+    d_velocity_z_dz: torch.Tensor,
+    radius: torch.Tensor,
+    residual_form: str,
+) -> torch.Tensor:
+    """Evaluate axisymmetric continuity residual under standard or r-weighted form."""
+    if residual_form == "standard":
+        return d_velocity_r_dr + velocity_r / radius + d_velocity_z_dz
+    return radius * (d_velocity_r_dr + d_velocity_z_dz) + velocity_r
 
 
-def navier_stokes_residual(
+def _stokes_momentum_residuals(
+    derivs: _FlowDerivatives,
+    radius: torch.Tensor,
+    residual_form: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Evaluate the steady Stokes momentum residuals: -grad p + laplacian u."""
+    if residual_form == "standard":
+        momentum_r = (
+            -derivs.dp_dr
+            + derivs.d2_velocity_r_dr2
+            + derivs.d_velocity_r_dr / radius
+            - derivs.velocity_r / radius.square()
+            + derivs.d2_velocity_r_dz2
+        )
+        momentum_z = (
+            -derivs.dp_dz
+            + derivs.d2_velocity_z_dr2
+            + derivs.d_velocity_z_dr / radius
+            + derivs.d2_velocity_z_dz2
+        )
+    else:
+        r_2 = radius.square()
+        momentum_r = (
+            -r_2 * derivs.dp_dr
+            + r_2 * (derivs.d2_velocity_r_dr2 + derivs.d2_velocity_r_dz2)
+            + radius * derivs.d_velocity_r_dr
+            - derivs.velocity_r
+        )
+        momentum_z = (
+            -radius * derivs.dp_dz
+            + radius * (derivs.d2_velocity_z_dr2 + derivs.d2_velocity_z_dz2)
+            + derivs.d_velocity_z_dr
+        )
+    return momentum_r, momentum_z
+
+
+def stokes_residual(
     network: Callable[[torch.Tensor], torch.Tensor],
     coordinates: torch.Tensor,
     fluid_config: FluidConfig,
+    residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
-    """Evaluate the incompressible, unsteady Navier-Stokes residual.
-
-    Enforces continuity and the momentum balance including the convective and
-    unsteady terms, in dimensionless form, at each coordinate.
-
+    r"""Evaluate the incompressible Stokes-flow residual.
+ 
+    Enforces continuity, $\nabla \cdot \mathbf{u} = 0$, and the steady
+    momentum balance, $-\nabla p + \nabla^2 \mathbf{u} = 0$, in
+    dimensionless form, at each coordinate.
+ 
     Args:
     - `network`: Callable mapping coordinates of shape `(n_points, n_dims)`
-      (including time) to a tensor of shape `(n_points, n_dims + 1)`, the
-      last column being pressure and the preceding columns being velocity
-      components.
+      to a tensor of shape `(n_points, n_dims + 1)`, the last column being
+      pressure and the preceding columns being velocity components.
     - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
-      gradients, including a time coordinate.
-    - `fluid_config`: Fluid configuration; must have
-      `regime == "navier_stokes"`.
-
+      gradients, sampled inside the domain.
+    - `fluid_config`: Fluid configuration; must have `regime == "stokes"`.
+    - `residual_form`: NEW. `"standard"` (default) evaluates the equations
+      as classically written, and requires `r > 0` everywhere (unchanged
+      from every prior release). `"r_weighted"` evaluates the same
+      equations pre-multiplied by $r$ or $r^2$ to remove the axis
+      singularity analytically, and additionally accepts `r = 0`. See this
+      module's docstring for the full derivation and the trade-off between
+      the two.
+ 
     Returns:
     - Tensor of shape `(n_points, n_dims + 1)` with the continuity residual
       in the last column and the momentum residuals in the preceding
-      columns.
+      columns. Under `"r_weighted"`, every column is the corresponding
+      `"standard"` column multiplied by $r$ ($z$-momentum, continuity) or
+      $r^2$ ($r$-momentum).
+ 
+    Raises:
+    - `ValueError`: If `fluid_config.regime` is not `"stokes"`, if
+      `residual_form` is not `"standard"` or `"r_weighted"`, if
+      `coordinates` does not have shape `(n_points, 2)` (the axisymmetric
+      `(r, z)` convention this function implements), if `coordinates` does
+      not require gradients, if any radial coordinate is negative (or, under
+      `residual_form="standard"`, on or across the symmetry axis, `r <= 0`,
+      where that form's residual is singular), or if `network`'s output does
+      not have exactly 3 columns (`u_r`, `u_z`, `p`).
+    """
+    if fluid_config.regime != "stokes":
+        raise ValueError(
+            f"Expected a Stokes fluid configuration, got regime={fluid_config.regime!r}."
+        )
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(
+            "coordinates must have shape (n_points, 2) for the axisymmetric "
+            f"(r, z) formulation; got {tuple(coordinates.shape)}."
+        )
+    if not coordinates.requires_grad:
+        raise ValueError(
+            "coordinates must require gradients (call `.requires_grad_(True)`) "
+            "so that the residual can be evaluated through automatic differentiation."
+        )
+    radius = _validate_inputs(
+        coordinates=coordinates,
+        expected_dim=2,
+        residual_form=residual_form,
+        function_name="stokes_residual",
+    )
+    
+    derivs = _compute_derivatives(network, coordinates)
+    momentum_r, momentum_z = _stokes_momentum_residuals(derivs, radius, residual_form)
+    continuity = _continuity_residual(
+        velocity_r=derivs.velocity_r,
+        d_velocity_r_dr=derivs.d_velocity_r_dr,
+        d_velocity_z_dz=derivs.d_velocity_z_dz,
+        radius=radius,
+        residual_form=residual_form,
+    )
+    
+    return torch.cat([momentum_r, momentum_z, continuity], dim=1)
+
+
+def navier_stokes_residual(
+        network: Callable[[torch.Tensor], torch.Tensor],
+        coordinates: torch.Tensor,
+        fluid_config: FluidConfig,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
+) -> torch.Tensor:
+    r"""Evaluate the incompressible, unsteady Navier-Stokes residual.
+
+    Enforces continuity and the momentum balance including the convective and
+    unsteady terms, in dimensionless form, at each coordinate:
+    $$
+    \nabla \cdot \mathbf{u} = 0, \qquad
+    Re\left(\frac{\partial \mathbf{u}}{\partial t}
+      + (\mathbf{u} \cdot \nabla)\mathbf{u}\right)
+      + \nabla p - \nabla^2 \mathbf{u} = \mathbf{0},
+    $$
+    with $Re$ = [`fluid_config.reynolds`][magnetofluidics_pinn.config.FluidConfig.reynolds].
+    Continuity carries no time derivative for an incompressible fluid, so
+    its form (and $r$-weighted variant) is identical to
+    [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]'s;
+    only the momentum equations gain the $Re$-weighted unsteady and
+    convective terms. `Re` multiplies through consistently for the
+    `"r_weighted"` form as well: the full momentum equation, including its
+    $Re$ term, is what gets pre-multiplied by $r$ or $r^2$, exactly as for
+    `stokes_residual`'s viscous/pressure terms — see this module's
+    docstring for that derivation.
+
+    No external (e.g. magnetic) body-force term appears here, matching
+    `stokes_residual`: this package's magnetic dipole force
+    ([`physics.magnetic_forcing.dipole_force`][magnetofluidics_pinn.physics.magnetic_forcing.dipole_force])
+    acts on a tracer particle's equation of motion in
+    `trajectory.integrate_trajectory`, not on the carrier fluid itself
+    (an ordinary, non-magnetized Newtonian fluid is assumed throughout,
+    not a ferrofluid), so it has no place in the fluid's own momentum
+    balance.
+
+    Args:
+    - `network`: Callable mapping coordinates of shape `(n_points, 3)` to a
+      tensor of shape `(n_points, 3)`: `(u_r, u_z, p)`.
+    - `coordinates`: Tensor of shape `(n_points, 3)`, requiring gradients,
+      sampled inside the domain, in the `(r, z, t)` convention (an explicit
+      time column, appended after the steady `(r, z)` pair
+      [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
+      uses).
+    - `fluid_config`: Fluid configuration; must have
+      `regime == "navier_stokes"`.
+    - `residual_form`: NEW. Same meaning as
+      [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]'s
+      `residual_form`: `"standard"` (default) requires `r > 0`;
+      `"r_weighted"` removes the axis singularity analytically and accepts
+      `r = 0`.
+
+    Returns:
+    - Tensor of shape `(n_points, 3)` with the continuity residual in the
+      last column and the momentum residuals in the preceding columns,
+      exactly as
+      [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
+      returns them.
 
     Raises:
-    - `ValueError`: If `fluid_config.regime` is not `"navier_stokes"`.
+    - `ValueError`: If `fluid_config.regime` is not `"navier_stokes"`, if
+      `residual_form` is not `"standard"` or `"r_weighted"`, if
+      `coordinates` does not have shape `(n_points, 3)` (the axisymmetric
+      `(r, z, t)` convention this function implements), if `coordinates`
+      does not require gradients, if any radial coordinate is negative (or,
+      under `residual_form="standard"`, on or across the symmetry axis),
+      or if `network`'s output does not have exactly 3 columns.
     """
     if fluid_config.regime != "navier_stokes":
         raise ValueError(
             "Expected a Navier-Stokes fluid configuration, "
             f"got regime={fluid_config.regime!r}."
         )
-    raise NotImplementedError("Implementation scheduled for a later roadmap phase.")
+    _validate_residual_form(residual_form)
+    if coordinates.ndim != 2 or coordinates.shape[1] != 3:
+        raise ValueError(
+            "coordinates must have shape (n_points, 3) for the axisymmetric "
+            f"(r, z, t) formulation; got {tuple(coordinates.shape)}."
+        )
+    if not coordinates.requires_grad:
+        raise ValueError(
+            "coordinates must require gradients (call `.requires_grad_(True)`) "
+            "so that the residual can be evaluated through automatic differentiation."
+        )
+    radius = _validate_inputs(
+        coordinates=coordinates,
+        expected_dim=3,
+        residual_form=residual_form,
+        function_name="navier_stokes_residual",
+    )
+    
+    derivs = _compute_derivatives(network, coordinates)
+    
+    # Temporal derivatives from the 3rd coordinate column
+    d_velocity_r_dt = derivs.grad_velocity_r[:, 2:3]
+    d_velocity_z_dt = derivs.grad_velocity_z[:, 2:3]
+    
+    material_derivative_r = (
+            d_velocity_r_dt
+            + derivs.velocity_r * derivs.d_velocity_r_dr
+            + derivs.velocity_z * derivs.d_velocity_r_dz
+    )
+    material_derivative_z = (
+            d_velocity_z_dt
+            + derivs.velocity_r * derivs.d_velocity_z_dr
+            + derivs.velocity_z * derivs.d_velocity_z_dz
+    )
+    
+    # Momentum balance: Re * Du/Dt + grad p - laplacian u = Re * Du/Dt - M_stokes
+    stokes_mom_r, stokes_mom_z = _stokes_momentum_residuals(derivs, radius, residual_form)
+    
+    reynolds = fluid_config.reynolds
+    if residual_form == "standard":
+        momentum_r = reynolds * material_derivative_r - stokes_mom_r
+        momentum_z = reynolds * material_derivative_z - stokes_mom_z
+    else:
+        momentum_r = radius.square() * reynolds * material_derivative_r - stokes_mom_r
+        momentum_z = radius * reynolds * material_derivative_z - stokes_mom_z
+    
+    continuity = _continuity_residual(
+        velocity_r=derivs.velocity_r,
+        d_velocity_r_dr=derivs.d_velocity_r_dr,
+        d_velocity_z_dz=derivs.d_velocity_z_dz,
+        radius=radius,
+        residual_form=residual_form,
+    )
+    
+    return torch.cat([momentum_r, momentum_z, continuity], dim=1)
