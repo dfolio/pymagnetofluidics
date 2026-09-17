@@ -11,11 +11,13 @@ from magnetofluidics_pinn.training.trainer import (
     train as train,
     LossHistory as LossHistory,
     TrainingHistory as TrainingHistory,
+    LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES
 )
 
 __all__ = [
     "compose_loss",
     "train",
     "LossHistory",
-    "TrainingHistory"
+    "TrainingHistory",
+    "LOSS_COMPONENT_NAMES"
 ]

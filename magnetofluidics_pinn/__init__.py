@@ -28,7 +28,7 @@ from magnetofluidics_pinn.boundary_conditions import (
 )
 from magnetofluidics_pinn.config import (
     DomainConfig as DomainConfig,
-    MagneticFieldConfig as FieldConfig,
+    MagneticFieldConfig as MagneticFieldConfig,
     FluidConfig as FluidConfig,
     ParticleConfig as ParticleConfig,
     TrainingConfig as TrainingConfig,
@@ -51,6 +51,8 @@ from magnetofluidics_pinn.physics import (
     faxen_corrected_velocity as faxen_corrected_velocity,
     navier_stokes_residual as navier_stokes_residual,
     stokes_residual as stokes_residual,
+    axial_flow_rate as axial_flow_rate,
+    poiseuille_reference_flow_rate as poiseuille_reference_flow_rate
 )
 from magnetofluidics_pinn.sampling import (
     sample_collocation_points as sample_collocation_points,
@@ -65,12 +67,13 @@ from magnetofluidics_pinn.training import (compose_loss as compose_loss,
                                            train as train,
                                            LossHistory as LossHistory,
                                            TrainingHistory as TrainingHistory,
+                                           LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES
                                            )
 from magnetofluidics_pinn.trajectory import integrate_trajectory as integrate_trajectory
 from magnetofluidics_pinn.types import (
     CollocationPoints as CollocationPoints,
     Domain as Domain,
-    MagneticFieldSample as FieldSample,
+    MagneticFieldSample as MagneticFieldSample,
     ParticleState as ParticleState,
 )
 from magnetofluidics_pinn.visualization import (
@@ -107,6 +110,8 @@ __all__ = [
     "gradient_field",
     "biot_savart_field",
     # Physics
+    "axial_flow_rate",
+    "poiseuille_reference_flow_rate",
     "stokes_residual",
     "navier_stokes_residual",
     "dipole_force",
@@ -121,6 +126,7 @@ __all__ = [
     "train",
     "LossHistory",
     "TrainingHistory",
+    "LOSS_COMPONENT_NAMES",
     # Trajectory
     "integrate_trajectory",
     # Visualization
