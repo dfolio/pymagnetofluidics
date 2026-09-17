@@ -358,6 +358,16 @@ class TrainingConfig:
     lbfgs_n_boundary_points: int = 450
     lbfgs_rounds: int = 4
     lbfgs_iterations_per_round: int = 500
+    # NEW: independent weights for the decomposed interior-residual terms
+    # and the two additional physics-fidelity loss terms (see docstring
+    # above and `training.trainer`). Defaults are a starting point, not a
+    # proven-optimal choice; re-tune against the verification notebook.
+    momentum_loss_weight: float = 1.0
+    continuity_loss_weight: float = 20.0
+    positivity_loss_weight: float = 1.0
+    conservation_loss_weight: float = 20.0
+    n_conservation_stations: int = 8
+    n_conservation_quadrature_points: int = 64
     
     def __post_init__(self) -> None:
         """Validate configuration parameters and resolve target device."""
@@ -374,11 +384,27 @@ class TrainingConfig:
             raise ValueError("learning_rate must be strictly positive.")
         if self.n_epochs <= 0:
             raise ValueError("n_epochs must be strictly positive.")
+        # NEW: validate the four new loss weights and the conservation
+        # quadrature resolution, mirroring the existing validation style.
+        for weight_name in (
+                "momentum_loss_weight", "continuity_loss_weight",
+                "positivity_loss_weight", "conservation_loss_weight",
+        ):
+            weight_value = getattr(self, weight_name)
+            if not math.isfinite(weight_value) or weight_value < 0.0:
+                raise ValueError(f"{weight_name} must be finite and non-negative; got {weight_value!r}.")
+        if self.n_conservation_stations <= 0:
+            raise ValueError(
+                f"n_conservation_stations must be strictly positive; got {self.n_conservation_stations!r}.")
+        if self.n_conservation_quadrature_points < 2:
+            raise ValueError(
+                "n_conservation_quadrature_points must be at least 2 for trapezoidal "
+                f"quadrature; got {self.n_conservation_quadrature_points!r}."
+            )
         resolved_device = resolve_device(self.device)
         if resolved_device.type not in ("cuda", "cpu"):
             raise ValueError(
                 f"device type must be 'cuda' or 'cpu', got '{resolved_device.type}'."
             )
-        
         # Dataclass is frozen; mutate through object.__setattr__
         object.__setattr__(self, "device", resolved_device)
