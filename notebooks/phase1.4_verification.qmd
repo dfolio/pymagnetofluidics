@@ -61,7 +61,7 @@ $$\begin{aligned}
 where $\nabla^2 \equiv \frac{1}{r}\frac{\partial}{\partial r}\left(r\frac{\partial}{\partial r}\right) + \frac{\partial^2}{\partial z^2}$.
 
 <!-- CHANGED: the analytical solution used to be stated twice, redundantly, and both times dropped the R*-dependence of u_z* and p* — invisible only because R*=1 in this particular run. It is now stated once, generally, matching `poiseuille_solution` exactly for any R*. -->
-Using the reference scales $R_0$, $U_{\mathrm{ref}}$, and $p_0 = \mu U_{\mathrm{ref}} / R_0$, coordinates and fields are nondimensionalized as $r^* = r/R_0$, $z^* = z/R_0$, $\vb{u}^* = \vb{u}/U_{\mathrm{ref}}$, and $p^* = p/p_0$, giving $R^* = 1.0$ and $L^* = 4.0$ for the present geometry. At the channel wall ($r^*=R^*$), no-slip enforces $u_r(R,z) = u_z(R,z) = 0$. With outlet gauge pressure $p^*(r^*, L^*) = 0$, the exact Hagen–Poiseuille solution is, for a general dimensionless radius $R^*$:
+Using the reference scales $R_0$, $U_{\mathrm{ref}}$, and $p_0 = \mu U_{\mathrm{ref}} / R_0$, coordinates and fields are nondimensionalized as $r^* = r/R_0$, $z^* = z/R_0$, $\mathbf{u}^* = \mathbf{u}/U_{\mathrm{ref}}$, and $p^* = p/p_0$, giving $R^* = 1.0$ and $L^* = 4.0$ for the present geometry. At the channel wall ($r^*=R^*$), no-slip enforces $u_r(R,z) = u_z(R,z) = 0$. With outlet gauge pressure $p^*(r^*, L^*) = 0$, the exact Hagen–Poiseuille solution is, for a general dimensionless radius $R^*$:
 $$
 u_r^*(r^*, z^*) = 0, \quad
 u_z^*(r^*, z^*) = 1 - \left(\frac{r^*}{R^*}\right)^{2}, \quad
@@ -120,7 +120,7 @@ fluid_config = mfp.FluidConfig(
     reference_velocity=U_ref,
     reference_length=R,
 )
-field_config = mfp.FieldConfig(source="uniform", magnitude=1.0e-2, orientation=(1.0, 0.0))
+field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, orientation=(1.0, 0.0))
 
 physical_domain = mfp.build_channel_domain(domain_config)
 scales = mfp.compute_scales(fluid_config, field_config)
@@ -370,7 +370,7 @@ print("=" * 78 + "\n")
 
 ## Particle Trajectory Integration
 
-Under a spatially uniform magnetic field $\vb{B}$, the point-dipole force $\vb{F}_{\mathrm{mag}} = \nabla(\vb{m}\cdot\vb{B}) \equiv \vb{0}$ vanishes identically. Passive tracers released at initial coordinates $(r_0, z_0)$ follow constant-radius trajectories $r(t) = r_0$, $z(t) = z_0 + [1 - (r_0/R)^2]\,t$.
+Under a spatially uniform magnetic field $\mathbf{B}$, the point-dipole force $\mathbf{F}_{\mathrm{mag}} = \nabla(\mathbf{m}\cdot\mathbf{B}) \equiv \mathbf{0}$ vanishes identically. Passive tracers released at initial coordinates $(r_0, z_0)$ follow constant-radius trajectories $r(t) = r_0$, $z(t) = z_0 + [1 - (r_0/R)^2]\,t$.
 
 Spatial tolerance is defined as $1.0\,\mu\mathrm{m}$ physically ($1.0\times 10^{-6}\,\mathrm{m} / 7.5\times 10^{-4}\,\mathrm{m} \approx 1.33\times 10^{-3}$ dimensionless units).
 
@@ -632,13 +632,13 @@ initial_state = [mfp.ParticleState(
 # never push the particle anywhere, and this package does not otherwise
 # validate a non-uniform field's dimensional correctness outside this
 # kind of deliberate, synthetic test.
-def repulsive_field_fn(coords: torch.Tensor) -> mfp.FieldSample:
+def repulsive_field_fn(coords: torch.Tensor) -> mfp.MagneticFieldSample:
     """Synthetic, non-physical field used only to exercise the wall-collision event."""
-    # CHANGED (bug fix): a FieldSample requires `coordinates` too, and its
+    # CHANGED (bug fix): a MagneticFieldSample requires `coordinates` too, and its
     # `field` must match `coords`'s 2 columns (r, z), not 3.
     field_tensor = torch.zeros((coords.shape[0], 2), device=coords.device, dtype=coords.dtype)
     field_tensor[:, 0] = coords[:, 0]  # Linear gradient driving outward drift
-    return mfp.FieldSample(coordinates=coords, field=field_tensor)
+    return mfp.MagneticFieldSample(coordinates=coords, field=field_tensor)
 
 
 # Compute Stokes mobility matrix for the finite sphere: M* = Id / a*
