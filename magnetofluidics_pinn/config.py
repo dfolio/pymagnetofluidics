@@ -178,12 +178,11 @@ class ParticleConfig:
     `particle_radius` argument expects — see that function's docstring for
     why `magnetic_moment` is deliberately *not* handled the same way yet.
 
-        Args:
+    Args:
     - `kind`: The shape of the particle, either "spherical", "swarms",
       "cylinder", or "spheroid".
-    - `radius`: Particle radius, in meter (e.g., a few micrometers, so
-      around `1.0e-6` to `1.0e-5`). Used only for the Faxén-law finite-size
-      correction to the ambient flow velocity
+    - `radius`: Particle radius for "spherical" or "swarms", in meter.
+      Used only for the Faxén-law finite-size correction to the ambient flow velocity
       ([`physics.hydrodynamic_drag`][magnetofluidics_pinn.physics.hydrodynamic_drag]);
       `0.0` recovers the exact point-particle limit.
     - `length`: Cylinder length, in meter. Only meaningful (and required to
@@ -199,6 +198,7 @@ class ParticleConfig:
       [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]
       regardless of `initial_states`'s length, so a genuinely heterogeneous
       swarm is not yet supported (see that function's docstring).
+    - `position`: Initial position of the particle, in meter (e.g., `(0.0, 0.0)` for the center of the domain).
     - `magnetic_moment`: Magnetic dipole moment vector `(m_r, m_z)`, in
       ampere-square-meter (`A m^2`), giving both the particle's magnetic
       "strength" and its (fixed, for Phase 1) orientation. Passed to
@@ -207,7 +207,7 @@ class ParticleConfig:
       dimensionless units that function's docstring describes — this
       config field records the *physical* moment for bookkeeping, but does
       not itself perform that conversion (see the caveat above).
-    - `position`: Initial position of the particle, in meter (e.g., `(0.0, 0.0)` for the center of the domain).
+    - `magnetic_ration`: volumic ration of magnetic material.
 
     Raises:
     - `ValueError`: If `radius` is not finite and non-negative, if either
@@ -216,7 +216,7 @@ class ParticleConfig:
       positive, or if `kind == "cylinder"` and `length` is not strictly
       positive.
       
-    Todo: manage 2D/3D position
+    Todo: manage 2D/3D particle
     """
     
     kind: Literal["spherical", "swarms", "cylinder", "spheroid"] = "spherical"
@@ -224,8 +224,9 @@ class ParticleConfig:
     length: float = 0.0       # [m]
     aspect_ratio: float = 1.0
     number: int = 1
-    magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)  # [A m^2]
     position: tuple[float, float] = (0.0, 0.0)             # [m]
+    magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)  # [A m^2]
+    magnetic_ratio: float = 1.0
     
     def __post_init__(self) -> None:
         if not math.isfinite(self.radius) or self.radius < 0.0:
@@ -246,6 +247,52 @@ class ParticleConfig:
             return math.hypot(self.radius, self.length / 2.0)
         return self.radius
     
+    @property
+    def volume(self) -> float :
+        """Returns the particle volume in cubic meters."""
+        if self.kind == "spherical":
+            return (4.0 / 3.0) * math.pi * self.radius**3
+        elif self.kind == "cylinder":
+            return math.pi * self.radius**2 * self.length
+        elif self.kind == "spheroid":
+            # Assuming prolate spheroid: volume = (4/3) * pi * a^2 * b
+            a = self.radius  # semi-minor axis
+            b = self.length / 2.0  # semi-major axis
+            return (4.0 / 3.0) * math.pi * a**2 * b
+        elif self.kind == "swarms":
+            # Assuming spherical particles for swarms; adjust if needed
+            return self.number * (4.0 / 3.0) * math.pi * self.radius**3
+        else:
+            raise ValueError(f"Unknown particle kind: {self.kind}")
+
+    @property
+    def magnetic_volume(self) -> float :
+        """"Returns the magnetic volume"""
+        return self.volume*self.magnetic_ratio
+        
+    @property
+    def magnetization(self) -> tuple[float | int, ...]:
+        """Returns the magnetization vector in A/m."""
+        return tuple(component / self.magnetic_volume for component in self.magnetic_moment)
+
+    @magnetization.setter
+    def magnetization(self, value: tuple[float, float]) -> None:
+        """Set magnetization (A/m) by updating magnetic_moment accordingly.
+
+        Note: ParticleConfig is a frozen dataclass; this setter uses
+        object.__setattr__ to mutate the stored magnetic_moment while
+        preserving the external API. Use sparingly — immutability is the
+        intended default.
+        """
+        if not (isinstance(value, tuple) and len(value) == 2):
+            raise TypeError("magnetization must be a tuple[float, float].")
+        if not all(math.isfinite(v) for v in value):
+            raise ValueError(f"magnetization components must be finite; got {value!r}.")
+        new_moment = tuple(v * self.magnetic_volume for v in value)
+        if math.hypot(*new_moment) <= 0.0:
+            raise ValueError("magnetic_moment computed from magnetization must be non-zero.")
+        object.__setattr__(self, "magnetic_moment", new_moment)
+
 
 @dataclass(frozen=True)
 class TrainingConfig:
