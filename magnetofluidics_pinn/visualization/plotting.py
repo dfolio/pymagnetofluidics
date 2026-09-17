@@ -16,7 +16,9 @@ from torch import nn
 from magnetofluidics_pinn.device_utils import resolve_module_device
 from magnetofluidics_pinn.types import Domain, ParticleState
 
-from magnetofluidics_pinn.training.trainer import TrainingHistory as TrainingHistory
+from magnetofluidics_pinn.training.trainer import (TrainingHistory as TrainingHistory,
+                                                   LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES)
+
 
 def plot_streamlines(
     flow_network: nn.Module, domain: Domain, resolution: int = 200
@@ -117,6 +119,7 @@ def plot_trajectories(
     figure.tight_layout()
     return figure
 
+
 # CHANGE: Added functional visualization and summary routine for TrainingHistory
 def plot_training_history(
     history: TrainingHistory,
@@ -159,16 +162,29 @@ def plot_training_history(
             if n_lbfgs > 0
             else np.asarray(adam_vals)
         )
-
-    loss_metrics = (
-        ("Composite Total Loss", merge_series("total"), "black", "--"),
-        ("Stokes PDE Residual", merge_series("pde"), "tab:blue", "-"),
-        ("Wall No-Slip Loss", merge_series("wall"), "tab:orange", "-"),
-        ("Inlet Velocity Loss", merge_series("inlet"), "tab:green", "-"),
-        ("Outlet Pressure Loss", merge_series("outlet"), "tab:purple", "-"),
+    
+    panel_titles: dict[str, str] = {
+        "total"       : "Composite Total Loss",
+        "momentum_r"  : "Radial-Momentum Residual",
+        "momentum_z"  : "Axial-Momentum Residual",
+        "continuity"  : "Continuity (Mass-Conservation) Residual",
+        "wall"        : "Wall No-Slip Loss",
+        "inlet"       : "Inlet Velocity Loss",
+        "outlet"      : "Outlet Pressure Loss",
+        "positivity"  : "Axial-Velocity Positivity Penalty",
+        "conservation": "Global Flow-Rate Conservation Loss",
+    }
+    palette = ("black", "tab:blue", "tab:cyan", "tab:red", "tab:orange", "tab:green", "tab:purple", "tab:brown",
+               "tab:pink")
+    field_order = ("total",) + LOSS_COMPONENT_NAMES
+    loss_metrics = tuple(
+        (panel_titles[field], merge_series(field), color, "--" if field == "total" else "-")
+        for field, color in zip(field_order, palette)
     )
-
-    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    n_panels = len(loss_metrics) + 1
+    n_cols = 3
+    n_rows = np.ceil(n_panels / n_cols).astype(int)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.0 * n_cols, 3.6 * n_rows))
     axes_flat = axes.flatten()
 
     def render_loss_axis(
@@ -196,12 +212,10 @@ def plot_training_history(
         ax.grid(True, linestyle=":", alpha=0.6)
         ax.legend(loc="upper right", fontsize=8)
 
-    # Render panels 1-5 for individual loss metrics
-    for _ax, (_title, _series, _col, _ls) in zip(axes_flat[:5], loss_metrics):
+    for _ax, (_title, _series, _col, _ls) in zip(axes_flat[: len(loss_metrics)], loss_metrics):
         render_loss_axis(_ax, _title, _series, _col, _ls)
+    overlay_ax = axes_flat[len(loss_metrics)]
 
-    # Panel 6: Multi-loss overlay comparison
-    overlay_ax = axes_flat[5]
     for _title, _series, _col, _ls in loss_metrics:
         overlay_ax.plot(combined_steps, _series, color=_col, linestyle=_ls, linewidth=1.2, label=_title)
     if n_lbfgs > 0 and n_adam > 0:
@@ -213,7 +227,10 @@ def plot_training_history(
     overlay_ax.set_title("All Losses Overlaid")
     overlay_ax.grid(True, linestyle=":", alpha=0.6)
     overlay_ax.legend(loc="upper right", fontsize=7)
-
+    
+    for _ax in axes_flat[n_panels:]:
+        _ax.axis("off")
+        
     fig.suptitle("PINN Loss Convergence Dynamics", fontsize=13, y=1.00)
     fig.tight_layout()
     return fig
