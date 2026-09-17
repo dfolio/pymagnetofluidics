@@ -326,7 +326,25 @@ def integrate_trajectory(
             f"mobility_tensor must have shape ({len(initial_states)}, {n_dims}, {n_dims}) "
             f"(n_particles, n_dims, n_dims); got {tuple(mobility_tensor.shape)}."
         )
-
+    # NEW: fail fast, with a clear message, rather than letting the first
+    # `solve_ivp` right-hand-side evaluation raise deep inside
+    # `faxen_corrected_velocity`'s own r > 0 guard. `ParticleConfig`'s
+    # default `position == (0.0, 0.0)` sits exactly on the symmetry axis;
+    # combined with a non-zero `radius` (Faxén correction active), that
+    # guard is otherwise only discovered mid-solve.
+    if particle_config.radius > 0.0:
+        on_axis_particles = [
+            index for index, state in enumerate(initial_states) if state.position[0].item() <= 0.0
+        ]
+        if on_axis_particles:
+            raise ValueError(
+                "integrate_trajectory received a non-zero particle_config.radius "
+                f"(Faxén correction active) together with particle(s) at index "
+                f"{on_axis_particles} starting on or across the symmetry axis "
+                "(r <= 0), where the Faxén-corrected Laplacian is singular. Use a "
+                "strictly positive initial radial position, or set "
+                "particle_config.radius = 0.0 for the point-particle limit."
+            )
     # Resolve execution context properties once up-front to eliminate device shifting overhead
     network_device = resolve_module_device(flow_network)
     network_dtype = resolve_module_dtype(flow_network)
