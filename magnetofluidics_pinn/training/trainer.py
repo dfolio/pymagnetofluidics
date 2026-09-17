@@ -39,6 +39,7 @@ from __future__ import annotations
 import copy
 import time
 from dataclasses import dataclass
+from typing import Literal
 
 import torch
 from torch import nn
@@ -88,7 +89,8 @@ LOSS_COMPONENT_NAMES: tuple[str, ...] = (
 
 
 def _stokes_residual_losses(
-        network: nn.Module, coordinates: torch.Tensor, fluid_config: FluidConfig
+        network: nn.Module, coordinates: torch.Tensor, fluid_config: FluidConfig,
+        residual_form: Literal["standard", "r_weighted"] = "standard",  # NEW
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Mean-squared Stokes residual, decomposed by governing equation.
 
@@ -106,7 +108,14 @@ def _stokes_residual_losses(
       `(u_r, u_z, p)`.
     - `coordinates`: Interior collocation points, requiring gradients.
     - `fluid_config`: Fluid configuration selecting the flow regime.
-
+    - `residual_form`: NEW. `"standard"` (default) evaluates the equations
+      as classically written, and requires `r > 0` everywhere (unchanged
+      from every prior release). `"r_weighted"` evaluates the same
+      equations pre-multiplied by $r$ or $r^2$ to remove the axis
+      singularity analytically, and additionally accepts `r = 0`. See this
+      module's docstring for the full derivation and the trade-off between
+      the two.
+      
     Returns:
     - A tuple `(momentum_r_loss, momentum_z_loss, continuity_loss)`, each a
       scalar tensor: the mean-squared residual of its own governing
@@ -114,10 +123,10 @@ def _stokes_residual_losses(
       [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
       returns.
     """
-    residual = stokes_residual(network, coordinates, fluid_config)
-    momentum_r_loss = torch.mean(residual[:, 0:1] ** 2)
-    momentum_z_loss = torch.mean(residual[:, 1:2] ** 2)
-    continuity_loss = torch.mean(residual[:, 2:3] ** 2)
+    residual = stokes_residual(network, coordinates, fluid_config, residual_form=residual_form)
+    momentum_r_loss = torch.mean(residual[:, 0:1].square())
+    momentum_z_loss = torch.mean(residual[:, 1:2].square())
+    continuity_loss = torch.mean(residual[:, 2:3].square())
     return momentum_r_loss, momentum_z_loss, continuity_loss
 
 
@@ -145,7 +154,7 @@ def _positivity_loss(network: nn.Module, coordinates: torch.Tensor) -> torch.Ten
       `coordinates`; zero wherever every predicted $u_z$ is non-negative.
     """
     predicted_axial_velocity = network(coordinates)[:, 1:2]
-    return torch.mean(torch.relu(-predicted_axial_velocity) ** 2)
+    return torch.mean(torch.relu(-predicted_axial_velocity).square())
 
 
 def _conservation_loss(
@@ -187,7 +196,7 @@ def _conservation_loss(
     axial_positions = torch.linspace(0.0, domain.length, n_stations, device=device)
     predicted_flow_rate = axial_flow_rate(network, domain.radius, axial_positions, n_quadrature_points)
     reference_flow_rate = poiseuille_reference_flow_rate(domain.radius, peak_velocity)
-    return torch.mean((predicted_flow_rate - reference_flow_rate) ** 2)
+    return torch.mean((predicted_flow_rate - reference_flow_rate).square())
 
 
 def _velocity_boundary_loss(
@@ -230,7 +239,9 @@ class _TrainingBatch:
 
 
 def _build_training_batch(
-        domain: Domain, n_interior: int, n_boundary: int, random_seed: int, device: torch.device
+        domain: Domain, n_interior: int, n_boundary: int, random_seed: int,
+        axis_clearance_fraction: float | None,  # NEW
+        device: torch.device
 ) -> _TrainingBatch:
     """Sample and label one interior/boundary batch, ready for loss evaluation.
 
@@ -247,6 +258,11 @@ def _build_training_batch(
     - `n_boundary`: Number of boundary collocation points.
     - `random_seed`: Seed passed straight through to
       [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points].
+    - `axis_clearance_fraction`: NEW. Passed straight through to
+      [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points];
+      `None` reproduces every prior release's sampling exactly. Sourced from
+      `TrainingConfig.axis_clearance_fraction`, whose own docstring covers
+      the numerical caveat around pairing it with `residual_form`.
     - `device`: Device every tensor in the returned batch is placed on.
 
     Returns:
@@ -256,7 +272,8 @@ def _build_training_batch(
     """
     collocation = sample_collocation_points(
         domain=domain, n_interior=n_interior, n_boundary=n_boundary,
-        random_seed=random_seed, device=device,
+        random_seed=random_seed, axis_clearance_fraction=axis_clearance_fraction,
+        device=device,
     )
     # `.clone()` guarantees a tensor distinct from the one `collocation`
     # owns, so setting `requires_grad_` here never mutates a value that a
@@ -361,7 +378,7 @@ def _evaluate_loss_components(
       instance holding every individual term and their weighted total.
     """
     momentum_r_value, momentum_z_value, continuity_value = _stokes_residual_losses(
-        network, batch.interior, fluid_config
+        network, batch.interior, fluid_config, residual_form=training_config.residual_form
     )
     wall_value = _velocity_boundary_loss(network, batch.wall_points, batch.wall_target)
     inlet_value = _velocity_boundary_loss(network, batch.inlet_points, batch.inlet_target)
@@ -673,8 +690,9 @@ def _run_adam_phase(
         # reproducible for a given base seed.
         batch = _build_training_batch(
             domain, training_config.n_interior_points, training_config.n_boundary_points,
-            training_config.random_seed + epoch, resolved_device,
-        )
+            training_config.random_seed + epoch,
+            axis_clearance_fraction=training_config.axis_clearance_fraction,
+            device=resolved_device,)
         components = _evaluate_loss_components(trained_network, batch, domain, fluid_config, training_config)
 
         optimizer.zero_grad()
@@ -730,7 +748,9 @@ def _run_lbfgs_phase(
     """
     batch = _build_training_batch(
         domain, training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
-        training_config.random_seed - 1, resolved_device,
+        training_config.random_seed - 1,
+        axis_clearance_fraction=training_config.axis_clearance_fraction,
+        device=resolved_device,
     )
     optimizer = torch.optim.LBFGS(
         trained_network.parameters(),
