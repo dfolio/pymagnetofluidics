@@ -13,6 +13,18 @@ import torch
 import magnetofluidics_pinn as mfp
 
 
+@pytest.fixture(scope="session")
+def device() -> torch.device:
+    """Provide the preferred compute device (CUDA when available, else CPU).
+
+    Returns:
+    - `torch.device` configured for the host hardware.
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda", torch.cuda.current_device())
+    return torch.device("cpu")
+
+
 @pytest.fixture
 def domain() -> mfp.Domain:
     """A small, already-dimensionless straight-channel domain."""
@@ -61,3 +73,24 @@ def make_poiseuille_network(radius: float, peak_velocity: float):
         return torch.cat([velocity_r, velocity_z, pressure], dim=1)
     
     return network
+
+
+@pytest.fixture
+def navier_stokes_fluid_config() -> mfp.FluidConfig:
+    """A default unsteady, convective Navier-Stokes fluid configuration.
+
+    Returns:
+    - `mfp.FluidConfig` with `regime="navier_stokes"` and non-zero Reynolds number.
+    """
+    return mfp.FluidConfig(regime="navier_stokes")
+
+
+@pytest.fixture
+def unsteady_network() -> torch.nn.Module:
+    """A small, unconstrained (r, z, t) -> (u_r, u_z, p) network on CPU.
+
+    Returns:
+    - `torch.nn.Module` mapping 3 coordinate inputs to 3 output channels.
+    """
+    torch.manual_seed(42)
+    return mfp.build_mlp(n_inputs=3, n_outputs=3, hidden_layers=(8, 8), device="cpu")
