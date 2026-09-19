@@ -49,7 +49,7 @@ from magnetofluidics_pinn.boundary_conditions.flow_bc import (
     no_slip_condition,
     outlet_pressure_condition,
 )
-from magnetofluidics_pinn.config import MagneticFieldConfig, FluidConfig, TrainingConfig
+from magnetofluidics_pinn.config import FluidConfig, MagneticFieldConfig, TrainingConfig
 from magnetofluidics_pinn.device_utils import resolve_device
 from magnetofluidics_pinn.physics.conservation import axial_flow_rate, poiseuille_reference_flow_rate
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
@@ -330,7 +330,7 @@ class _LossComponents:
     - `total`: The weighted sum of the eight terms above, via
       [`compose_loss`][magnetofluidics_pinn.training.losses.compose_loss].
     """
-
+    
     momentum_r: torch.Tensor
     momentum_z: torch.Tensor
     continuity: torch.Tensor
@@ -391,23 +391,23 @@ def _evaluate_loss_components(
     )
     total_loss = compose_loss(
         terms={
-            "momentum_r" : lambda: momentum_r_value,
-            "momentum_z" : lambda: momentum_z_value,
-            "continuity" : lambda: continuity_value,
-            "wall"       : lambda: wall_value,
-            "inlet"      : lambda: inlet_value,
-            "outlet"     : lambda: outlet_value,
-            "positivity" : lambda: positivity_value,
+            "momentum_r"  : lambda: momentum_r_value,
+            "momentum_z"  : lambda: momentum_z_value,
+            "continuity"  : lambda: continuity_value,
+            "wall"        : lambda: wall_value,
+            "inlet"       : lambda: inlet_value,
+            "outlet"      : lambda: outlet_value,
+            "positivity"  : lambda: positivity_value,
             "conservation": lambda: conservation_value,
         },
         weights={
-            "momentum_r" : training_config.momentum_loss_weight,
-            "momentum_z" : training_config.momentum_loss_weight,
-            "continuity" : training_config.continuity_loss_weight,
-            "wall"       : _BOUNDARY_LOSS_WEIGHT,
-            "inlet"      : _BOUNDARY_LOSS_WEIGHT,
-            "outlet"     : _BOUNDARY_LOSS_WEIGHT,
-            "positivity" : training_config.positivity_loss_weight,
+            "momentum_r"  : training_config.momentum_loss_weight,
+            "momentum_z"  : training_config.momentum_loss_weight,
+            "continuity"  : training_config.continuity_loss_weight,
+            "wall"        : _BOUNDARY_LOSS_WEIGHT,
+            "inlet"       : _BOUNDARY_LOSS_WEIGHT,
+            "outlet"      : _BOUNDARY_LOSS_WEIGHT,
+            "positivity"  : training_config.positivity_loss_weight,
             "conservation": training_config.conservation_loss_weight,
         },
     )
@@ -464,7 +464,7 @@ class LossHistory:
       [`_LossComponents`][magnetofluidics_pinn.training.trainer._LossComponents]
       reports them in.
     """
-
+    
     step: tuple[int, ...]
     momentum_r: tuple[float, ...]
     momentum_z: tuple[float, ...]
@@ -682,7 +682,7 @@ def _run_adam_phase(
     accumulator: dict[str, list[float]] = {
         name: [] for name in ("step",) + LOSS_COMPONENT_NAMES + ("total",)
     }
-
+    
     for epoch in range(training_config.n_epochs):
         # Re-sampling every epoch, with a deterministically-varying seed,
         # exposes the network to a fresh set of collocation points instead
@@ -692,9 +692,9 @@ def _run_adam_phase(
             domain, training_config.n_interior_points, training_config.n_boundary_points,
             training_config.random_seed + epoch,
             axis_clearance_fraction=training_config.axis_clearance_fraction,
-            device=resolved_device,)
+            device=resolved_device, )
         components = _evaluate_loss_components(trained_network, batch, domain, fluid_config, training_config)
-
+        
         optimizer.zero_grad()
         components.total.backward()
         if training_config.gradient_clip_norm is not None:
@@ -706,15 +706,15 @@ def _run_adam_phase(
                 trained_network.parameters(), training_config.gradient_clip_norm
             )
         optimizer.step()
-
+        
         current_values = _record_loss_components(components)
         accumulator["step"].append(epoch)
         for name, value in current_values.items():
             accumulator[name].append(value)
-
+        
         if verbose and (epoch % log_every == 0 or epoch == training_config.n_epochs - 1):
             print(_format_progress_line(f"Epoch {epoch:5d}", current_values))
-
+    
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})
 
 
@@ -759,23 +759,23 @@ def _run_lbfgs_phase(
         history_size=100,
         line_search_fn="strong_wolfe",
     )
-
+    
     # CHANGED: same dict-of-lists accumulator pattern as `_run_adam_phase`.
     accumulator: dict[str, list[float]] = {
         name: [] for name in ("step",) + LOSS_COMPONENT_NAMES + ("total",)
     }
-
+    
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
         components = _evaluate_loss_components(trained_network, batch, domain, fluid_config, training_config)
         components.total.backward()
-
+        
         current_values = _record_loss_components(components)
         accumulator["step"].append(len(accumulator["step"]))
         for name, value in current_values.items():
             accumulator[name].append(value)
         return components.total
-
+    
     round_width = len(str(training_config.lbfgs_rounds))
     for round_index in range(training_config.lbfgs_rounds):
         optimizer.step(closure)
@@ -783,5 +783,571 @@ def _run_lbfgs_phase(
             prefix = f"L-BFGS round {round_index + 1:{round_width}d}/{training_config.lbfgs_rounds}"
             last_values = {name: accumulator[name][-1] for name in ("total",) + LOSS_COMPONENT_NAMES}
             print(_format_progress_line(prefix, last_values))
-
+    
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})
+
+
+# ======================================================================
+# NEW: two-way-coupled training around an embedded spherical obstacle.
+#
+# Kept as a parallel set of types/functions rather than folded into
+# `_LossComponents`/`LossHistory`/`train` themselves: the obstacle case
+# samples from a genuinely different collocation strategy
+# (`sample_collocation_points_with_obstacle`, with rejection sampling and
+# a third boundary face) and adds a term
+# (`_ObstacleLossComponents.obstacle`) that has no meaning for the
+# obstacle-free case. Reusing the existing dataclasses would force every
+# ordinary `train()` run to carry an always-zero "obstacle" column through
+# `LOSS_COMPONENT_NAMES` and `visualization.plotting.plot_training_history`,
+# for a term that is never actually being trained there.
+# ======================================================================
+
+from magnetofluidics_pinn.boundary_conditions.flow_bc import rigid_body_velocity_condition
+from magnetofluidics_pinn.sampling.collocation import sample_collocation_points_with_obstacle
+from magnetofluidics_pinn.types import SphericalObstacle
+
+# NEW: mirrors LOSS_COMPONENT_NAMES with the additional "obstacle" term.
+OBSTACLE_LOSS_COMPONENT_NAMES: tuple[str, ...] = LOSS_COMPONENT_NAMES + ("obstacle",)
+
+
+@dataclass(frozen=True)
+class _ObstacleTrainingBatch:
+    """A resolved, device-placed batch including the obstacle's own surface.
+ 
+    NEW. Mirrors [`_TrainingBatch`][magnetofluidics_pinn.training.trainer._TrainingBatch]
+    with one addition: `obstacle_points` and `obstacle_target`, the
+    surface points on the embedded
+    [`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle] and
+    the rigid-body velocity they are trained toward.
+    """
+    
+    interior: torch.Tensor
+    wall_points: torch.Tensor
+    wall_target: torch.Tensor
+    inlet_points: torch.Tensor
+    inlet_target: torch.Tensor
+    outlet_points: torch.Tensor
+    outlet_target: torch.Tensor
+    obstacle_points: torch.Tensor
+    obstacle_target: torch.Tensor
+
+
+def _build_obstacle_training_batch(
+        domain: Domain,
+        obstacle: SphericalObstacle,
+        obstacle_velocity: float,
+        n_interior: int,
+        n_boundary: int,
+        n_obstacle_surface: int,
+        random_seed: int,
+        axis_clearance_fraction: float | None,
+        device: torch.device,
+) -> _ObstacleTrainingBatch:
+    """Sample and label one interior/boundary/obstacle-surface batch.
+ 
+    NEW. The two-way-coupled counterpart of
+    [`_build_training_batch`][magnetofluidics_pinn.training.trainer._build_training_batch]:
+    samples via
+    [`sample_collocation_points_with_obstacle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]
+    instead of
+    [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points],
+    and additionally labels the obstacle-surface points with the
+    particle's own rigid-body velocity via
+    [`rigid_body_velocity_condition`][magnetofluidics_pinn.boundary_conditions.flow_bc.rigid_body_velocity_condition].
+    The radial component of that velocity is always `0.0`: a
+    `SphericalObstacle` is only representable in this axisymmetric package
+    while centered on the axis (see that type's docstring), so its only
+    translational degree of freedom is axial.
+ 
+    Args:
+    - `domain`: Vessel geometry to sample from; must already be
+      nondimensionalized.
+    - `obstacle`: The embedded sphere.
+    - `obstacle_velocity`: The sphere's own axial translational velocity
+      $U_z$ — the quantity
+      [`trajectory.two_way_coupling.solve_force_balanced_velocity`][magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity]
+      searches over; held fixed for any single call to this function.
+    - `n_interior`, `n_boundary`, `n_obstacle_surface`, `random_seed`,
+      `axis_clearance_fraction`: As in
+      [`sample_collocation_points_with_obstacle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle].
+    - `device`: Device every tensor in the returned batch is placed on.
+ 
+    Returns:
+    - An [`_ObstacleTrainingBatch`][magnetofluidics_pinn.training.trainer._ObstacleTrainingBatch].
+    """
+    collocation = sample_collocation_points_with_obstacle(
+        domain=domain, obstacle=obstacle, n_interior=n_interior, n_boundary=n_boundary,
+        n_obstacle_surface=n_obstacle_surface, random_seed=random_seed,
+        axis_clearance_fraction=axis_clearance_fraction, device=device,
+    )
+    interior = collocation.interior.clone().requires_grad_(True)
+    
+    n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
+    wall_points = collocation.boundary[:n_wall]
+    inlet_points = collocation.boundary[n_wall: n_wall + n_inlet]
+    outlet_points = collocation.boundary[n_wall + n_inlet: n_wall + n_inlet + n_outlet]
+    obstacle_points = collocation.obstacle_surface
+    
+    return _ObstacleTrainingBatch(
+        interior=interior,
+        wall_points=wall_points,
+        wall_target=no_slip_condition(domain, wall_points),
+        inlet_points=inlet_points,
+        inlet_target=inlet_velocity_condition(
+            domain, inlet_points, peak_velocity=_DIMENSIONLESS_PEAK_INLET_VELOCITY
+        ),
+        outlet_points=outlet_points,
+        outlet_target=outlet_pressure_condition(
+            domain, outlet_points, reference_pressure=_DIMENSIONLESS_OUTLET_REFERENCE_PRESSURE
+        ),
+        obstacle_points=obstacle_points,
+        obstacle_target=rigid_body_velocity_condition(obstacle_points, (0.0, obstacle_velocity)),
+    )
+
+
+def _obstacle_conservation_loss(
+        network: nn.Module,
+        domain: Domain,
+        obstacle: SphericalObstacle,
+        peak_velocity: float,
+        n_stations: int,
+        n_quadrature_points: int,
+        device: torch.device,
+) -> torch.Tensor:
+    r"""Mass-conservation loss, restricted to full-bore cross-sections away from the obstacle.
+ 
+    NEW. [`_conservation_loss`][magnetofluidics_pinn.training.trainer._conservation_loss]
+    spaces its stations uniformly across the *entire* `[0, domain.length]`
+    span; some of those would fall inside the obstacle's axial extent
+    `[axial_position - radius, axial_position + radius]`, where part of
+    the cross-section is solid rather than fluid, and
+    [`physics.conservation.axial_flow_rate`][magnetofluidics_pinn.physics.conservation.axial_flow_rate]'s
+    full-bore quadrature does not know to exclude that solid core. Away
+    from the obstacle, however, the check is not just still valid but
+    *stronger* than in the unobstructed case: an incompressible fluid
+    cannot pass through the rigid sphere, so the same volumetric flow rate
+    the inlet condition prescribes must reappear, unchanged, at every
+    upstream *and* downstream cross-section — confirming the disturbed
+    flow correctly "reconnects" past the obstacle, not only that it
+    conserves mass locally.
+ 
+    Args:
+    - `network`: Flow network mapping `(r, z)` coordinates to
+      `(u_r, u_z, p)`.
+    - `domain`, `obstacle`: As elsewhere in this module.
+    - `peak_velocity`: Dimensionless inlet centerline velocity.
+    - `n_stations`: Number of stations, split evenly between the upstream
+      segment `[0, axial_position - radius]` and the downstream segment
+      `[axial_position + radius, domain.length]`.
+    - `n_quadrature_points`: Radial quadrature resolution per station,
+      forwarded to `axial_flow_rate`.
+    - `device`: Device the axial-station grids are created on.
+ 
+    Returns:
+    - Scalar tensor: mean-squared deviation of the predicted $Q(z)$ from
+      $Q_\mathrm{ref}$, pooled over the upstream and downstream stations.
+    """
+    n_upstream = max(n_stations // 2, 1)
+    n_downstream = max(n_stations - n_upstream, 1)
+    upstream_positions = torch.linspace(
+        0.0, obstacle.axial_position - obstacle.radius, n_upstream + 2, device=device
+    )[1:-1]
+    downstream_positions = torch.linspace(
+        obstacle.axial_position + obstacle.radius, domain.length, n_downstream + 2, device=device
+    )[1:-1]
+    axial_positions = torch.cat([upstream_positions, downstream_positions])
+    
+    predicted_flow_rate = axial_flow_rate(network, domain.radius, axial_positions, n_quadrature_points)
+    reference_flow_rate = poiseuille_reference_flow_rate(domain.radius, peak_velocity)
+    return torch.mean((predicted_flow_rate - reference_flow_rate).square())
+
+
+@dataclass(frozen=True)
+class _ObstacleLossComponents:
+    """The nine independent loss terms and their combined weighted total.
+ 
+    NEW. Mirrors [`_LossComponents`][magnetofluidics_pinn.training.trainer._LossComponents]
+    with one addition, `obstacle`: mean-squared error between the
+    network's predicted velocity on the obstacle's surface and its
+    prescribed rigid-body velocity.
+    """
+    
+    momentum_r: torch.Tensor
+    momentum_z: torch.Tensor
+    continuity: torch.Tensor
+    wall: torch.Tensor
+    inlet: torch.Tensor
+    outlet: torch.Tensor
+    positivity: torch.Tensor
+    conservation: torch.Tensor
+    obstacle: torch.Tensor
+    total: torch.Tensor
+
+
+def _evaluate_obstacle_loss_components(
+        network: nn.Module,
+        batch: _ObstacleTrainingBatch,
+        domain: Domain,
+        obstacle: SphericalObstacle,
+        fluid_config: FluidConfig,
+        training_config: TrainingConfig,
+        obstacle_loss_weight: float,
+) -> _ObstacleLossComponents:
+    """Compute each loss term once, including the obstacle-surface term.
+ 
+    NEW. Mirrors [`_evaluate_loss_components`][magnetofluidics_pinn.training.trainer._evaluate_loss_components];
+    every term but `obstacle` is computed identically (the interior,
+    wall, inlet, and outlet points already exclude/avoid the obstacle by
+    construction of `batch`, so `stokes_residual`, `_positivity_loss`, and
+    the boundary losses need no change to be evaluated safely on them).
+ 
+    Args:
+    - `network`, `fluid_config`, `training_config`: As in
+      `_evaluate_loss_components`.
+    - `batch`: As built by
+      [`_build_obstacle_training_batch`][magnetofluidics_pinn.training.trainer._build_obstacle_training_batch].
+    - `domain`, `obstacle`: Needed by
+      [`_obstacle_conservation_loss`][magnetofluidics_pinn.training.trainer._obstacle_conservation_loss].
+    - `obstacle_loss_weight`: Weight for the new `obstacle` term; the
+      caller (`train_around_obstacle`) defaults it to the same
+      `_BOUNDARY_LOSS_WEIGHT` used for wall/inlet/outlet, since the
+      obstacle surface is, physically, just another Dirichlet velocity
+      boundary.
+ 
+    Returns:
+    - An [`_ObstacleLossComponents`][magnetofluidics_pinn.training.trainer._ObstacleLossComponents].
+    """
+    momentum_r_value, momentum_z_value, continuity_value = _stokes_residual_losses(
+        network, batch.interior, fluid_config, residual_form=training_config.residual_form
+    )
+    wall_value = _velocity_boundary_loss(network, batch.wall_points, batch.wall_target)
+    inlet_value = _velocity_boundary_loss(network, batch.inlet_points, batch.inlet_target)
+    outlet_value = _pressure_boundary_loss(network, batch.outlet_points, batch.outlet_target)
+    obstacle_value = _velocity_boundary_loss(network, batch.obstacle_points, batch.obstacle_target)
+    positivity_value = _positivity_loss(network, batch.interior)
+    conservation_value = _obstacle_conservation_loss(
+        network, domain, obstacle, _DIMENSIONLESS_PEAK_INLET_VELOCITY,
+        training_config.n_conservation_stations, training_config.n_conservation_quadrature_points,
+        batch.interior.device,
+    )
+    total_loss = compose_loss(
+        terms={
+            "momentum_r"  : lambda: momentum_r_value,
+            "momentum_z"  : lambda: momentum_z_value,
+            "continuity"  : lambda: continuity_value,
+            "wall"        : lambda: wall_value,
+            "inlet"       : lambda: inlet_value,
+            "outlet"      : lambda: outlet_value,
+            "positivity"  : lambda: positivity_value,
+            "conservation": lambda: conservation_value,
+            "obstacle"    : lambda: obstacle_value,
+        },
+        weights={
+            "momentum_r"  : training_config.momentum_loss_weight,
+            "momentum_z"  : training_config.momentum_loss_weight,
+            "continuity"  : training_config.continuity_loss_weight,
+            "wall"        : _BOUNDARY_LOSS_WEIGHT,
+            "inlet"       : _BOUNDARY_LOSS_WEIGHT,
+            "outlet"      : _BOUNDARY_LOSS_WEIGHT,
+            "positivity"  : training_config.positivity_loss_weight,
+            "conservation": training_config.conservation_loss_weight,
+            "obstacle"    : obstacle_loss_weight,
+        },
+    )
+    return _ObstacleLossComponents(
+        momentum_r=momentum_r_value, momentum_z=momentum_z_value, continuity=continuity_value,
+        wall=wall_value, inlet=inlet_value, outlet=outlet_value, positivity=positivity_value,
+        conservation=conservation_value, obstacle=obstacle_value, total=total_loss,
+    )
+
+
+def _record_obstacle_loss_components(components: _ObstacleLossComponents) -> dict[str, float]:
+    """Reduce every scalar tensor in `components` to a plain Python float.
+ 
+    NEW. Mirrors [`_record_loss_components`][magnetofluidics_pinn.training.trainer._record_loss_components].
+    """
+    return {"total": components.total.item()} | {
+        name: getattr(components, name).item() for name in OBSTACLE_LOSS_COMPONENT_NAMES
+    }
+
+
+@dataclass(frozen=True)
+class ObstacleLossHistory:
+    """Loss values recorded at each step of one obstacle-training phase.
+ 
+    NEW. Mirrors [`LossHistory`][magnetofluidics_pinn.training.trainer.LossHistory]
+    with the additional `obstacle` field.
+    """
+    
+    step: tuple[int, ...]
+    momentum_r: tuple[float, ...]
+    momentum_z: tuple[float, ...]
+    continuity: tuple[float, ...]
+    wall: tuple[float, ...]
+    inlet: tuple[float, ...]
+    outlet: tuple[float, ...]
+    positivity: tuple[float, ...]
+    conservation: tuple[float, ...]
+    obstacle: tuple[float, ...]
+    total: tuple[float, ...]
+
+
+def train_around_obstacle(
+        network: nn.Module,
+        domain: Domain,
+        obstacle: SphericalObstacle,
+        obstacle_velocity: float,
+        fluid_config: FluidConfig,
+        training_config: TrainingConfig,
+        n_obstacle_surface_points: int = 200,
+        obstacle_loss_weight: float = _BOUNDARY_LOSS_WEIGHT,
+        verbose: bool = False,
+        log_every: int = 100,
+) -> tuple[nn.Module, "ObstacleTrainingHistory"]:
+    r"""Train a network for the flow around a fixed, rigidly-translating spherical obstacle.
+ 
+    NEW. The two-way-coupled counterpart of
+    [`train`][magnetofluidics_pinn.training.trainer.train]: instead of a
+    passive tracer advected by an *undisturbed* flow field
+    (`trajectory.integrate_trajectory` with a Faxén correction), this
+    solves for the flow the particle itself perturbs, holding the
+    particle fixed at `obstacle.axial_position` and translating at
+    `obstacle_velocity` — a quasi-steady snapshot of the two-way problem,
+    valid because Stokes flow has no memory: at every instant the flow
+    field depends only on the particle's *current* position and velocity,
+    not its history [@wang2026twoway].
+ 
+    "Steady state" for this quasi-steady snapshot does not mean waiting
+    out a physical transient — the governing equations here have no time
+    derivative to relax, `stokes_residual` describes an instantaneously
+    steady balance regardless of how the training loss is converging. It
+    means the training loss has converged: use
+    [`TrainingHistory`][magnetofluidics_pinn.training.trainer.TrainingHistory]-style
+    diagnostics (residual and boundary-loss magnitudes) *and*
+    [`physics.conservation.axial_flow_rate`][magnetofluidics_pinn.physics.conservation.axial_flow_rate]
+    evaluated upstream and downstream of the obstacle (matching the
+    reference flow rate there is a strictly *stronger* correctness check
+    than local residual smallness, since it also confirms the disturbed
+    flow correctly reconnects past the sphere — see
+    [`_obstacle_conservation_loss`][magnetofluidics_pinn.training.trainer._obstacle_conservation_loss]).
+ 
+    Args:
+    - `network`: Network instance to train, matching
+      [`train`][magnetofluidics_pinn.training.trainer.train]'s own
+      `network` argument (optionally wrapped with
+      `apply_hard_wall_constraint`; that wrapper's axis-regularity
+      condition remains valid with an on-axis obstacle present — see
+      `SphericalObstacle`'s docstring — so it needs no obstacle-specific
+      variant).
+    - `domain`: Vessel geometry; must already be nondimensionalized.
+    - `obstacle`: The embedded sphere; must fit strictly inside `domain`
+      (validated by
+      [`sample_collocation_points_with_obstacle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]).
+    - `obstacle_velocity`: The sphere's own axial translational velocity,
+      in the lab frame — the quantity
+      [`trajectory.two_way_coupling.solve_force_balanced_velocity`][magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity]
+      searches over. `0.0` recovers a *fixed* (anchored) obstacle.
+    - `fluid_config`, `training_config`: As in
+      [`train`][magnetofluidics_pinn.training.trainer.train]. `n_epochs`
+      and `use_lbfgs_refinement` govern this call the same way; a small
+      `n_epochs` is appropriate when `network` is already a converged
+      solution at a nearby `obstacle_velocity` (warm start), as
+      `solve_force_balanced_velocity` relies on.
+    - `n_obstacle_surface_points`: Number of collocation points drawn on
+      the obstacle's surface each Adam epoch (and once, fixed, for the
+      L-BFGS phase).
+    - `obstacle_loss_weight`: Weight for the obstacle-surface velocity
+      term; defaults to the same weight `train()` already gives every
+      other Dirichlet velocity boundary (wall, inlet).
+    - `verbose`, `log_every`: As in
+      [`train`][magnetofluidics_pinn.training.trainer.train].
+ 
+    Returns:
+    - A tuple `(trained_network, history)`, structured exactly as
+      [`train`][magnetofluidics_pinn.training.trainer.train]'s own return
+      value, with `history` an
+      [`ObstacleTrainingHistory`][magnetofluidics_pinn.training.trainer.ObstacleTrainingHistory]
+      instance (`.adam`, `.lbfgs`, each an
+      [`ObstacleLossHistory`][magnetofluidics_pinn.training.trainer.ObstacleLossHistory])
+      carrying the additional `obstacle` term.
+ 
+    Raises:
+    - `ValueError`: Same conditions as
+      [`train`][magnetofluidics_pinn.training.trainer.train], plus
+      `n_obstacle_surface_points` not strictly positive, plus whatever
+      [`sample_collocation_points_with_obstacle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]
+      raises about `obstacle` not fitting inside `domain`.
+    """
+    if training_config.n_epochs <= 0:
+        raise ValueError("training_config.n_epochs must be strictly positive.")
+    if log_every <= 0:
+        raise ValueError(f"log_every must be strictly positive; got {log_every!r}.")
+    if n_obstacle_surface_points <= 0:
+        raise ValueError(
+            f"n_obstacle_surface_points must be strictly positive; got {n_obstacle_surface_points!r}."
+        )
+    if training_config.use_lbfgs_refinement:
+        if training_config.lbfgs_n_interior_points <= 0 or training_config.lbfgs_n_boundary_points <= 0:
+            raise ValueError(
+                "training_config.lbfgs_n_interior_points and lbfgs_n_boundary_points "
+                "must be strictly positive when use_lbfgs_refinement is True."
+            )
+        if training_config.lbfgs_rounds <= 0 or training_config.lbfgs_iterations_per_round <= 0:
+            raise ValueError(
+                "training_config.lbfgs_rounds and lbfgs_iterations_per_round "
+                "must be strictly positive when use_lbfgs_refinement is True."
+            )
+    
+    resolved_device = resolve_device(training_config.device)
+    trained_network = copy.deepcopy(network).to(resolved_device)
+    
+    adam_history = _run_obstacle_adam_phase(
+        trained_network, domain, obstacle, obstacle_velocity, fluid_config, training_config,
+        n_obstacle_surface_points, obstacle_loss_weight, resolved_device, verbose, log_every,
+    )
+    lbfgs_history = ObstacleLossHistory(
+        **{name: () for name in ("step",) + OBSTACLE_LOSS_COMPONENT_NAMES + ("total",)}
+    )
+    if training_config.use_lbfgs_refinement:
+        lbfgs_history = _run_obstacle_lbfgs_phase(
+            trained_network, domain, obstacle, obstacle_velocity, fluid_config, training_config,
+            n_obstacle_surface_points, obstacle_loss_weight, resolved_device, verbose,
+        )
+    
+    if verbose:
+        final_total = (lbfgs_history.total or adam_history.total)[-1]
+        print(f"train_around_obstacle finished | Final Total Loss: {final_total:.2e}")
+    
+    return trained_network, ObstacleTrainingHistory(adam=adam_history, lbfgs=lbfgs_history)
+
+
+@dataclass(frozen=True)
+class ObstacleTrainingHistory:
+    """Loss trajectories recorded during one `train_around_obstacle()` call.
+ 
+    NEW. Mirrors [`TrainingHistory`][magnetofluidics_pinn.training.trainer.TrainingHistory].
+    """
+    
+    adam: ObstacleLossHistory
+    lbfgs: ObstacleLossHistory
+    
+    def print_summary(self) -> None:
+        """Prints a formatted summary table, identical in shape to `TrainingHistory.print_summary`."""
+        has_lbfgs = len(self.lbfgs.step) > 0
+        fields = OBSTACLE_LOSS_COMPONENT_NAMES + ("total",)
+        print("\n" + "=" * 78)
+        print(
+            f"{'Loss Component':<20} | {'Initial (Adam)':<14} | {'Post-Adam':<14} | {'Final Loss':<14} | {'Factor':<8}")
+        print("-" * 78)
+        for f in fields:
+            initial = getattr(self.adam, f)[0]
+            post_adam = getattr(self.adam, f)[-1]
+            final = getattr(self.lbfgs, f)[-1] if has_lbfgs else post_adam
+            reduction = initial / max(final, 1e-15)
+            print(
+                f"{f.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {final:14.4e} | {reduction:7.1f}x"
+            )
+        print("=" * 78 + "\n")
+
+
+def _run_obstacle_adam_phase(
+        trained_network: nn.Module,
+        domain: Domain,
+        obstacle: SphericalObstacle,
+        obstacle_velocity: float,
+        fluid_config: FluidConfig,
+        training_config: TrainingConfig,
+        n_obstacle_surface_points: int,
+        obstacle_loss_weight: float,
+        resolved_device: torch.device,
+        verbose: bool,
+        log_every: int,
+) -> ObstacleLossHistory:
+    """First-order, stochastic-collocation phase for the obstacle problem.
+ 
+    NEW. Mirrors [`_run_adam_phase`][magnetofluidics_pinn.training.trainer._run_adam_phase].
+    """
+    optimizer = torch.optim.Adam(trained_network.parameters(), lr=training_config.learning_rate)
+    accumulator: dict[str, list[float]] = {
+        name: [] for name in ("step",) + OBSTACLE_LOSS_COMPONENT_NAMES + ("total",)
+    }
+    
+    for epoch in range(training_config.n_epochs):
+        batch = _build_obstacle_training_batch(
+            domain, obstacle, obstacle_velocity,
+            training_config.n_interior_points, training_config.n_boundary_points, n_obstacle_surface_points,
+            training_config.random_seed + epoch, training_config.axis_clearance_fraction, resolved_device,
+        )
+        components = _evaluate_obstacle_loss_components(
+            trained_network, batch, domain, obstacle, fluid_config, training_config, obstacle_loss_weight
+        )
+        
+        optimizer.zero_grad()
+        components.total.backward()
+        if training_config.gradient_clip_norm is not None:
+            torch.nn.utils.clip_grad_norm_(trained_network.parameters(), training_config.gradient_clip_norm)
+        optimizer.step()
+        
+        current_values = _record_obstacle_loss_components(components)
+        accumulator["step"].append(epoch)
+        for name, value in current_values.items():
+            accumulator[name].append(value)
+        
+        if verbose and (epoch % log_every == 0 or epoch == training_config.n_epochs - 1):
+            print(_format_progress_line(f"Epoch {epoch:5d}", current_values))
+    
+    return ObstacleLossHistory(**{name: tuple(values) for name, values in accumulator.items()})
+
+
+def _run_obstacle_lbfgs_phase(
+        trained_network: nn.Module,
+        domain: Domain,
+        obstacle: SphericalObstacle,
+        obstacle_velocity: float,
+        fluid_config: FluidConfig,
+        training_config: TrainingConfig,
+        n_obstacle_surface_points: int,
+        obstacle_loss_weight: float,
+        resolved_device: torch.device,
+        verbose: bool,
+) -> ObstacleLossHistory:
+    """Second-order, fixed-batch refinement phase for the obstacle problem.
+ 
+    NEW. Mirrors [`_run_lbfgs_phase`][magnetofluidics_pinn.training.trainer._run_lbfgs_phase].
+    """
+    batch = _build_obstacle_training_batch(
+        domain, obstacle, obstacle_velocity,
+        training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
+        n_obstacle_surface_points, training_config.random_seed - 1,
+        training_config.axis_clearance_fraction, resolved_device,
+    )
+    optimizer = torch.optim.LBFGS(
+        trained_network.parameters(), lr=1.0, max_iter=training_config.lbfgs_iterations_per_round,
+        history_size=100, line_search_fn="strong_wolfe",
+    )
+    accumulator: dict[str, list[float]] = {
+        name: [] for name in ("step",) + OBSTACLE_LOSS_COMPONENT_NAMES + ("total",)
+    }
+    
+    def closure() -> torch.Tensor:
+        optimizer.zero_grad()
+        components = _evaluate_obstacle_loss_components(
+            trained_network, batch, domain, obstacle, fluid_config, training_config, obstacle_loss_weight
+        )
+        components.total.backward()
+        
+        current_values = _record_obstacle_loss_components(components)
+        accumulator["step"].append(len(accumulator["step"]))
+        for name, value in current_values.items():
+            accumulator[name].append(value)
+        return components.total
+    
+    round_width = len(str(training_config.lbfgs_rounds))
+    for round_index in range(training_config.lbfgs_rounds):
+        optimizer.step(closure)
+        if verbose:
+            prefix = f"L-BFGS round {round_index + 1:{round_width}d}/{training_config.lbfgs_rounds}"
+            last_values = {name: accumulator[name][-1] for name in ("total",) + OBSTACLE_LOSS_COMPONENT_NAMES}
+            print(_format_progress_line(prefix, last_values))
+    
+    return ObstacleLossHistory(**{name: tuple(values) for name, values in accumulator.items()})

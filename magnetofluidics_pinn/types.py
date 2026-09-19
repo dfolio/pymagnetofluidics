@@ -13,6 +13,7 @@ without depending on each other's internals.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Literal
 
@@ -65,11 +66,67 @@ class CollocationPoints:
       boundary, used to enforce boundary conditions.
     - `initial`: Optional tensor of shape `(n_initial, n_dims)` sampled at the
       initial time, used only for unsteady (Navier-Stokes) problems.
+    - `obstacle_surface`: NEW. Optional tensor of shape `(n_obstacle, n_dims)`
+      sampled on the surface of an embedded
+      [`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle], as
+      returned by
+      [`sampling.sample_collocation_points_with_obstacle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle].
+      `None` for every domain without an embedded obstacle — every existing
+      caller that never set this field keeps working unchanged.
     """
 
     interior: torch.Tensor
     boundary: torch.Tensor
     initial: torch.Tensor | None = None
+    obstacle_surface: torch.Tensor | None = None  # NEW
+ 
+ 
+@dataclass(frozen=True)
+class SphericalObstacle:
+    r"""A rigid spherical obstacle embedded on the channel's symmetry axis.
+ 
+    NEW. Describes the excluded-volume particle around which
+    [`sampling.sample_collocation_points_with_obstacle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]
+    and
+    [`training.trainer.train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle]
+    solve a genuinely two-way-coupled flow field, as opposed to the
+    one-way, Faxén-corrected point-tracer model in
+    [`physics.hydrodynamic_drag.faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity].
+ 
+    **Why the obstacle has no radial position.** This package's flow solver
+    is axisymmetric: every field is represented as a function of `(r, z)`
+    alone, which is only a faithful reduction of the true 3-D field when
+    every geometric feature of the domain — including any embedded
+    obstacle — is itself a solid of revolution about that same axis. A
+    sphere centered anywhere off the axis breaks that symmetry and would
+    need a genuinely 3-D (or non-axisymmetric 2-D azimuthal) solve, well
+    outside this package's architecture. A sphere centered *on* the axis
+    is the one obstacle placement compatible with `(r, z)` at all, so
+    `SphericalObstacle` only stores its axial coordinate: `r_p \equiv 0` is
+    not a simplifying assumption, it is what makes the excluded-volume
+    problem expressible in this coordinate system in the first place.
+ 
+    Args:
+    - `axial_position`: Dimensionless $z$-coordinate of the sphere's
+      center, in the same units as `Domain.length`.
+    - `radius`: Dimensionless sphere radius $a$ (i.e. $a / L$, matching
+      [`scaling.nondimensionalize_particle`][magnetofluidics_pinn.scaling.nondimensionalize_particle]'s
+      output), in the same units as `Domain.radius`. Strictly positive.
+ 
+    Raises:
+    - `ValueError`: If `axial_position` is not finite, or `radius` is not
+      finite and strictly positive.
+    """
+ 
+    axial_position: float
+    radius: float
+ 
+    def __post_init__(self) -> None:
+        if not math.isfinite(self.axial_position):
+            raise ValueError(f"axial_position must be finite; got {self.axial_position!r}.")
+        if not math.isfinite(self.radius) or self.radius <= 0.0:
+            raise ValueError(f"radius must be finite and strictly positive; got {self.radius!r}.")
+ 
 
 
 @dataclass(frozen=True)

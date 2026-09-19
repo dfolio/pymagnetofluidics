@@ -12,9 +12,7 @@ leading-order finite-size correction: **Faxén's first law**. For a rigid
 sphere of radius $a$ translating in a Stokes ambient flow
 $u_\infty(\mathbf{x})$ that varies slowly over the particle's scale, the
 sphere's velocity is
-
-$$ U = u_\infty(\mathbf{x}_p) + \frac{a^2}{6} \nabla^2 u_\infty(\mathbf{x}_p) $$
-
+$$U = u_\infty(\mathbf{x}_p) + \frac{a^2}{6} \nabla^2 u_\infty(\mathbf{x}_p)$$
 [@faxen1922widerstand; @kim2005microhydrodynamics, section 7.2, for the
 standard modern derivation; @maxey1983equation, for its place in the
 general point-particle equation of motion this package's trajectory
@@ -50,8 +48,14 @@ from typing import Callable
 import torch
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
+from magnetofluidics_pinn.physics.fluid_residuals import (
+    axisymmetric_vector_laplacian,
+    compute_flow_derivatives,
+)
+from magnetofluidics_pinn.types import SphericalObstacle
 
 
+# CHANGED: Refactored to leverage compute_flow_derivatives and axisymmetric_vector_laplacian.
 def faxen_corrected_velocity(
     flow_network: Callable[[torch.Tensor], torch.Tensor],
     positions: torch.Tensor,
@@ -84,7 +88,7 @@ def faxen_corrected_velocity(
         raise ValueError(
             f"positions must have shape (n_points, 2); got {tuple(positions.shape)}."
         )
-
+    
     positions_for_grad = (
         positions if positions.requires_grad else positions.clone().requires_grad_(True)
     )
@@ -94,30 +98,134 @@ def faxen_corrected_velocity(
             "faxen_corrected_velocity received positions on or across the "
             "symmetry axis (r <= 0); the Laplacian correction is singular there."
         )
-
-    output = flow_network(positions_for_grad)
-    velocity_r, velocity_z = output[:, 0:1], output[:, 1:2]
-
+    
     if particle_radius == 0.0:
-        # No correction requested: skip the (otherwise harmless, but
-        # wasted) second-derivative pass entirely.
-        return torch.cat([velocity_r, velocity_z], dim=1)
+        # Zero radius: bypass derivative computations entirely for performance
+        output = flow_network(positions_for_grad)
+        return output[:, :2]
+    
+    # CHANGED: Eliminated ~20 lines of duplicate autodiff and Laplacian formulas.
+    derivs = compute_flow_derivatives(flow_network, positions_for_grad, compute_second_order=True)
+    laplacian_r, laplacian_z = axisymmetric_vector_laplacian(
+        derivs=derivs,
+        radius=radius_coordinate,
+        residual_form="standard",
+    )
+    
+    velocity = torch.cat([derivs.velocity_r, derivs.velocity_z], dim=1)
+    laplacian_u = torch.cat([laplacian_r, laplacian_z], dim=1)
+    correction = (particle_radius ** 2 / 6.0) * laplacian_u
+    return velocity + correction
 
-    grad_velocity_r = scalar_field_gradient(velocity_r, positions_for_grad)
-    grad_velocity_z = scalar_field_gradient(velocity_z, positions_for_grad)
-    d_vr_dr, d_vr_dz = grad_velocity_r[:, 0:1], grad_velocity_r[:, 1:2]
-    d_vz_dr, d_vz_dz = grad_velocity_z[:, 0:1], grad_velocity_z[:, 1:2]
 
-    d2_vr_dr2 = scalar_field_gradient(d_vr_dr, positions_for_grad)[:, 0:1]
-    d2_vr_dz2 = scalar_field_gradient(d_vr_dz, positions_for_grad)[:, 1:2]
-    d2_vz_dr2 = scalar_field_gradient(d_vz_dr, positions_for_grad)[:, 0:1]
-    d2_vz_dz2 = scalar_field_gradient(d_vz_dz, positions_for_grad)[:, 1:2]
+# CHANGED: Refactored with compute_flow_derivatives(compute_second_order=False) and GPU-safe quadrature.
+def surface_traction_force(
+    flow_network: Callable[[torch.Tensor], torch.Tensor],
+    obstacle: SphericalObstacle,
+    n_quadrature_points: int = 181,
+) -> torch.Tensor:
+    r"""Axial hydrodynamic force the flow exerts on an embedded spherical obstacle.
 
-    # Same axisymmetric vector-Laplacian operator as the viscous term in
-    # `stokes_residual`'s momentum equations, evaluated here at the
-    # particle's position rather than at collocation points.
-    laplacian_vr = d2_vr_dr2 + d_vr_dr / radius_coordinate - velocity_r / radius_coordinate**2 + d2_vr_dz2
-    laplacian_vz = d2_vz_dr2 + d_vz_dr / radius_coordinate + d2_vz_dz2
+    NEW. Unlike
+    [`faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity],
+    which *approximates* the ambient flow's effect on an undisturbed
+    point/finite tracer, this function reads the force directly off a flow
+    field that was actually solved *around* the obstacle (see
+    [`training.trainer.train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle]):
+    it integrates the Cauchy stress tensor's traction vector over the
+    sphere's own surface,
 
-    correction = (particle_radius**2 / 6.0) * torch.cat([laplacian_vr, laplacian_vz], dim=1)
-    return torch.cat([velocity_r, velocity_z], dim=1) + correction
+    $$
+    F_z = \oint_{S} t_z \, dA, \qquad
+    t_z = \sigma_{zz} n_z + \sigma_{zr} n_r, \qquad
+    \sigma_{zz} = -p + 2 \frac{\partial u_z}{\partial z}, \qquad
+    \sigma_{zr} = \frac{\partial u_z}{\partial r} + \frac{\partial u_r}{\partial z},
+    $$
+
+    with dimensionless viscosity $1$ throughout (the same viscous pressure
+    scaling `physics.fluid_residuals` already assumes, valid whether the
+    flow field was obtained from `stokes_residual` or
+    `navier_stokes_residual` — the stress-strain constitutive relation for
+    a Newtonian fluid does not itself depend on which momentum balance
+    produced the velocity field). Parametrizing the sphere's meridian by
+    the polar angle $\theta \in [0, \pi]$ (so $r = a\sin\theta$,
+    $z = z_p + a\cos\theta$, outward normal $(n_r, n_z) = (\sin\theta,
+    \cos\theta)$, surface element $dA = 2\pi r \, a\, d\theta$) turns the
+    integral into a plain 1-D quadrature over $\theta$, evaluated here with
+    `torch.trapezoid` rather than a fixed-weight sum, so accuracy scales
+    with `n_quadrature_points` rather than being capped by a first-order
+    rule regardless of resolution.
+
+    **Only $F_z$ is returned.** By the on-axis symmetry
+    [`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle]
+    requires (see that type's docstring), the radial force integrates to
+    exactly zero for any genuinely axisymmetric flow: every contribution
+    at azimuthal angle $\phi$ is exactly cancelled by its counterpart at
+    $\phi + \pi$. Reporting a numerically near-zero $F_r$ anyway would
+    only add quadrature noise, not information.
+
+    This closes the gap
+    [`scaling.nondimensionalize_particle`][magnetofluidics_pinn.scaling.nondimensionalize_particle]'s
+    and
+    [`trajectory.integrator.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]'s
+    own docstrings flag: a directly-computed drag force, from the actual
+    perturbed flow, rather than an assumed unit mobility. See
+    [`trajectory.two_way_coupling.solve_force_balanced_velocity`][magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity]
+    for where it closes a force balance into a particle velocity
+    [@richou2003correction].
+
+    Args:
+    - `flow_network`: A trained (or in-training) network mapping `(r, z)`
+      coordinates to `(u_r, u_z, p)` — the *actual*, two-way-coupled flow
+      field around `obstacle`, not the undisturbed ambient field. If the
+      field is unsteady, evaluate at a fixed time slice first (e.g.
+      `lambda rz: network(torch.cat([rz, t_slice], dim=1))`) and pass that
+      wrapper here.
+    - `obstacle`: The sphere the traction is integrated over.
+    - `n_quadrature_points`: Number of polar-angle quadrature nodes; the
+      two poles ($\theta = 0, \pi$) contribute zero regardless of
+      resolution, since $r = 0$ there.
+
+    Returns:
+    - Scalar tensor: the axial drag force $F_z$ (dimensionless), on the
+      same device as `obstacle`'s coordinates are constructed on (CPU by
+      default; move the result yourself if `flow_network` lives on
+      `"cuda"` and a CPU scalar is inconvenient).
+
+    Raises:
+    - `ValueError`: If `n_quadrature_points` is smaller than 2, or if
+      `flow_network`'s output does not have exactly 3 columns.
+    """
+    if n_quadrature_points < 2:
+        raise ValueError(
+            f"n_quadrature_points must be at least 2 for trapezoidal quadrature; got {n_quadrature_points!r}."
+        )
+        
+        # CUDA-safe: infer device from network parameters if available, else default to CPU
+    device = torch.device("cpu")
+    if hasattr(flow_network, "parameters"):
+        first_param = next(flow_network.parameters(), None)
+        if first_param is not None:
+            device = first_param.device
+    
+    theta = torch.linspace(0.0, torch.pi, n_quadrature_points, device=device)
+    radial_coordinate = obstacle.radius * torch.sin(theta)
+    axial_coordinate = obstacle.axial_position + obstacle.radius * torch.cos(theta)
+    coordinates = torch.stack([radial_coordinate, axial_coordinate], dim=1).requires_grad_(True)
+    
+    # CHANGED: Reused compute_flow_derivatives with compute_second_order=False.
+    derivs = compute_flow_derivatives(flow_network, coordinates, compute_second_order=False)
+    
+    # Cauchy stress tensor components in axisymmetric coordinates:
+    # sigma_zz = -p + 2 * du_z/dz
+    # sigma_zr = du_z/dr + du_r/dz
+    sigma_zz = -derivs.pressure + 2.0 * derivs.d_velocity_z_dz
+    sigma_zr = derivs.d_velocity_z_dr + derivs.d_velocity_r_dz
+    
+    normal_r = torch.sin(theta).unsqueeze(1)
+    normal_z = torch.cos(theta).unsqueeze(1)
+    traction_z = (sigma_zz * normal_z + sigma_zr * normal_r).squeeze(1)
+    
+    # Integrand over theta: dA = 2 * pi * r * a * dtheta
+    integrand = traction_z.detach() * 2.0 * torch.pi * radial_coordinate.detach() * obstacle.radius
+    return torch.trapezoid(integrand, theta)

@@ -10,6 +10,7 @@ from magnetofluidics_pinn.boundary_conditions.flow_bc import (
     inlet_velocity_condition as inlet_velocity_condition,
     no_slip_condition as no_slip_condition,
     outlet_pressure_condition as outlet_pressure_condition,
+    rigid_body_velocity_condition as rigid_body_velocity_condition,
 )
 from magnetofluidics_pinn.boundary_conditions.magnetic_field_bc import (
     biot_savart_field as biot_savart_field,
@@ -20,6 +21,7 @@ from magnetofluidics_pinn.boundary_conditions.magnetic_field_bc import (
 __all__ = [
     "inlet_velocity_condition",
     "outlet_pressure_condition",
+    "rigid_body_velocity_condition",
     "no_slip_condition",
     "uniform_field",
     "gradient_field",

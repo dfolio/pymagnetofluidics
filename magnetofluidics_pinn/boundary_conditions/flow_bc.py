@@ -79,6 +79,60 @@ def outlet_pressure_condition(
         dtype=coordinates.dtype,
         device=coordinates.device,
     )
+ 
+ 
+def rigid_body_velocity_condition(
+        coordinates: torch.Tensor, translational_velocity: tuple[float, float]
+) -> torch.Tensor:
+    """Compute the no-slip target velocity on a rigidly translating surface.
+ 
+    NEW. Generalizes
+    [`no_slip_condition`][magnetofluidics_pinn.boundary_conditions.flow_bc.no_slip_condition]
+    (which is the special case `translational_velocity = (0.0, 0.0)`) to a
+    solid body that is itself moving: every point on the surface of a
+    rigid body undergoing pure translation (no rotation) carries the same
+    velocity vector, namely the body's own — the defining kinematic
+    relation for a rigid translation, independent of the surface's shape.
+    Used for the surface of a
+    [`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle] in
+    [`training.trainer.train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle]:
+    a sphere translating along the axis at `(0.0, particle_velocity)` has
+    no reason to spin (no applied torque, no asymmetry to induce one under
+    axisymmetric conditions), so `translational_velocity` alone specifies
+    its complete surface kinematics.
+ 
+    Args:
+    - `coordinates`: Tensor of shape `(n_points, n_dims)` of surface
+      points. Only its shape, dtype, and device are used — the target is
+      identical at every point of a pure translation, regardless of where
+      on the surface it sits.
+    - `translational_velocity`: The rigid body's own velocity vector,
+      e.g. `(0.0, particle_velocity)` for a particle confined to the axis
+      (see `SphericalObstacle`'s docstring for why its radial component is
+      always zero in this package).
+ 
+    Returns:
+    - Tensor of shape `(n_points, n_dims)` with `translational_velocity`
+      broadcast to every row.
+ 
+    Raises:
+    - `ValueError`: If `coordinates` is not a 2-D tensor, or if
+      `translational_velocity`'s length does not match `coordinates`'s
+      number of dimensions.
+    """
+    if coordinates.ndim != 2:
+        raise ValueError(
+            f"coordinates must have shape (n_points, n_dims); got {tuple(coordinates.shape)}."
+        )
+    velocity_tensor = torch.as_tensor(
+        translational_velocity, dtype=coordinates.dtype, device=coordinates.device
+    )
+    if velocity_tensor.shape[0] != coordinates.shape[1]:
+        raise ValueError(
+            "translational_velocity must have as many components as coordinates has "
+            f"dimensions; got {velocity_tensor.shape[0]} vs {coordinates.shape[1]}."
+        )
+    return velocity_tensor.unsqueeze(0).expand(coordinates.shape[0], -1).clone()
 
 
 def no_slip_condition(domain: Domain, coordinates: torch.Tensor) -> torch.Tensor:
