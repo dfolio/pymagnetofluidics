@@ -62,6 +62,7 @@ from magnetofluidics_pinn.sampling import (
 from magnetofluidics_pinn.scaling import (compute_scales as compute_scales,
                                           nondimensionalize_domain as nondimensionalize_domain,
                                           nondimensionalize_particle as nondimensionalize_particle,
+                                          nondimensionalize_mobility as nondimensionalize_mobility,
                                           redimensionalize_domain as redimensionalize_domain, Scales as Scales)
 from magnetofluidics_pinn.training import (compose_loss as compose_loss,
                                            train as train,
@@ -76,13 +77,51 @@ from magnetofluidics_pinn.types import (
     MagneticFieldSample as MagneticFieldSample,
     ParticleState as ParticleState,
 )
+# NEW: quantitative verification utilities (closed-form Hagen-Poiseuille
+# reference, independent evaluators, and pass/fail checklist scaffolding).
+# Imported before `visualization` since `visualization.plotting` consumes
+# `verification.metrics.ProfileEvaluation` - see that module's docstring.
+from magnetofluidics_pinn.verification import (
+    ProfileEvaluation as ProfileEvaluation,
+    VerificationCheck as VerificationCheck,
+    VerificationThresholds as VerificationThresholds,
+    analytical_pressure_gradient as analytical_pressure_gradient,
+    analytical_tracer_streamline as analytical_tracer_streamline,
+    compare_trajectory_to_analytical as compare_trajectory_to_analytical,
+    compute_flow_rate_curve as compute_flow_rate_curve,
+    compute_flow_rate_errors as compute_flow_rate_errors,
+    compute_global_l2_error as compute_global_l2_error,
+    compute_max_pointwise_error as compute_max_pointwise_error,
+    compute_pressure_gradient_error as compute_pressure_gradient_error,
+    compute_profile_invariance as compute_profile_invariance,
+    compute_radial_leakage as compute_radial_leakage,
+    default_thresholds as default_thresholds,
+    evaluate_axis_pressure_profile as evaluate_axis_pressure_profile,
+    evaluate_check as evaluate_check,
+    evaluate_held_out_residual as evaluate_held_out_residual,
+    evaluate_residual_grid as evaluate_residual_grid,
+    evaluate_structural_constraints as evaluate_structural_constraints,
+    evaluate_velocity_profiles as evaluate_velocity_profiles,
+    faxen_offset_velocity as faxen_offset_velocity,
+    hagen_poiseuille_pressure as hagen_poiseuille_pressure,
+    hagen_poiseuille_velocity_field as hagen_poiseuille_velocity_field,
+    pending_check as pending_check,
+    render_verification_table as render_verification_table,
+    summarize_residual as summarize_residual,
+)
 from magnetofluidics_pinn.visualization import (
+    plot_flow_rate_deviation as plot_flow_rate_deviation,  # NEW
+    plot_pressure_gradient_fit as plot_pressure_gradient_fit,  # NEW
+    plot_profile_error as plot_profile_error,  # NEW
+    plot_radial_leakage as plot_radial_leakage,  # NEW
+    plot_residual_heatmap as plot_residual_heatmap,  # NEW
     plot_streamlines as plot_streamlines,
     plot_trajectories as plot_trajectories,
     plot_training_history as plot_training_history,
+    plot_velocity_profile_comparison as plot_velocity_profile_comparison,  # NEW
 )
 
-__version__ = "0.1.5"
+__version__ = "0.1.6"  # CHANGED: was "0.1.5" - bumped for the new `verification` subpackage.
 
 __all__ = [
     "__version__",
@@ -133,14 +172,48 @@ __all__ = [
     "plot_streamlines",
     "plot_trajectories",
     "plot_training_history",
+    "plot_velocity_profile_comparison",  # NEW
+    "plot_profile_error",  # NEW
+    "plot_radial_leakage",  # NEW
+    "plot_flow_rate_deviation",  # NEW
+    "plot_pressure_gradient_fit",  # NEW
+    "plot_residual_heatmap",  # NEW
     # Scaling
     "Scales",
     "compute_scales",
     "nondimensionalize_domain",
     "redimensionalize_domain",
     "nondimensionalize_particle",
+    "nondimensionalize_mobility",  # NEW: was previously only reachable via the `scaling` submodule directly.
     # Device management
     "resolve_device",
     "resolve_module_device",
     "resolve_module_dtype",
+    # NEW: Verification
+    "ProfileEvaluation",
+    "summarize_residual",
+    "evaluate_structural_constraints",
+    "evaluate_velocity_profiles",
+    "compute_global_l2_error",
+    "compute_max_pointwise_error",
+    "compute_profile_invariance",
+    "compute_radial_leakage",
+    "compute_flow_rate_curve",
+    "compute_flow_rate_errors",
+    "evaluate_axis_pressure_profile",
+    "compute_pressure_gradient_error",
+    "evaluate_held_out_residual",
+    "evaluate_residual_grid",
+    "compare_trajectory_to_analytical",
+    "hagen_poiseuille_velocity_field",
+    "hagen_poiseuille_pressure",
+    "analytical_pressure_gradient",
+    "analytical_tracer_streamline",
+    "faxen_offset_velocity",
+    "VerificationCheck",
+    "VerificationThresholds",
+    "default_thresholds",
+    "evaluate_check",
+    "pending_check",
+    "render_verification_table",
 ]
