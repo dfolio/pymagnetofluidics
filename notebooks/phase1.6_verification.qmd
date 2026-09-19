@@ -1,0 +1,672 @@
+---
+title: "Phase 1 Verification — Axisymmetric Stokes Flow and Magnetic Particle Transport"
+subtitle: "Quantitative verification against the Hagen–Poiseuille analytical solution (`magnetofluidics_pinn` v0.1.6+)"
+author: "David FOLIO"
+date: today
+bibliography: ../docs/references.bib
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    fig-cap-location: bottom
+    number-sections: false
+execute:
+  freeze: auto
+  warning: false
+include-in-header:
+  text: |
+    <script>
+    window.MathJax = {
+      tex: {
+        macros: {
+          pdv: ["\\frac{\\partial #1}{\\partial #2}", 2],
+          pdvn: ["\\frac{\\partial^{#1} #2}{\\partial #3^{#1}}", 3],
+          dv: ["\\frac{d #1}{d #2}", 2],
+          vb: ["\\mathbf{#1}", 1],
+          abs: ["\\left| #1 \\right|", 1],
+          norm: ["\\left\\| #1 \\right\\|", 1],
+          div: ["\\nabla \\cdot"],
+          laplacian: ["\\nabla^2"],
+          qty: ["#1\\ \\mathrm{#2}", 2]
+        }
+      }
+    };
+    </script>
+    <script type="text/javascript" id="MathJax-script" async
+      src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js">
+    </script>
+---
+
+<!--
+::: {.callout-note title="Notation"}
+Equations below are typeset with a small set of MathJax macros standing in
+for the LaTeX `physics` and `siunitx` packages, which MathJax itself does
+not load: `\pdv{f}{x}` and `\pdvn{2}{f}{x}` for first- and higher-order
+partial derivatives, `\vb{x}` for bold vectors, `\abs{x}` and `\norm{x}`
+for absolute value and norm, `\laplacian` for $\nabla^2$, and `\qty{value}{unit}`
+as a lightweight stand-in for `siunitx`'s number–unit pairs. Superscript
+`*` marks a dimensionless quantity throughout, following
+[`scaling.compute_scales`](../magnetofluidics_pinn/scaling.py)'s
+convention.
+:::
+-->
+
+# Scope and verification claims
+
+This notebook verifies Phase 1 of `magnetofluidics_pinn`
+(`v0.1.6+`, single spherical particle, uniform magnetic field, steady
+Stokes flow, straight channel) against the one case with a closed-form
+solution: axisymmetric Hagen–Poiseuille flow
+[@happel1983low; @leal2007advanced]. Three components are exercised
+together ---the governing-equation residual ([
+`physics.fluid_residuals.stokes_residual`](../magnetofluidics_pinn/physics/fluid_residuals.py)),
+the trained network's hard-constrained architecture ([
+`networks.constraints.apply_hard_wall_constraint`](../magnetofluidics_pinn/networks/constraints.py)
+[@lu2021physics]), and the particle-trajectory integrator ([
+`trajectory.integrate_trajectory`](../magnetofluidics_pinn/trajectory/integrator.py)).
+
+## What this notebook does not verify
+
+Phase 2 (particle swarms, non-uniform fields) and Phase 3 (Navier–Stokes, bifurcated geometry) are
+out of scope ---`boundary_conditions.magnetic_field_bc.gradient_field` and
+`biot_savart_field`, and `geometry.build_bifurcation_domain`, remain
+unimplemented in this release and are not exercised here. The Faxén-law
+finite-size correction [@faxen1922widerstand; @kim2005microhydrodynamics]
+is checked only against its own closed-form prediction for this specific
+flow (@sec-streamline), not against an independent finite-size
+hydrodynamics reference. A non-uniform magnetic field is likewise out of
+scope: `integrate_trajectory` itself rejects one (see its own uniformity
+guard), so every trajectory check here uses a uniform field, under which
+the dipole force vanishes identically [@abbott2020magnetic].
+
+The table below previews every claim this notebook makes, before running
+anything expensive — each row is populated with its measured value in
+@sec-summary, once the corresponding section has run.
+
+```{python}
+#| label: tbl-preview
+#| tbl-cap: "Verification matrix — populated progressively through the notebook."
+import sys
+from pathlib import Path
+
+for candidate in (Path.cwd(), Path.cwd().parent, Path.cwd().parent.parent):
+    if (candidate / "magnetofluidics_pinn").is_dir() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+        
+import magnetofluidics_pinn as mfp
+
+pending_checks = (
+    mfp.pending_check(
+        "Exact interior residual",
+        "Stokes residual of the closed-form solution on an independent grid", "<=",
+    ),
+    mfp.pending_check(
+        "Structural regularity",
+        "Axis/wall hard-constraint probe on an untrained network", "<=",
+    ),
+    mfp.pending_check(
+        "Global relative L2 error",
+        "Relative L2 error of the predicted velocity against the analytical profile", "<=",
+    ),
+    mfp.pending_check(
+        "Max pointwise velocity error",
+        "Largest pointwise velocity deviation from the analytical profile", "<=",
+    ),
+    mfp.pending_check(
+        "Profile invariance",
+        "Consistency of the predicted u_z(r) profile across axial stations", "<=",
+    ),
+    mfp.pending_check(
+        "Radial leakage",
+        "Normalized max |u_r|, relative to the centerline velocity", "<=",
+    ),
+    mfp.pending_check(
+        "Flow-rate conservation",
+        "Relative error of Q(z) against the analytical reference flow rate", "<=",
+    ),
+    mfp.pending_check(
+        "Pressure-gradient fit",
+        "Relative error of the fitted dp/dz against the analytical value", "<=",
+    ),
+    mfp.pending_check(
+        "Held-out PDE residual",
+        "Stokes residual RMS on a fresh, independent collocation batch", "<=",
+    ),
+    mfp.pending_check(
+        "Streamline alignment",
+        "Point-tracer trajectory error against the analytical streamline", "<=",
+    ),
+)
+mfp.render_verification_table(pending_checks)
+```
+
+Every check accumulates into `verification_checks` as its section runs, so
+nothing here is graded twice and nothing is silently skipped.
+
+```{python}
+#| label: setup
+import time
+
+import numpy as np
+import pandas as pd
+import torch
+
+RANDOM_SEED = 42
+DEVICE = mfp.resolve_device(None)
+DTYPE = torch.float32
+
+verification_checks: tuple[mfp.VerificationCheck, ...] = ()
+print(f"PyTorch: {torch.__version__} | Active Device: {DEVICE} |  dtype: {DTYPE}")
+print(f"magnetofluidics_pinn: v{mfp.__version__}")
+```
+
+# Reference problem and analytical solution
+
+## Governing equations
+
+In dimensionless axisymmetric cylindrical coordinates $(r^*, z^*)$, the
+Stokes momentum and continuity equations read
+$$
+-\pdv{p^*}{r^*} + \laplacian u_r^* - \frac{u_r^*}{r^{*2}} = 0, \qquad
+-\pdv{p^*}{z^*} + \laplacian u_z^* = 0, \qquad
+\frac{1}{r^*}\pdv{ (r^* u_r^*)}{r^*} + \pdv{u_z^*}{z^*} = 0.
+$$
+
+Driven by the parabolic inlet profile
+[`inlet_velocity_condition`](../magnetofluidics_pinn/boundary_conditions/flow_bc.py)
+imposes and a fixed outlet gauge pressure, this system has the classical
+closed-form solution
+$$
+u_r^*(r^*, z^*) = 0, \qquad
+u_z^*(r^*, z^*) = u_\text{peak}^*\left (1 - \left (\frac{r^*}{R^*}\right)^2\right), \qquad
+\pdv{p^*}{z^*} = -\frac{4 u_\text{peak}^*}{R^{*2}},
+$$
+with the last relation following directly from substituting $u_z^*$ into
+the $z$-momentum equation above. Integrating the parabolic profile over a
+cross-section gives the reference volumetric flow rate
+$$
+Q_\text{ref}^* = \int_0^{R^*} u_z^*(r^*)\, 2\pi r^*\, dr^* = \frac{\pi R^{*2} u_\text{peak}^*}{2}.
+$$
+
+These three closed forms 
+---[`hagen_poiseuille_velocity_field`](../magnetofluidics_pinn/verification/analytical.py),
+[`analytical_pressure_gradient`](../magnetofluidics_pinn/verification/analytical.py), and
+[`poiseuille_reference_flow_rate`](../magnetofluidics_pinn/physics/conservation.py) —
+are every quantitative reference this notebook compares against.
+
+## Configuration and scales
+
+```{python}
+#| label: reference-problem
+radius = 7.5e-4             # 750µm
+reference_velocity =1.0e-3  # 1 mm/s
+length = 4.0 * radius       # 3 mm
+dynamic_viscosity = 1e-3    # 1 mPa·s
+density = 1.0e3             # 1000 kg/m^3
+
+n_epochs = 400
+lbfgs_rounds = 4
+lbfgs_iterations_per_round = 400
+
+domain_config = mfp.DomainConfig(kind="channel", length=length, radius=radius)
+fluid_config = mfp.FluidConfig(
+    regime="stokes", dynamic_viscosity=dynamic_viscosity, density=density,
+    reference_velocity=reference_velocity, reference_length=domain_config.radius,
+)
+field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, orientation=(1.0, 0.0))
+particle_config = mfp.ParticleConfig(radius=10.0e-6, magnetic_moment=(1.0e-11, 0.0))
+
+physical_domain = mfp.build_channel_domain(domain_config)
+scales = mfp.compute_scales(fluid_config, field_config)
+domain = mfp.nondimensionalize_domain(physical_domain, scales)
+
+# The dimensionless inlet centerline velocity: `FluidConfig.reference_velocity`
+# is, by construction of `compute_scales`, the physical velocity that maps to
+# exactly 1.0, matching `training.trainer`'s own gauge choice.
+PEAK_VELOCITY = 1.0
+REFERENCE_PRESSURE = 0.0
+
+pd.Series({"domain.radius": domain.radius, "domain.length": domain.length,
+           "scales.length [m]": scales.length, "scales.velocity [m/s]": scales.velocity,
+           "scales.pressure [Pa]": scales.pressure})
+```
+
+```{python}
+#| label: reference-quantities
+reference_flow_rate = mfp.poiseuille_reference_flow_rate(domain.radius, PEAK_VELOCITY)
+reference_pressure_gradient = mfp.analytical_pressure_gradient(domain.radius, PEAK_VELOCITY)
+
+pd.Series({"Q_ref* (analytical)": reference_flow_rate, "dp*/dz* (analytical)": reference_pressure_gradient})
+```
+
+## Calibratable verification thresholds
+
+Every tolerance the checks below compare against is collected into one
+[`VerificationThresholds`](../magnetofluidics_pinn/verification/reporting.py)
+instance, built by
+[`default_thresholds`](../magnetofluidics_pinn/verification/reporting.py)
+from the reference scales just computed. Two different kinds of bound are
+at play: the closed-form checks in @sec-exact-residual and
+@sec-structural are floating-point-accuracy questions (bounded by a
+multiple of machine epsilon), while the trained-network checks in
+@sec-independent-verification are physical-accuracy questions (bounded by
+a fraction of a reference quantity ---`peak_velocity`, `reference_flow_rate`,
+or the analytical pressure gradient). Every `*_factor` / `*_fraction`
+keyword below is a calibratable constant, not a derived physical value---
+tighten or loosen any of them without touching
+`magnetofluidics_pinn.verification`.
+
+```{python}
+#| label: thresholds
+thresholds = mfp.default_thresholds(dtype=DTYPE, peak_velocity=PEAK_VELOCITY)
+pd.Series(thresholds.__dict__)
+```
+
+# Exact differential-operator verification {#sec-exact-residual}
+
+Evaluating `stokes_residual` on the *closed-form* solution isolates the
+residual formula itself from any network training question: on an
+independent grid, disjoint from every seed used later for training or
+held-out evaluation, the residual should sit at machine precision.
+
+A genuine convenience falls out of this flow having $u_r^* \equiv 0$
+identically (not merely small): the axisymmetric residual's singular
+$1/r^{*2}$ term is multiplied by an operand that is exactly zero in
+floating point, so — unlike a trained network, where a small numerical
+$u_r^*$ gets amplified near the axis — this grid needs no axis clearance.
+A tiny floor (`1e-8`) on $r^*$ is kept purely to avoid an exact-zero draw
+tripping `residual_form="standard"`'s own `r > 0` guard.
+
+```{python}
+#| label: tbl-exact-residual
+#| tbl-cap: "Exact Stokes residual of the closed-form solution, on an independent grid."
+EXACT_GRID_SEED = RANDOM_SEED + 1000  # independent of every training/held-out seed below
+N_EXACT_GRID_POINTS = 20_000
+
+exact_grid_generator = torch.Generator(device=DEVICE).manual_seed(EXACT_GRID_SEED)
+exact_r = (domain.radius * torch.rand(
+    N_EXACT_GRID_POINTS, 1, generator=exact_grid_generator, device=DEVICE, dtype=DTYPE
+)).clamp_min(1.0e-8)
+exact_z = domain.length * torch.rand(
+    N_EXACT_GRID_POINTS, 1, generator=exact_grid_generator, device=DEVICE, dtype=DTYPE
+)
+exact_coordinates = torch.cat([exact_r, exact_z], dim=1).requires_grad_(True)
+
+
+def analytical_network(coordinates: torch.Tensor) -> torch.Tensor:
+    """Closed-form Hagen-Poiseuille field, exposed with the trained-network calling convention."""
+    return mfp.hagen_poiseuille_velocity_field(coordinates, domain, PEAK_VELOCITY, REFERENCE_PRESSURE)
+
+
+exact_residual = mfp.stokes_residual(analytical_network, exact_coordinates, fluid_config, residual_form="standard")
+exact_residual_summary = mfp.summarize_residual(exact_residual, ("momentum_r", "momentum_z", "continuity"))
+exact_residual_summary
+```
+
+```{python}
+#| label: check-exact-residual
+verification_checks = verification_checks + (
+    mfp.evaluate_check(
+        "Exact interior residual",
+        "Stokes residual of the closed-form solution on an independent grid",
+        exact_residual_summary.loc["total", "max_abs"], thresholds.exact_residual_tolerance, "<=",
+    ),
+)
+verification_checks[-1]
+```
+
+# Structural boundary/regularity verification {#sec-structural}
+
+`apply_hard_wall_constraint` claims to enforce axis and wall regularity *structurally* — for every parameter value, not
+just after training
+[@lu2021physics]. The only way to actually test that claim is to probe a **freshly initialized, untrained** network: if
+the conditions hold before
+a single gradient step, they hold by construction, not by coincidence of
+training.
+
+```{python}
+#| label: tbl-structural
+#| tbl-cap: "Structural axis/wall regularity, probed on an untrained network."
+untrained_network = mfp.apply_hard_wall_constraint(
+    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), activation="tanh", device=str(DEVICE)),
+    domain,
+)
+structural_metrics = mfp.evaluate_structural_constraints(
+    untrained_network, domain, n_probe_points=2_000, random_seed=EXACT_GRID_SEED + 1,
+)
+pd.Series(structural_metrics)
+```
+
+```{python}
+#| label: check-structural
+verification_checks = verification_checks + (
+    mfp.evaluate_check(
+        "Structural regularity",
+        "Axis/wall hard-constraint probe on an untrained network",
+        max(structural_metrics.values()), thresholds.structural_tolerance, "<=",
+    ),
+)
+verification_checks[-1]
+```
+
+# PINN training
+
+::: {.callout-warning title="Reduced, notebook-scale recipe"}
+`NOTEBOOK_TRAINING_CONFIG` below reduces the point counts and iteration
+budgets from `TrainingConfig()`'s defaults (`n_epochs`: 20 000 → `{python} n_epochs`;
+`lbfgs_rounds`: 4 → `{python} lbfgs_rounds`; 
+`lbfgs_iterations_per_round`: 500 → `{python} lbfgs_iterations_per_round`, and
+proportionate cuts to every collocation-point count) so this notebook
+renders in a reasonable time. Every loss weight, `gradient_clip_norm`, and
+`residual_form` is left at its package default — this recipe is smaller,
+not different. Reproducing the accuracy figures reported in the package's
+own convergence testing (@sec-summary's thresholds are calibrated loosely
+enough to accommodate this reduced budget) requires the full default
+configuration.
+:::
+
+```{python}
+#| label: training-config
+NOTEBOOK_TRAINING_CONFIG = mfp.TrainingConfig(
+    n_interior_points=4_000, n_boundary_points=900,
+    n_epochs=n_epochs, random_seed=RANDOM_SEED, device=str(DEVICE),
+    use_lbfgs_refinement=True,
+    lbfgs_n_interior_points=2_000, lbfgs_n_boundary_points=300,
+    lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
+)
+NOTEBOOK_TRAINING_CONFIG
+```
+
+```{python}
+#| label: train
+raw_network = mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), activation="tanh", device=str(DEVICE))
+network = mfp.apply_hard_wall_constraint(raw_network, domain)
+
+training_start = time.perf_counter()
+trained_network, training_history = mfp.train(
+    network=network, domain=domain, fluid_config=fluid_config, field_config=field_config,
+    training_config=NOTEBOOK_TRAINING_CONFIG, verbose=True, log_every=500,
+)
+print(f"\nTotal training time: {time.perf_counter() - training_start:.1f} s")
+training_history.print_summary()
+```
+
+```{python}
+#| label: fig-training-history
+#| fig-cap: "Adam + L-BFGS loss convergence, by component."
+mfp.plot_training_history(training_history)
+```
+
+Loss convergence is a training diagnostic, not a verification result: a
+low training loss does not by itself establish physical accuracy against
+an independent reference. @sec-independent-verification is where that
+claim actually gets tested.
+
+# Independent hydrodynamic verification {#sec-independent-verification}
+
+Every metric below is computed by
+[`verification.metrics`](../magnetofluidics_pinn/verification/metrics.py)
+against data the training loop never directly optimizes against as a
+single scalar: profiles, global/pointwise error fields, the flow-rate
+curve, and a held-out residual batch drawn with its own independent seed.
+
+```{python}
+#| label: tbl-profile-invariance
+#| tbl-cap: "Predicted axial-velocity profile error and invariance across three axial stations."
+Z_STATIONS = (0.1 * domain.length, 0.5 * domain.length, 0.9 * domain.length)
+RADIAL_GRID = torch.linspace(0.0, domain.radius, 200, device=DEVICE, dtype=DTYPE)
+AXIAL_GRID = torch.linspace(0.0, domain.length, 200, device=DEVICE, dtype=DTYPE)
+
+profile_evaluation = mfp.evaluate_velocity_profiles(trained_network, domain, Z_STATIONS, RADIAL_GRID, PEAK_VELOCITY)
+profile_invariance = mfp.compute_profile_invariance(profile_evaluation)
+pd.options.display.float_format = '{:.3e}'.format
+profile_invariance
+```
+
+```{python}
+#| label: global-pointwise-error
+global_l2_error = mfp.compute_global_l2_error(trained_network, domain, RADIAL_GRID, AXIAL_GRID, PEAK_VELOCITY)
+max_pointwise_error = mfp.compute_max_pointwise_error(trained_network, domain, RADIAL_GRID, AXIAL_GRID, PEAK_VELOCITY)
+pd.Series({"Global relative L2 error": global_l2_error, "Max pointwise velocity error": max_pointwise_error})
+```
+
+```{python}
+#| label: leakage
+leakage_metrics = mfp.compute_radial_leakage(profile_evaluation, PEAK_VELOCITY)
+pd.Series(leakage_metrics)
+```
+
+```{python}
+#| label: tbl-flow-rate
+#| tbl-cap: "Predicted volumetric flow rate Q(z) versus the analytical reference."
+flow_rate_curve = mfp.compute_flow_rate_curve(trained_network, domain, AXIAL_GRID, n_quadrature_points=64)
+flow_rate_errors = mfp.compute_flow_rate_errors(flow_rate_curve, reference_flow_rate)
+pd.Series(flow_rate_errors)
+```
+
+```{python}
+#| label: pressure-gradient
+pressure_gradient_metrics = mfp.compute_pressure_gradient_error(
+    trained_network, domain, PEAK_VELOCITY, n_axial_points=100
+)
+pd.Series(pressure_gradient_metrics)
+```
+
+```{python}
+#| label: tbl-held-out-residual
+#| tbl-cap: "Stokes residual on a held-out collocation batch, independent of every training-time seed."
+held_out_residual = mfp.evaluate_held_out_residual(
+    trained_network, domain, fluid_config, random_seed=EXACT_GRID_SEED + 2, n_points=5_000,
+    residual_form=NOTEBOOK_TRAINING_CONFIG.residual_form,
+    axis_clearance_fraction=NOTEBOOK_TRAINING_CONFIG.axis_clearance_fraction,
+)
+held_out_residual
+```
+
+```{python}
+#| label: check-independent-verification
+verification_checks = verification_checks + (
+    mfp.evaluate_check(
+        "Global relative L2 error",
+        "Relative L2 error of the predicted velocity against the analytical profile",
+        global_l2_error, thresholds.global_l2_tolerance, "<=",
+    ),
+    mfp.evaluate_check(
+        "Max pointwise velocity error",
+        "Largest pointwise velocity deviation from the analytical profile",
+        max_pointwise_error, thresholds.max_pointwise_tolerance, "<=",
+    ),
+    mfp.evaluate_check(
+        "Profile invariance",
+        "Consistency of the predicted u_z(r) profile across axial stations",
+        profile_invariance["max_abs_deviation_from_mean_profile"].max(), thresholds.max_pointwise_tolerance, "<=",
+    ),
+    mfp.evaluate_check(
+        "Radial leakage",
+        "Normalized max |u_r|, relative to the centerline velocity",
+        leakage_metrics["normalized_radial_leakage"], thresholds.normalized_leakage_tolerance, "<=",
+    ),
+    mfp.evaluate_check(
+        "Flow-rate conservation",
+        "Relative error of Q(z) against the analytical reference flow rate",
+        flow_rate_errors["max_relative_flow_rate_error"], thresholds.flow_rate_relative_tolerance, "<=",
+    ),
+    mfp.evaluate_check(
+        "Pressure-gradient fit",
+        "Relative error of the fitted dp/dz against the analytical value",
+        pressure_gradient_metrics["relative_error"], thresholds.pressure_gradient_relative_tolerance, "<=",
+    ),
+    mfp.evaluate_check(
+        "Held-out PDE residual",
+        "Stokes residual RMS on a fresh, independent collocation batch",
+        held_out_residual.loc["total", "rms"], thresholds.held_out_residual_tolerance, "<=",
+    ),
+)
+mfp.render_verification_table(verification_checks[-7:])
+```
+
+# Visualization
+
+Each panel below renders a metric already computed above — nothing here
+is recomputed from scratch.
+
+```{python}
+#| label: fig-velocity-profiles
+#| fig-cap: "Predicted axial-velocity profiles at three axial stations, against the analytical profile."
+mfp.plot_velocity_profile_comparison(profile_evaluation)
+```
+
+```{python}
+#| label: fig-profile-error
+#| fig-cap: "Axial-velocity profile error against the analytical solution."
+mfp.plot_profile_error(profile_evaluation)
+```
+
+```{python}
+#| label: fig-radial-leakage
+#| fig-cap: "Predicted radial velocity (leakage) across the domain — ideally identically zero."
+mfp.plot_radial_leakage(profile_evaluation)
+```
+
+```{python}
+#| label: fig-flow-rate-deviation
+#| fig-cap: "Deviation of the predicted flow rate Q(z) from its analytical reference."
+mfp.plot_flow_rate_deviation(AXIAL_GRID, flow_rate_curve, reference_flow_rate)
+```
+
+```{python}
+#| label: fig-pressure-fit
+#| fig-cap: "Predicted axial pressure profile, its linear fit, and the analytical gradient."
+axial_positions_np, predicted_pressure_np = mfp.evaluate_axis_pressure_profile(
+    trained_network, domain, n_axial_points=100
+)
+mfp.plot_pressure_gradient_fit(
+    axial_positions_np, predicted_pressure_np,
+    pressure_gradient_metrics["predicted_pressure_gradient"], pressure_gradient_metrics["fitted_intercept"],
+    pressure_gradient_metrics["analytical_pressure_gradient"], REFERENCE_PRESSURE, domain.length,
+)
+```
+
+```{python}
+#| label: fig-residual-heatmap
+#| fig-cap: "Held-out axial-momentum residual magnitude over the (r, z) domain."
+# A separate, axis-clear radial grid is used here: `residual_form="standard"`
+# is singular at r*=0, unlike the exact-solution check in @sec-exact-residual,
+# where u_r* is bit-exact zero and the singularity never actually triggers.
+RESIDUAL_RADIAL_GRID = torch.linspace(domain.radius * 1.0e-3, domain.radius, 150, device=DEVICE, dtype=DTYPE)
+RESIDUAL_AXIAL_GRID = torch.linspace(0.0, domain.length, 150, device=DEVICE, dtype=DTYPE)
+residual_grids = mfp.evaluate_residual_grid(
+    trained_network, domain, fluid_config, RESIDUAL_RADIAL_GRID, RESIDUAL_AXIAL_GRID,
+    residual_form=NOTEBOOK_TRAINING_CONFIG.residual_form,
+)
+mfp.plot_residual_heatmap(RESIDUAL_RADIAL_GRID, RESIDUAL_AXIAL_GRID, residual_grids["momentum_z"], "momentum_z")
+```
+
+# Single-particle streamline verification {#sec-streamline}
+
+Under a uniform field, a point tracer ($a^*=0$) is advected by the flow
+alone (@sec-exact-residual's closed form for $u_z^*$), giving the exact
+streamline
+[`analytical_tracer_streamline`](../magnetofluidics_pinn/verification/analytical.py)
+computes. `nondimensionalize_mobility` is used below for the (unused, at
+$a^*=0$) magnetic-drift term only — with a uniform field the dipole force
+is exactly zero regardless of the mobility tensor's value.
+
+```{python}
+#| label: tbl-streamline
+#| tbl-cap: "Point-tracer trajectory versus the closed-form streamline (final rows)."
+initial_position_dimensionless = (0.3 * domain.radius, 0.05 * domain.length)
+initial_state = mfp.ParticleState(
+    position=torch.tensor(initial_position_dimensionless, device=DEVICE, dtype=DTYPE),
+    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE),
+    time=0.0,
+)
+field_fn = lambda coordinates: mfp.uniform_field(
+    coordinates, magnitude=field_config.magnitude, orientation=field_config.orientation
+)
+mobility = mfp.nondimensionalize_mobility(particle_config, fluid_config, scales).unsqueeze(0)
+
+trajectories = mfp.integrate_trajectory(
+    flow_network=trained_network, field_fn=field_fn, domain=domain, scales=scales,
+    particle_config=particle_config, initial_states=[initial_state], mobility_tensor=mobility,
+    time_span=(0.0, 5.0), enforce_uniform_field=True, verbose=False,
+)
+trajectory_comparison = mfp.compare_trajectory_to_analytical(
+    trajectories[0], initial_position=initial_position_dimensionless, peak_velocity=PEAK_VELOCITY,
+    radius=domain.radius, particle_radius=0.0,
+)
+trajectory_comparison.tail()
+```
+
+```{python}
+#| label: check-streamline
+verification_checks = verification_checks + (
+    mfp.evaluate_check(
+        "Streamline alignment",
+        "Point-tracer trajectory error against the analytical streamline",
+        trajectory_comparison["axial_error"].max(), thresholds.max_pointwise_tolerance * domain.length, "<=",
+    ),
+)
+verification_checks[-1]
+```
+
+## Aside: closed-form Faxén offset
+
+$\laplacian u_z^*$ is spatially constant for Hagen–Poiseuille flow (see
+@sec-exact-residual's derivation), so Faxén's first law
+[@faxen1922widerstand; @kim2005microhydrodynamics] reduces to a single,
+position-independent velocity offset rather than a function of $r^*$:
+
+$$
+U_z^\text{Faxén} = u_z^*(r_0^*) - \frac{2}{3}\frac{a^{*2}}{R^{*2}} u_\text{peak}^*, \qquad
+U_r^\text{Faxén} = 0,
+$$
+
+since $u_r^* \equiv 0$ and its Laplacian vanishes identically. This is not
+part of the core verification matrix above — no independent finite-size
+reference is being checked, only that
+[`integrate_trajectory`](../magnetofluidics_pinn/trajectory/integrator.py)'s
+own Faxén-corrected drift matches this closed form for the one flow where
+it is available analytically.
+
+```{python}
+#| label: faxen-aside
+a_star = mfp.nondimensionalize_particle(particle_config, scales)
+faxen_offset = mfp.faxen_offset_velocity(PEAK_VELOCITY, domain.radius, a_star)
+
+faxen_trajectories = mfp.integrate_trajectory(
+    flow_network=trained_network, field_fn=field_fn, domain=domain, scales=scales,
+    particle_config=particle_config, initial_states=[initial_state], mobility_tensor=mobility,
+    time_span=(0.0, 5.0), enforce_uniform_field=True, verbose=False,
+)
+faxen_comparison = mfp.compare_trajectory_to_analytical(
+    faxen_trajectories[0], initial_position=initial_position_dimensionless, peak_velocity=PEAK_VELOCITY,
+    radius=domain.radius, particle_radius=a_star,
+)
+print(f"a* = {a_star:.4e}   Faxén offset = {faxen_offset:.4e}")
+faxen_comparison.tail()
+```
+
+# Consolidated verification summary {#sec-summary}
+
+```{python}
+#| label: tbl-summary
+#| tbl-cap: "Final verification matrix — every check from every section above."
+final_table = mfp.render_verification_table(verification_checks)
+final_table
+```
+
+```{python}
+#| label: summary-verdict
+n_passed = sum(1 for check in verification_checks if check.passed)
+n_total = len(verification_checks)
+print(f"{n_passed}/{n_total} checks passed under the reduced notebook-scale training recipe.")
+if n_passed < n_total:
+    print("A failing check under the reduced recipe is expected: the full "
+          "TrainingConfig() defaults are what the package's own accuracy figures assume.")
+```
+
+## References
