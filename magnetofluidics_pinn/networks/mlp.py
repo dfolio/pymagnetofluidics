@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from torch import nn
 
+from magnetofluidics_pinn.config import (TrainingConfig, set_random_seed)
 from magnetofluidics_pinn.device_utils import resolve_device
 
 # Maps each supported activation name to its `torch.nn` layer factory,
@@ -24,8 +25,8 @@ def build_mlp(
         n_inputs: int,
         n_outputs: int,
         hidden_layers: tuple[int, ...],
+        training_config: TrainingConfig,
         activation: str = "tanh",
-        device: str | None = None,
 ) -> nn.Module:
     """Build a fully connected feed-forward network.
 
@@ -37,11 +38,7 @@ def build_mlp(
       `(64, 64, 64)`.
     - `activation`: Activation function name; one of `"tanh"`, `"silu"`,
       `"relu"`.
-    - `device`: Target device, e.g. `"cuda"`, `"cuda:0"`, or `"cpu"`.
-      Resolved automatically to `"cuda"` when available, `"cpu"` otherwise,
-      if left as `None`. # CHANGED: any device string accepted by
-      `torch.device` now works (previously only exactly "cuda"/"cpu"),
-      resolved through the shared `device_utils.resolve_device`.
+    - `training_config`: Training hyperparameters.
 
     Returns:
     - A `torch.nn.Module` instance placed on the resolved device.
@@ -60,7 +57,8 @@ def build_mlp(
     if activation not in _ACTIVATION_LAYERS:
         raise ValueError(f"Unsupported activation: {activation!r}.")
     
-    resolved_device = resolve_device(device)
+    resolved_device = resolve_device(training_config.device)
+    set_random_seed(training_config.random_seed)
     activation_cls = _ACTIVATION_LAYERS[activation]
     
     layers: list[nn.Module] = []
@@ -73,7 +71,7 @@ def build_mlp(
     network = nn.Sequential(*layers)
     
     # Xavier/Glorot initialization is the standard choice for PINNs with
-    # saturating activations such as tanh (Raissi et al., 2019); it also
+    # saturating activations such as tanh [@raissi2019physics]; it also
     # gives ReLU/SiLU networks a reasonable starting point.
     for module in network:
         if isinstance(module, nn.Linear):

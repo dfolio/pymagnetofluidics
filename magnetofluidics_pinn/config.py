@@ -483,3 +483,25 @@ class TrainingConfig:
             )
         # Dataclass is frozen; mutate through object.__setattr__
         object.__setattr__(self, "device", resolved_device)
+
+
+def set_random_seed(seeds: int | None = None) -> None:
+    """Set seeds for reproducibility.
+
+    Args:
+    - `seeds`: If `None`, do not set any seeds. If an integer, set the
+      Python, NumPy, and PyTorch random seeds to this value.
+    """
+    if seeds is not None:
+        import random
+        import numpy as np
+        import torch
+
+        random.seed(seeds)
+        np.random.seed(seeds)
+        torch.manual_seed(seeds)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seeds)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    

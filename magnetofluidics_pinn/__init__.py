@@ -28,7 +28,8 @@ from magnetofluidics_pinn.boundary_conditions import (
 )
 from magnetofluidics_pinn.config import (DomainConfig as DomainConfig, FluidConfig as FluidConfig,
                                          MagneticFieldConfig as MagneticFieldConfig, ParticleConfig as ParticleConfig,
-                                         TrainingConfig as TrainingConfig)
+                                         TrainingConfig as TrainingConfig,
+                                         set_random_seed as set_random_seed)
 from magnetofluidics_pinn.device_utils import (
     resolve_device as resolve_device,
     resolve_module_device as resolve_module_device,
@@ -131,6 +132,7 @@ __all__ = [
     "MagneticFieldConfig",
     "ParticleConfig",
     "TrainingConfig",
+    "set_random_seed",
     # Data types
     "Domain",
     "CollocationPoints",
