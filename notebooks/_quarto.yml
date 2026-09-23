@@ -1,0 +1,64 @@
+lang: en-US
+author:
+  - id: dfolio
+    name: David Folio
+    orcid: 0000-0001-9430-6091
+    email: david.folio@insa-cvl.fr
+    url: https://dfolio.fr
+
+bibliography: ../docs/references.bib
+
+keep-ipynb: true
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    fig-cap-location: bottom
+    number-sections: true
+    html-math-method:
+      method: mathjax
+      url: "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"
+#    include-in-header:
+#      text: |
+#        <script>
+#        window.MathJax = {
+#          tex: {
+#            macros: {
+#              pdv: ["\\frac{\\partial #1}{\\partial #2}", 2],
+#              pdvn: ["\\frac{\\partial^{#1} #2}{\\partial #3^{#1}}", 3],
+#              dv: ["\\frac{d #1}{d #2}", 2],
+#              vb: ["\\mathbf{#1}", 1],
+#              abs: ["\\left| #1 \\right|", 1],
+#              norm: ["\\left\\| #1 \\right\\|", 1],
+#              div: ["\\nabla \\cdot"],
+#              laplacian: ["\\nabla^2"],
+#              # oint: ["\\oint"],
+#              qty: ["#1\\ \\mathrm{#2}", 2]
+#            }
+#          }
+#        };
+#        </script>
+#        <script type="text/javascript" id="MathJax-script" async
+#          src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js">
+#        </script>
+  pdf:
+    pdf-engine: xelatex
+    toc: false
+    # toc-depth: 3
+    code-fold: show
+    code-tools: true
+    embed-resources: true
+    fig-cap-location: bottom
+    number-sections: true
+    include-in-header:
+      text: |
+        \usepackage{physics}
+        \usepackage{siunitx}
+execute:
+  freeze: auto
+  warning: false
+
+jupyter: python3
