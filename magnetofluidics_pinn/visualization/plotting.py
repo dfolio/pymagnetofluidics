@@ -8,7 +8,7 @@ caller.
 from __future__ import annotations
 
 import matplotlib.figure
-import matplotlib.pyplot as plt
+# REMOVED: import matplotlib.pyplot as plt  <-- Avoid global state machine side effects
 import numpy as np
 import torch
 from torch import nn
@@ -60,7 +60,9 @@ def plot_streamlines(
     velocity_r = prediction[:, 0].reshape(resolution, resolution).cpu().numpy()
     velocity_z = prediction[:, 1].reshape(resolution, resolution).cpu().numpy()
     
-    figure, axes = plt.subplots(figsize=(8.0, 4.0))
+    # CHANGED: Use pure OO API instead of plt.subplots() to prevent global side-effects
+    figure = matplotlib.figure.Figure(figsize=(8.0, 4.0))
+    axes = figure.subplots()
     axes.streamplot(
         axial_axis.cpu().numpy(),
         radial_axis.cpu().numpy(),
@@ -106,8 +108,10 @@ def plot_trajectories(
         raise NotImplementedError(
             f"Trajectory plotting currently only supports domain.kind == 'channel'; got {domain.kind!r}."
         )
-    
-    figure, axes = plt.subplots(figsize=(8.0, 4.0))
+        
+    # CHANGED: Use pure OO API
+    figure = matplotlib.figure.Figure(figsize=(8.0, 4.0))
+    axes = figure.subplots()
     for trajectory in trajectories:
         radial_positions = np.array([state.position[0].item() for state in trajectory])
         axial_positions = np.array([state.position[1].item() for state in trajectory])
@@ -180,7 +184,16 @@ def plot_training_history(
     n_panels = len(loss_metrics) + 1
     n_cols = 3
     n_rows = np.ceil(n_panels / n_cols).astype(int)
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.0 * n_cols, 3.6 * n_rows))
+    
+    n_panels = len(loss_metrics) + 1
+    n_cols = 3
+    n_rows = np.ceil(n_panels / n_cols).astype(int)
+    
+    # CHANGED: Replaced plt.subplots with pure OO Figure initialization to avoid global state
+    fig = matplotlib.figure.Figure(figsize=(5.0 * n_cols, 3.6 * n_rows))
+    axes = fig.subplots(n_rows, n_cols)
+    
+    # axes is a NumPy array here, so flatten() behaves exactly as before
     axes_flat = axes.flatten()
     
     def render_loss_axis(ax, title, series, color, linestyle) -> None:
@@ -247,7 +260,8 @@ def plot_velocity_profile_comparison(profile_evaluation: ProfileEvaluation) -> m
         raise ValueError("profile_evaluation must contain at least one z station.")
     
     radial_grid = profile_evaluation.radial_grid.cpu().numpy()
-    figure, axes = plt.subplots(figsize=(6.0, 4.0))
+    figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
+    axes = figure.subplots()
     for station_index, z_station in enumerate(profile_evaluation.z_stations):
         axes.plot(
             radial_grid, profile_evaluation.predicted_uz[station_index].cpu().numpy(),
@@ -285,7 +299,8 @@ def plot_profile_error(profile_evaluation: ProfileEvaluation) -> matplotlib.figu
     
     radial_grid = profile_evaluation.radial_grid.cpu().numpy()
     error = (profile_evaluation.predicted_uz - profile_evaluation.analytical_uz.unsqueeze(0)).cpu().numpy()
-    figure, axes = plt.subplots(figsize=(6.0, 4.0))
+    figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
+    axes = figure.subplots()
     for station_index, z_station in enumerate(profile_evaluation.z_stations):
         axes.plot(radial_grid, error[station_index], linewidth=1.0, label=f"z={z_station:.2e}")
     axes.axhline(0.0, color="black", linewidth=0.75)
@@ -317,7 +332,8 @@ def plot_radial_leakage(profile_evaluation: ProfileEvaluation) -> matplotlib.fig
         raise ValueError("profile_evaluation must contain at least one z station.")
     
     radial_grid = profile_evaluation.radial_grid.cpu().numpy()
-    figure, axes = plt.subplots(figsize=(6.0, 4.0))
+    figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
+    axes = figure.subplots()
     for station_index, z_station in enumerate(profile_evaluation.z_stations):
         axes.plot(
             radial_grid, profile_evaluation.predicted_ur[station_index].cpu().numpy(),
@@ -365,7 +381,8 @@ def plot_flow_rate_deviation(
     
     z_values = axial_positions.detach().cpu().numpy()
     deviation = (flow_rate_curve.detach() - reference_flow_rate).cpu().numpy()
-    figure, axes = plt.subplots(figsize=(6.0, 4.0))
+    figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
+    axes = figure.subplots()
     axes.plot(z_values, deviation, marker="o", markersize=3.0, linewidth=1.0, color="tab:red")
     axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
     axes.set_xlabel("Axial position z")
@@ -416,7 +433,8 @@ def plot_pressure_gradient_fit(
             f"{axial_positions.shape} and {predicted_pressure.shape}."
         )
     analytical_pressure = reference_pressure_at_outlet + analytical_slope * (axial_positions - domain_length)
-    figure, axes = plt.subplots(figsize=(6.0, 4.0))
+    figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
+    axes = figure.subplots()
     axes.scatter(axial_positions, predicted_pressure, s=10.0, color="tab:blue", label="Predicted p(r=0, z)")
     axes.plot(
         axial_positions, fitted_slope * axial_positions + fitted_intercept,
@@ -460,7 +478,8 @@ def plot_residual_heatmap(
             f"residual_magnitude must have shape ({radial_grid.shape[0]}, {axial_grid.shape[0]}); "
             f"got {tuple(residual_magnitude.shape)}."
         )
-    figure, axes = plt.subplots(figsize=(7.0, 3.5))
+    figure = matplotlib.figure.Figure(figsize=(7.0, 3.5))
+    axes = figure.subplots()
     mesh = axes.pcolormesh(
         axial_grid.cpu().numpy(), radial_grid.cpu().numpy(), residual_magnitude.detach().cpu().numpy(),
         shading="auto", cmap="magma",
