@@ -1,3 +1,9 @@
+### Project specific exclusions
+notebooks/*html
+notebooks/*pdf
+notebooks/*.md
+notebooks/*.ipynb_checkpoints
+notebooks/*.quarto_ipynb
 ### VisualStudioCode template
 .vscode/*
 !.vscode/settings.json
