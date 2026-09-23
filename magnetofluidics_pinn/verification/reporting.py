@@ -213,10 +213,13 @@ class VerificationThresholds:
     structural_tolerance: float
     global_l2_tolerance: float
     max_pointwise_tolerance: float
+    max_velocity_invariant_tolerance: float
     normalized_leakage_tolerance: float
     flow_rate_relative_tolerance: float
     pressure_gradient_relative_tolerance: float
     held_out_residual_tolerance: float
+    conservation_of_mass_tolerance: float
+    noslip_tolerance: float
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -233,10 +236,13 @@ def default_thresholds(
     structural_epsilon_factor: float = 50.0,
     global_l2_tolerance: float = 0.05,
     max_pointwise_velocity_fraction: float = 0.10,
+    max_velocity_invariant_tolerance: float = 0.10,
     normalized_leakage_fraction: float = 0.02,
     flow_rate_relative_tolerance: float = 0.03,
     pressure_gradient_relative_tolerance: float = 0.05,
     held_out_residual_tolerance: float = 1.0e-2,
+    conservation_of_mass_tolerance: float = 5.0e-2,
+    noslip_tolerance: float = 0.15,
 ) -> VerificationThresholds:
     r"""Build a `VerificationThresholds` instance from reference scales and calibratable factors.
 
@@ -266,6 +272,10 @@ def default_thresholds(
       Relative-error bounds on $Q(z)$ and the fitted pressure gradient.
     - `held_out_residual_tolerance`: Absolute bound on the held-out residual
       RMS, in the package's own dimensionless residual units.
+    - `conservation_of_mass_tolerance`: Absolute bound on the conservation of
+      mass residual, in the package's own dimensionless residual units.
+    - `noslip_tolerance`: Absolute bound on the no-slip residual, in the
+      package's own dimensionless residual units.
 
     Returns:
     - A populated
@@ -286,8 +296,11 @@ def default_thresholds(
         structural_tolerance=structural_epsilon_factor * machine_epsilon,
         global_l2_tolerance=global_l2_tolerance,
         max_pointwise_tolerance=max_pointwise_velocity_fraction * peak_velocity,
+        max_velocity_invariant_tolerance=max_velocity_invariant_tolerance * peak_velocity,
         normalized_leakage_tolerance=normalized_leakage_fraction,
         flow_rate_relative_tolerance=flow_rate_relative_tolerance,
         pressure_gradient_relative_tolerance=pressure_gradient_relative_tolerance,
         held_out_residual_tolerance=held_out_residual_tolerance,
+        conservation_of_mass_tolerance=conservation_of_mass_tolerance,
+        noslip_tolerance=noslip_tolerance
     )

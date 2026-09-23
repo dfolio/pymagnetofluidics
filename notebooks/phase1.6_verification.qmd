@@ -1,64 +1,9 @@
 ---
-title: "Phase 1 Verification and Residual-Formulation Comparison"
+title: "Phase 1 --- Verification and Residual-Formulation Comparison"
 subtitle: "Standard vs. r-weighted residual forms, checked against the Hagen–Poiseuille analytical solution (`magnetofluidics_pinn` v0.1.6+)"
 date: today
-author:
-  - id: dfolio
-    name: David Folio
-    orcid: 0000-0001-9430-6091
-    email: david.folio@insa-cvl.fr
-    url: https://dfolio.fr
-bibliography: ../docs/references.bib
-format:
-  html:
-    toc: true
-    toc-depth: 3
-    code-fold: show
-    code-tools: true
-    embed-resources: true
-    fig-cap-location: bottom
-    number-sections: true
-    include-in-header:
-      text: |
-        <script>
-        window.MathJax = {
-          tex: {
-            macros: {
-              pdv: ["\\frac{\\partial #1}{\\partial #2}", 2],
-              pdvn: ["\\frac{\\partial^{#1} #2}{\\partial #3^{#1}}", 3],
-              dv: ["\\frac{d #1}{d #2}", 2],
-              vb: ["\\mathbf{#1}", 1],
-              abs: ["\\left| #1 \\right|", 1],
-              norm: ["\\left\\| #1 \\right\\|", 1],
-              div: ["\\nabla \\cdot"],
-              laplacian: ["\\nabla^2"],
-              qty: ["#1\\ \\mathrm{#2}", 2]
-            }
-          }
-        };
-        </script>
-        <script type="text/javascript" id="MathJax-script" async
-          src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js">
-        </script>
-  pdf:
-    pdf-engine: xelatex
-    toc: false
-    # toc-depth: 3
-    code-fold: show
-    code-tools: true
-    embed-resources: true
-    fig-cap-location: bottom
-    number-sections: true    
-    include-in-header:
-      text: |
-        \usepackage{physics}
-        \usepackage{siunitx}
-execute:
-  freeze: auto
-  warning: false
-jupyter: python3
 ---
-
+$\require{physics}$
 <!--
 ::: {.callout-note title="Notation"}
 Equations below are typeset with a small set of MathJax macros standing in
@@ -133,7 +78,7 @@ import magnetofluidics_pinn as mfp
 
 pending_checks = (
     mfp.pending_check(
-        "Exact interior residual",
+        "Exact interior residual (standard / r-weighted)",
         "Stokes residual of the closed-form solution on an independent grid", "<=",
     ),
     mfp.pending_check(
@@ -183,6 +128,7 @@ nothing here is graded twice and nothing is silently skipped.
 #| label: setup
 import time
 
+import random
 import numpy as np
 import pandas as pd
 import torch
@@ -192,6 +138,8 @@ plt.show()
 RANDOM_SEED = 42
 DEVICE = mfp.resolve_device(None)
 DTYPE = torch.float32
+
+mfp.set_random_seed(RANDOM_SEED)
 
 # Every pandas Series/DataFrame printed below renders its floats in
 # normalized scientific notation, set once here rather than repeated at
@@ -243,9 +191,14 @@ length = 4.0 * radius       # 3 mm
 dynamic_viscosity = 1e-3    # 1 mPa·s
 density = 1.0e3             # 1000 kg/m^3
 
-n_epochs = 200
+n_interior_points: int = 5_000  #  Number of interior collocation points per Adam epoch
+n_boundary_points: int = 1_000   # Number of boundary collocation points per Adam epoch.
+n_epochs = 250
+lbfgs_n_interior_points: int = 2_000
+lbfgs_n_boundary_points: int = 500
 lbfgs_rounds = 5
 lbfgs_iterations_per_round = 400
+log_every = int(n_epochs / 5)
 
 domain_config = mfp.DomainConfig(kind="channel", length=length, radius=radius)
 fluid_config = mfp.FluidConfig(
@@ -302,38 +255,6 @@ inlet to outlet for the flow to be driven forward at all. Both quantities
 recur throughout the rest of this notebook as the fixed targets every
 trained-network metric in @sec-independent-verification is measured
 against.
-
-## Calibratable verification thresholds
-
-Every tolerance the checks below compare against is collected into one
-[`VerificationThresholds`](../magnetofluidics_pinn/verification/reporting.py)
-instance, built by
-[`default_thresholds`](../magnetofluidics_pinn/verification/reporting.py)
-from the scales just computed. Two different kinds of bound are at play.
-@sec-exact-residual and @sec-structural test closed-form and architectural
-claims that should hold to floating-point precision, so their tolerances
-are set as small multiples of machine epsilon. @sec-independent-verification
-tests physical accuracy after training, so its tolerances are fractions of
-a reference quantity instead — the centerline velocity, the reference flow
-rate, or the analytical pressure gradient.
-
-```{python}
-#| label: thresholds
-thresholds = mfp.default_thresholds(dtype=DTYPE, peak_velocity=PEAK_VELOCITY)
-pd.Series(thresholds.__dict__)
-```
-
-The two floating-point budgets, `exact_residual_tolerance`
-($\approx$ `{python} f"{thresholds.exact_residual_tolerance:.3e}"`) and
-`structural_tolerance`
-($\approx$ `{python} f"{thresholds.structural_tolerance:.3e}"`), sit within
-a couple of orders of magnitude of `float32` machine epsilon
-($\epsilon_{f32}\approx1.19\times10^{-7}$) — tight, but appropriate for
-checks that are really about arithmetic exactness rather than physical
-fidelity. Every other threshold is a genuine physical-accuracy budget, a
-few percent of a reference quantity, deliberately loose enough to
-accommodate the reduced training recipe in @sec-training without becoming
-meaningless.
 
 # Exact differential-operator verification {#sec-exact-residual}
 
@@ -476,7 +397,9 @@ network stands in for both formulations here.
 #| label: tbl-structural
 #| tbl-cap: "Structural axis/wall regularity, probed on an untrained net_std."
 untrained_net_std = mfp.apply_hard_wall_constraint(
-    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), activation="tanh", device=str(DEVICE)),
+    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), 
+    training_config=mfp.TrainingConfig(random_seed=RANDOM_SEED, device=str(DEVICE)),
+    activation="tanh"),
     domain,
 )
 structural_metrics = mfp.evaluate_structural_constraints(
@@ -534,19 +457,22 @@ measured below should be read with that in mind.
 ```{python}
 #| label: training-config
 training_config_standard = mfp.TrainingConfig(
-    n_interior_points=4_000, n_boundary_points=900,
+    n_interior_points=n_interior_points, n_boundary_points=n_boundary_points,
     n_epochs=n_epochs, random_seed=RANDOM_SEED, device=str(DEVICE),
     use_lbfgs_refinement=True,
-    lbfgs_n_interior_points=2_000, lbfgs_n_boundary_points=300,
-    lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
+    lbfgs_n_interior_points=lbfgs_n_interior_points,
+    lbfgs_n_boundary_points=lbfgs_n_boundary_points,
+    lbfgs_rounds=lbfgs_rounds,
+    lbfgs_iterations_per_round=lbfgs_iterations_per_round,
     residual_form="standard",
 )
 training_config_standard
 training_config_r_weighted = mfp.TrainingConfig(
-    n_interior_points=4_000, n_boundary_points=900,
+    n_interior_points=n_interior_points, n_boundary_points=n_boundary_points,
     n_epochs=n_epochs, random_seed=RANDOM_SEED + 1, device=str(DEVICE),
     use_lbfgs_refinement=True,
-    lbfgs_n_interior_points=2_000, lbfgs_n_boundary_points=300,
+    lbfgs_n_interior_points=lbfgs_n_interior_points,
+    lbfgs_n_boundary_points=lbfgs_n_boundary_points,
     lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
     residual_form="r_weighted", axis_clearance_fraction=0.0,
 )
@@ -556,19 +482,23 @@ training_config_r_weighted
 ```{python}
 #| label: train
 network_standard = mfp.apply_hard_wall_constraint(
-    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), activation="tanh", device=str(DEVICE)),
+    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32),
+    training_config = training_config_standard, 
+    activation="tanh",),
     domain,
 )
 network_r_weighted = mfp.apply_hard_wall_constraint(
-    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), activation="tanh", device=str(DEVICE)),
+    mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), 
+    training_config = training_config_r_weighted, 
+    activation="tanh",),
     domain,
 )
 
 training_start = time.perf_counter()
 trained_network_standard, training_history_standard = mfp.train(
     network=network_standard, domain=domain, fluid_config=fluid_config, field_config=field_config,
-    training_config=training_config_standard, verbose=True, 
-    log_every=int(n_epochs/10),
+    training_config=training_config_standard, 
+    verbose=True, log_every=log_every,
 )
 print(f"\nStandard formulation trained in {time.perf_counter() - training_start:.1f} s")
 training_history_standard.print_summary()
@@ -576,8 +506,8 @@ training_history_standard.print_summary()
 training_start = time.perf_counter()
 trained_network_r_weighted, training_history_r_weighted = mfp.train(
     network=network_r_weighted, domain=domain, fluid_config=fluid_config, field_config=field_config,
-    training_config=training_config_r_weighted, verbose=True,
-    log_every=int(n_epochs/10),
+    training_config=training_config_r_weighted,
+    verbose=True, log_every=log_every,
 )
 print(f"r-weighted formulation trained in {time.perf_counter() - training_start:.1f} s")
 training_history_r_weighted.print_summary()
@@ -811,7 +741,7 @@ verification_checks = verification_checks + (
     mfp.evaluate_check(
         "Profile invariance",
         "Consistency of the predicted u_z(r) profile across axial stations",
-        profile_invariance["max_abs_deviation_from_mean_profile"].max(), thresholds.max_pointwise_tolerance, "<=",
+        profile_invariance["max_abs_deviation_from_mean_profile"].max(), thresholds.max_velocity_invariant_tolerance, "<=",
     ),
     mfp.evaluate_check(
         "Radial leakage",
@@ -1091,7 +1021,7 @@ local pointwise error.
 
 ```{python}
 #| label: check-streamline
-# `max_pointwise_tolerance` is a velocity-error budget; multiplying it by
+# `max_velocity_invariant_tolerance` is a velocity-error budget; multiplying it by
 # `domain.length` gives an order-of-magnitude position-error proxy (a
 # constant velocity bias integrated over the full channel length), not a
 # rigorously re-derived bound in its own right.
@@ -1099,7 +1029,7 @@ verification_checks = verification_checks + (
     mfp.evaluate_check(
         "Streamline alignment",
         "Point-tracer trajectory error against the analytical streamline",
-        axial_error_last, thresholds.max_pointwise_tolerance * domain.length, "<=",
+        axial_error_last, thresholds.max_velocity_invariant_tolerance * domain.length, "<=",
     ),
 )
 mfp.render_verification_table((verification_checks[-1],))
@@ -1520,4 +1450,4 @@ if n_passed < n_total:
           "TrainingConfig() defaults are what the package's own accuracy figures assume.")
 ```
 
-## References
+# References
