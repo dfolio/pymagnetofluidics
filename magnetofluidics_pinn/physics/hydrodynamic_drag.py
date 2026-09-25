@@ -52,7 +52,8 @@ from magnetofluidics_pinn.physics.fluid_residuals import (
     axisymmetric_vector_laplacian,
     compute_flow_derivatives,
 )
-from magnetofluidics_pinn.types import SphericalObstacle
+from magnetofluidics_pinn.config import ParticleConfig
+from magnetofluidics_pinn.types import ParticleState
 
 
 # CHANGED: Refactored to leverage compute_flow_derivatives and axisymmetric_vector_laplacian.
@@ -121,7 +122,8 @@ def faxen_corrected_velocity(
 # CHANGED: Refactored with compute_flow_derivatives(compute_second_order=False) and GPU-safe quadrature.
 def surface_traction_force(
     flow_network: Callable[[torch.Tensor], torch.Tensor],
-    obstacle: SphericalObstacle,
+    particle_config: ParticleConfig,
+    particle_state: ParticleState,
     n_quadrature_points: int = 181,
 ) -> torch.Tensor:
     r"""Axial hydrodynamic force the flow exerts on an embedded spherical obstacle.
@@ -177,18 +179,18 @@ def surface_traction_force(
     Args:
     - `flow_network`: A trained (or in-training) network mapping `(r, z)`
       coordinates to `(u_r, u_z, p)` — the *actual*, two-way-coupled flow
-      field around `obstacle`, not the undisturbed ambient field. If the
+      field around `particle_state`, not the undisturbed ambient field. If the
       field is unsteady, evaluate at a fixed time slice first (e.g.
       `lambda rz: network(torch.cat([rz, t_slice], dim=1))`) and pass that
       wrapper here.
-    - `obstacle`: The sphere the traction is integrated over.
+    - `particle_state`: The state of the particle for which to compute drag.
     - `n_quadrature_points`: Number of polar-angle quadrature nodes; the
       two poles ($\theta = 0, \pi$) contribute zero regardless of
       resolution, since $r = 0$ there.
 
     Returns:
     - Scalar tensor: the axial drag force $F_z$ (dimensionless), on the
-      same device as `obstacle`'s coordinates are constructed on (CPU by
+      same device as `particle_state`'s coordinates are constructed on (CPU by
       default; move the result yourself if `flow_network` lives on
       `"cuda"` and a CPU scalar is inconvenient).
 
@@ -209,8 +211,8 @@ def surface_traction_force(
             device = first_param.device
     
     theta = torch.linspace(0.0, torch.pi, n_quadrature_points, device=device)
-    radial_coordinate = obstacle.radius * torch.sin(theta)
-    axial_coordinate = obstacle.axial_position + obstacle.radius * torch.cos(theta)
+    radial_coordinate = particle_config.radius * torch.sin(theta)
+    axial_coordinate = particle_state.axial_position + particle_config.radius * torch.cos(theta)
     coordinates = torch.stack([radial_coordinate, axial_coordinate], dim=1).requires_grad_(True)
     
     # CHANGED: Reused compute_flow_derivatives with compute_second_order=False.
@@ -227,5 +229,5 @@ def surface_traction_force(
     traction_z = (sigma_zz * normal_z + sigma_zr * normal_r).squeeze(1)
     
     # Integrand over theta: dA = 2 * pi * r * a * dtheta
-    integrand = traction_z.detach() * 2.0 * torch.pi * radial_coordinate.detach() * obstacle.radius
+    integrand = traction_z.detach() * 2.0 * torch.pi * radial_coordinate.detach() * particle_config.radius
     return torch.trapezoid(integrand, theta)

@@ -26,8 +26,14 @@ from magnetofluidics_pinn.boundary_conditions import (
     rigid_body_velocity_condition as rigid_body_velocity_condition,
     uniform_field as uniform_field,
 )
-from magnetofluidics_pinn.config import (DomainConfig as DomainConfig, FluidConfig as FluidConfig,
-                                         MagneticFieldConfig as MagneticFieldConfig, ParticleConfig as ParticleConfig,
+# CHANGED: added ObstacleConfig and DEFAULT_BOUNDARY_LOSS_WEIGHT — both new
+# in config.py, the former replacing the standalone train_around_obstacle()
+# entry point, the latter promoted out of training.trainer as its default.
+from magnetofluidics_pinn.config import (DEFAULT_BOUNDARY_LOSS_WEIGHT as DEFAULT_BOUNDARY_LOSS_WEIGHT,
+                                         DomainConfig as DomainConfig, FluidConfig as FluidConfig,
+                                         MagneticFieldConfig as MagneticFieldConfig,
+                                         TwoWayCouplingConfig as TwoWayCouplingConfig,
+                                         ParticleConfig as ParticleConfig,
                                          TrainingConfig as TrainingConfig,
                                          set_random_seed as set_random_seed)
 from magnetofluidics_pinn.device_utils import (
@@ -53,7 +59,7 @@ from magnetofluidics_pinn.physics import (axisymmetric_vector_laplacian as axisy
                                           surface_traction_force as surface_traction_force)
 from magnetofluidics_pinn.sampling import (
     sample_collocation_points as sample_collocation_points,
-    sample_collocation_points_with_obstacle as sample_collocation_points_with_obstacle,
+    sample_collocation_points_with_particle as sample_collocation_points_with_particle,
 )
 # Normalization utilities, required to keep solvers dimensionless while
 # accepting/reporting physical (SI) quantities at the package boundary.
@@ -63,11 +69,7 @@ from magnetofluidics_pinn.scaling import (compute_scales as compute_scales,
                                           nondimensionalize_particle as nondimensionalize_particle,
                                           redimensionalize_domain as redimensionalize_domain, Scales as Scales)
 from magnetofluidics_pinn.training import (compose_loss as compose_loss, LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES,
-                                           LossHistory as LossHistory,
-                                           OBSTACLE_LOSS_COMPONENT_NAMES as OBSTACLE_LOSS_COMPONENT_NAMES,
-                                           ObstacleLossHistory as ObstacleLossHistory,
-                                           ObstacleTrainingHistory as ObstacleTrainingHistory, train as train,
-                                           train_around_obstacle as train_around_obstacle,
+                                           LossHistory as LossHistory, train as train,
                                            TrainingHistory as TrainingHistory)
 from magnetofluidics_pinn.trajectory import (
     integrate_trajectory as integrate_trajectory,
@@ -79,9 +81,8 @@ from magnetofluidics_pinn.types import (
     Domain as Domain,
     MagneticFieldSample as MagneticFieldSample,
     ParticleState as ParticleState,
-    SphericalObstacle as SphericalObstacle,
 )
-# NEW: quantitative verification utilities (closed-form Hagen-Poiseuille
+# Quantitative verification utilities (closed-form Hagen-Poiseuille
 # reference, independent evaluators, and pass/fail checklist scaffolding).
 # Imported before `visualization` since `visualization.plotting` consumes
 # `verification.metrics.ProfileEvaluation` - see that module's docstring.
@@ -118,9 +119,9 @@ from magnetofluidics_pinn.visualization import (plot_flow_rate_deviation as plot
                                                 plot_streamlines as plot_streamlines,
                                                 plot_training_history as plot_training_history,
                                                 plot_trajectories as plot_trajectories,
-                                                plot_velocity_profile_comparison as plot_velocity_profile_comparison)  # NEW; NEW; NEW; NEW; NEW; NEW
+                                                plot_velocity_profile_comparison as plot_velocity_profile_comparison)
 
-__version__ = "0.1.6"  # CHANGED: was "0.1.5" - bumped for the new `verification` subpackage.
+__version__ = "0.1.7"  # CHANGED: was "0.1.6" - bumped for the train()/train_around_obstacle() merge and the new ObstacleConfig.
 
 __all__ = [
     "__version__",
@@ -131,6 +132,7 @@ __all__ = [
     "FluidConfig",
     "MagneticFieldConfig",
     "ParticleConfig",
+    "TwoWayCouplingConfig",
     "TrainingConfig",
     "set_random_seed",
     # Data types
@@ -138,7 +140,6 @@ __all__ = [
     "CollocationPoints",
     "MagneticFieldSample",
     "ParticleState",
-    "SphericalObstacle",
     # Geometry
     "build_channel_domain",
     "build_bifurcation_domain",
@@ -162,7 +163,7 @@ __all__ = [
     "surface_traction_force",
     # Sampling
     "sample_collocation_points",
-    "sample_collocation_points_with_obstacle",
+    "sample_collocation_points_with_particle",
     # Networks
     "build_mlp",
     "apply_hard_wall_constraint",
@@ -172,10 +173,6 @@ __all__ = [
     "LossHistory",
     "TrainingHistory",
     "LOSS_COMPONENT_NAMES",
-    "train_around_obstacle",
-    "ObstacleLossHistory",
-    "ObstacleTrainingHistory",
-    "OBSTACLE_LOSS_COMPONENT_NAMES",
     # Trajectory
     "integrate_trajectory",
     "solve_force_balanced_velocity",

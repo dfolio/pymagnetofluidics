@@ -200,26 +200,25 @@ lbfgs_rounds = 5
 lbfgs_iterations_per_round = 400
 log_every = int(n_epochs / 5)
 
-domain_config = mfp.DomainConfig(kind="channel", length=length, radius=radius)
-fluid_config = mfp.FluidConfig(
-    regime="stokes", dynamic_viscosity=dynamic_viscosity, density=density,
-    reference_velocity=reference_velocity, reference_length=domain_config.radius,
-)
-field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, orientation=(1.0, 0.0))
-particle_config = mfp.ParticleConfig(radius=10.0e-6, magnetic_moment=(1.0e-11, 0.0))
-
-physical_domain = mfp.build_channel_domain(domain_config)
-scales = mfp.compute_scales(fluid_config, field_config)
-domain = mfp.nondimensionalize_domain(physical_domain, scales)
-
 # The dimensionless inlet centerline velocity: `FluidConfig.reference_velocity`
 # is, by construction of `compute_scales`, the physical velocity that maps to
 # exactly 1.0, matching `training.trainer`'s own gauge choice.
 PEAK_VELOCITY = 1.0
 REFERENCE_PRESSURE = 0.0
 
-reference_flow_rate = mfp.poiseuille_reference_flow_rate(domain.radius, PEAK_VELOCITY)
-reference_pressure_gradient = mfp.analytical_pressure_gradient(domain.radius, PEAK_VELOCITY)
+fluid_config = mfp.FluidConfig(
+    regime="stokes", dynamic_viscosity=dynamic_viscosity, density=density,
+)
+domain_config = mfp.DomainConfig(kind="channel", length=length, 
+                                 radius=radius, u_max=reference_velocity,
+                                 fluid=fluid_config)
+field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, orientation=(1.0, 0.0))
+particle_config = mfp.ParticleConfig(radius=10.0e-6, magnetic_moment=(1.0e-11, 0.0))
+
+physical_domain = mfp.build_channel_domain(domain_config)
+scales = mfp.compute_scales(domain_config, field_config)
+domain = mfp.nondimensionalize_domain(physical_domain, scales)
+
 thresholds = mfp.default_thresholds(dtype=DTYPE, peak_velocity=PEAK_VELOCITY)
 
 pd.Series({"domain.radius": domain.radius, "domain.length": domain.length,
@@ -396,10 +395,13 @@ network stands in for both formulations here.
 ```{python}
 #| label: tbl-structural
 #| tbl-cap: "Structural axis/wall regularity, probed on an untrained net_std."
+base_training_config=mfp.TrainingConfig(random_seed=RANDOM_SEED, 
+                                        device=str(DEVICE),
+                                        verbose=True,log_every=log_every)
 untrained_net_std = mfp.apply_hard_wall_constraint(
     mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), 
-    training_config=mfp.TrainingConfig(random_seed=RANDOM_SEED, device=str(DEVICE)),
-    activation="tanh"),
+                  training_config=base_training_config,
+                  activation="tanh"),
     domain,
 )
 structural_metrics = mfp.evaluate_structural_constraints(
@@ -465,6 +467,7 @@ training_config_standard = mfp.TrainingConfig(
     lbfgs_rounds=lbfgs_rounds,
     lbfgs_iterations_per_round=lbfgs_iterations_per_round,
     residual_form="standard",
+    verbose=True, log_every=log_every
 )
 training_config_standard
 training_config_r_weighted = mfp.TrainingConfig(
@@ -475,6 +478,7 @@ training_config_r_weighted = mfp.TrainingConfig(
     lbfgs_n_boundary_points=lbfgs_n_boundary_points,
     lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
     residual_form="r_weighted", axis_clearance_fraction=0.0,
+    verbose=True, log_every=log_every
 )
 training_config_r_weighted
 ```
@@ -483,14 +487,14 @@ training_config_r_weighted
 #| label: train
 network_standard = mfp.apply_hard_wall_constraint(
     mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32),
-    training_config = training_config_standard, 
-    activation="tanh",),
+                  training_config = training_config_standard, 
+                  activation="tanh",),
     domain,
 )
 network_r_weighted = mfp.apply_hard_wall_constraint(
     mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32), 
-    training_config = training_config_r_weighted, 
-    activation="tanh",),
+                  training_config = training_config_r_weighted, 
+                  activation="tanh",),
     domain,
 )
 
@@ -498,7 +502,6 @@ training_start = time.perf_counter()
 trained_network_standard, training_history_standard = mfp.train(
     network=network_standard, domain=domain, fluid_config=fluid_config, field_config=field_config,
     training_config=training_config_standard, 
-    verbose=True, log_every=log_every,
 )
 print(f"\nStandard formulation trained in {time.perf_counter() - training_start:.1f} s")
 training_history_standard.print_summary()
@@ -507,7 +510,6 @@ training_start = time.perf_counter()
 trained_network_r_weighted, training_history_r_weighted = mfp.train(
     network=network_r_weighted, domain=domain, fluid_config=fluid_config, field_config=field_config,
     training_config=training_config_r_weighted,
-    verbose=True, log_every=log_every,
 )
 print(f"r-weighted formulation trained in {time.perf_counter() - training_start:.1f} s")
 training_history_r_weighted.print_summary()
@@ -977,9 +979,10 @@ is exactly zero regardless of the mobility tensor's value.
 #| label: tbl-streamline
 #| tbl-cap: "Point-tracer trajectory versus the closed-form streamline (final rows)."
 initial_position_dimensionless = (0.3 * domain.radius, 0.05 * domain.length)
+p = torch.tensor(initial_position_dimensionless, device=DEVICE, dtype=DTYPE)
 initial_state = mfp.ParticleState(
-    position=torch.tensor(initial_position_dimensionless, device=DEVICE, dtype=DTYPE),
-    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE),
+    position=p,
+    velocity=p*0,
     time=0.0,
 )
 field_fn = lambda coordinates: mfp.uniform_field(
@@ -992,6 +995,7 @@ trajectories = mfp.integrate_trajectory(
     particle_config=particle_config, initial_states=[initial_state], mobility_tensor=mobility,
     time_span=(0.0, 5.0), enforce_uniform_field=True, verbose=False,
 )
+
 trajectory_comparison = mfp.compare_trajectory_to_analytical(
     trajectories[0], initial_position=initial_position_dimensionless, peak_velocity=PEAK_VELOCITY,
     radius=domain.radius, particle_radius=0.0,

@@ -14,9 +14,12 @@ loop many collocation points and epochs downstream of the actual mistake).
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
+import torch
+
+from magnetofluidics_pinn.types import ParticleState
 from magnetofluidics_pinn.device_utils import resolve_device
 
 # Numerical tolerance for "is this vector a unit vector" checks; loose
@@ -29,54 +32,24 @@ _UNIT_NORM_TOLERANCE = 1.0e-6
 # dynamically linked to DomainConfig's default but was actually baked to a
 # plain float at class-definition time — identical runtime behavior to a
 # literal, just less honest about it.
-_DEFAULT_REFERENCE_LENGTH = 7.5e-4  # meter; matches DomainConfig.radius's own default
+_DEFAULT_REFERENCE_LENGTH = 7.5e-4  # meter;
+_DEFAULT_REFERENCE_VELOCITY = 1.0e-3  # meter/second
+
+# NEW: promoted out of `training.trainer` (previously a module-private
+# `_BOUNDARY_LOSS_WEIGHT`) so that `ObstacleConfig.obstacle_loss_weight`'s
+# default can reference it here, alongside every other config default,
+# without `config` importing from `training.trainer` (which would create
+# a circular import, since `training.trainer` already imports from
+# `config`). `training.trainer` now imports this constant instead of
+# defining its own copy, so the wall/inlet/outlet/obstacle boundary weight
+# is declared in exactly one place.
+DEFAULT_BOUNDARY_LOSS_WEIGHT: float = 10.0
 
 
-@dataclass(frozen=True)
-class DomainConfig:
-    """Configuration of the vessel geometry.
-
-    All physical fields follow the MKSA/SI convention (meter, kilogram,
-    second, ampere) unless stated otherwise. The solvers never consume this
-    configuration directly: [`scaling.nondimensionalize_domain`]
-    [magnetofluidics_pinn.scaling.nondimensionalize_domain] converts it to a
-    dimensionless [`Domain`][magnetofluidics_pinn.types.Domain] first, which
-    is what `sampling` and `physics` actually operate on.
-
-    Args:
-    - `kind`: Either `"channel"` or `"bifurcation"`.
-    - `length`: Axial length of the vessel, in `meter` (e.g., a few
-      millimeters, so `1.0e-3` to `1.0e-2`).
-    - `radius`: Radius (or half-width) of the vessel, in `meter` (e.g., a few
-      hundred micrometers, so around `1.0e-4`).
-    - `branch_angle`: Branch half-angle in radians, required only when
-      `kind == "bifurcation"`.
-      
-    Raises:
-    - `ValueError`: If `length` or `radius` is not finite and strictly
-      positive, if `kind == "bifurcation"` and `branch_angle` is not a
-      finite number, or if `kind == "channel"` and `branch_angle` is not
-      `None`.
-    """
-    
-    kind: Literal["channel", "bifurcation"] = "channel"
-    length: float = 3.0e-3  # m
-    radius: float = 7.5e-4  # m
-    branch_angle: float | None = None
-    
-    def __post_init__(self) -> None:
-        if not math.isfinite(self.length) or self.length <= 0.0:
-            raise ValueError(f"length must be finite and strictly positive; got {self.length!r}.")
-        if not math.isfinite(self.radius) or self.radius <= 0.0:
-            raise ValueError(f"radius must be finite and strictly positive; got {self.radius!r}.")
-        if self.kind == "bifurcation":
-            if self.branch_angle is None or not math.isfinite(self.branch_angle):
-                raise ValueError("kind='bifurcation' requires a finite branch_angle.")
-        elif self.branch_angle is not None:
-            raise ValueError(
-                "branch_angle is only meaningful when kind='bifurcation'; "
-                f"got kind={self.kind!r} with branch_angle={self.branch_angle!r}."
-            )
+def _check_if_finite_positive(value: float, name: str="") -> None:
+    """Raise ValueError if `value` is not finite and strictly positive."""
+    if not math.isfinite(value) or value <= 0.0:
+        raise ValueError(f"{name}  must be finite and strictly positive; got {value!r}.")
 
 
 @dataclass(frozen=True)
@@ -105,29 +78,80 @@ class FluidConfig:
     - `reference_length`: Characteristic length scale, in `meter`, used to
       nondimensionalize every spatial coordinate. Defaults to the vessel
       radius order of magnitude (a few hundred micrometers).
-      
+
     Raises:
     - `ValueError`: If `dynamic_viscosity`, `density`, `reference_velocity`,
       or `reference_length` is not finite and strictly positive.
     """
     
     regime: Literal["stokes", "navier_stokes"] = "stokes"
-    dynamic_viscosity: float = 1.0e-3   # [Pa.s]
-    density: float = 1.0e3              # [kg/m^3]
-    reference_velocity: float = 1.0e-3  # [m/s]
-    reference_length: float = _DEFAULT_REFERENCE_LENGTH
-
-    def __post_init__(self) -> None:
-        for field_name in ("dynamic_viscosity", "density", "reference_velocity", "reference_length"):
-            value = getattr(self, field_name)
-            if not math.isfinite(value) or value <= 0.0:
-                raise ValueError(f"{field_name} must be finite and strictly positive; got {value!r}.")
+    dynamic_viscosity: float = 1.0e-3  # [Pa.s]
+    density: float = 1.0e3  # [kg/m^3]
     
-    # NEW: Reynolds number, needed by `physics.fluid_residuals.navier_stokes_residual`
-    # to weight the unsteady/convective terms against the (unit, by this
-    # package's own viscous pressure scaling) dimensionless viscosity. Kept
-    # as a derived property rather than a stored field, so it can never
-    # drift out of sync with the four fields it is computed from.
+    def __post_init__(self) -> None:
+        for field_name in ("dynamic_viscosity", "density"):
+            value = getattr(self, field_name)
+            _check_if_finite_positive(value, field_name)
+
+
+@dataclass(frozen=True)
+class DomainConfig:
+    """Configuration of the vessel geometry.
+
+    All physical fields follow the MKSA/SI convention (meter, kilogram,
+    second, ampere) unless stated otherwise. The solvers never consume this
+    configuration directly: [`scaling.nondimensionalize_domain`]
+    [magnetofluidics_pinn.scaling.nondimensionalize_domain] converts it to a
+    dimensionless [`Domain`][magnetofluidics_pinn.types.Domain] first, which
+    is what `sampling` and `physics` actually operate on.
+
+    Args:
+    - `kind`: Either `"channel"` or `"bifurcation"`.
+    - `length`: Axial length of the vessel, in `meter` (e.g., a few
+      millimeters, so `1.0e-3` to `1.0e-2`).
+    - `radius`: Radius (or half-width) of the vessel, in `meter` (e.g., a few
+      hundred micrometers, so around `1.0e-4`).
+    - `u_max`: Maximum velocity in the flow, in `meter/second`.
+    - `branch_angle`: Branch half-angle in radians, required only when
+      `kind == "bifurcation"`.
+    Raises:
+    - `ValueError`: If `length` or `radius` is not finite and strictly
+      positive, if `kind == "bifurcation"` and `branch_angle` is not a
+      finite number, or if `kind == "channel"` and `branch_angle` is not
+      `None`.
+    """
+    
+    kind: Literal["channel", "bifurcation"] = "channel"
+    length: float = _DEFAULT_REFERENCE_LENGTH * 8.0  # m
+    radius: float = _DEFAULT_REFERENCE_LENGTH        # m
+    u_max: float = _DEFAULT_REFERENCE_VELOCITY  # m/s
+    branch_angle: float | None = None
+    fluid: FluidConfig = FluidConfig()  # Fluid embedded by default
+    
+    def __post_init__(self) -> None:
+        _check_if_finite_positive(self.length, "length")
+        _check_if_finite_positive(self.radius, "radius")
+        # _check_if_finite_positive(self.u_max, "u_max")
+        if self.kind == "bifurcation":
+            if self.branch_angle is None or not math.isfinite(self.branch_angle):
+                raise ValueError("kind='bifurcation' requires a finite branch_angle.")
+        elif self.branch_angle is not None:
+            raise ValueError(
+                "branch_angle is only meaningful when kind='bifurcation'; "
+                f"got kind={self.kind!r} with branch_angle={self.branch_angle!r}."
+            )
+        
+    @property
+    def reference_length(self) -> float:
+        """Characteristic length scale, in meter, used to nondimensionalize every spatial coordinate."""
+        return self.radius
+    
+    @property
+    def reference_velocity(self) -> float:
+        """Characteristic velocity scale, in meter/second, used to nondimensionalize
+        velocity and (with reference_length) time and pressure."""
+        return self.u_max
+
     @property
     def reynolds(self) -> float:
         r"""Reynolds number of the flow, $Re = \rho U_c L_c / \mu$.
@@ -148,9 +172,10 @@ class FluidConfig:
           $Re = \rho U_c L_c / \mu$, always strictly positive since every
           factor is validated strictly positive in `__post_init__`.
         """
-        return (self.density * self.reference_velocity * self.reference_length) / self.dynamic_viscosity
-    
-    
+        return ((self.fluid.density * self.reference_velocity * self.reference_length)
+                / self.fluid.dynamic_viscosity)
+
+
 @dataclass(frozen=True)
 class MagneticFieldConfig:
     """Configuration of the prescribed magnetic field input.
@@ -181,8 +206,7 @@ class MagneticFieldConfig:
     time_dependent: bool = False
     
     def __post_init__(self) -> None:
-        if not math.isfinite(self.magnitude) or self.magnitude <= 0.0:
-            raise ValueError(f"magnitude must be finite and strictly positive; got {self.magnitude!r}.")
+        _check_if_finite_positive(self.magnitude, "magnitude")
         if not all(math.isfinite(component) for component in self.orientation):
             raise ValueError(f"orientation components must be finite; got {self.orientation!r}.")
         orientation_norm = math.hypot(*self.orientation)
@@ -234,7 +258,7 @@ class ParticleConfig:
       dimensionless units that function's docstring describes — this
       config field records the *physical* moment for bookkeeping, but does
       not itself perform that conversion (see the caveat above).
-    - `magnetic_ration`: volumic ration of magnetic material.
+    - `magnetic_ratio`: volumic ratio of magnetic material.
 
     Raises:
     - `ValueError`: If `radius` is not finite and non-negative, if either
@@ -251,13 +275,11 @@ class ParticleConfig:
     length: float = 0.0       # [m]
     aspect_ratio: float = 1.0
     number: int = 1
-    position: tuple[float, float] = (0.0, 0.0)             # [m]
     magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)  # [A m^2]
     magnetic_ratio: float = 1.0
     
     def __post_init__(self) -> None:
-        if not math.isfinite(self.radius) or self.radius < 0.0:
-            raise ValueError(f"radius must be finite and non-negative; got {self.radius!r}.")
+        _check_if_finite_positive(self.radius, "radius")
         if not all(math.isfinite(component) for component in self.magnetic_moment):
             raise ValueError(f"magnetic_moment components must be finite; got {self.magnetic_moment!r}.")
         if math.hypot(*self.magnetic_moment) <= 0.0:
@@ -266,7 +288,9 @@ class ParticleConfig:
             raise ValueError(f"number of particles must be positive for swarms; got {self.number!r}.")
         if self.kind == "cylinder" and self.length <= 0:
             raise ValueError(f"length of cylinder must be positive; got {self.length!r}.")
-
+        if self.kind == "spheroid" and not (0 < self.aspect_ratio <= 1):
+            raise ValueError(f"aspect_ratio of spheroid must be between 0 and 1; got {self.aspect_ratio!r}.")
+        
     @property
     def max_surface_extension(self) -> float:
         """Returns the maximum radial extension from the centre of mass."""
@@ -278,19 +302,14 @@ class ParticleConfig:
     def volume(self) -> float :
         """Returns the particle volume in cubic meters."""
         if self.kind == "spherical":
-            return (4.0 / 3.0) * math.pi * self.radius**3
+            return (4.0 / 3.0) * math.pi * self.radius ** 3
         elif self.kind == "cylinder":
-            return math.pi * self.radius**2 * self.length
+            return math.pi * self.radius ** 2 * self.length
         elif self.kind == "spheroid":
-            # Assuming prolate spheroid: volume = (4/3) * pi * a^2 * b
-            a = self.radius  # semi-minor axis
-            b = self.length / 2.0  # semi-major axis
-            return (4.0 / 3.0) * math.pi * a**2 * b
+            return (4.0 / 3.0) * math.pi * self.radius ** 2 * (self.length / 2.0)
         elif self.kind == "swarms":
-            # Assuming spherical particles for swarms; adjust if needed
-            return self.number * (4.0 / 3.0) * math.pi * self.radius**3
-        else:
-            raise ValueError(f"Unknown particle kind: {self.kind}")
+            return self.number * (4.0 / 3.0) * math.pi * self.radius ** 3
+        raise ValueError(f"Unknown kind: {self.kind}")
 
     @property
     def magnetic_volume(self) -> float :
@@ -300,26 +319,116 @@ class ParticleConfig:
     @property
     def magnetization(self) -> tuple[float | int, ...]:
         """Returns the magnetization vector in A/m."""
-        return tuple(component / self.magnetic_volume for component in self.magnetic_moment)
+        return tuple(m / self.magnetic_volume for m in self.magnetic_moment)
+    
+    def with_magnetization(self, magnetization: tuple[float | int, ...]) -> ParticleConfig:
+        """Pure functional updater replacing unsafe object.__setattr__ mutations."""
+        mag_vol = self.volume * self.magnetic_ratio
+        new_moment = tuple(m * self.magnetic_volume for m in magnetization)
+        return replace(self, magnetic_moment=new_moment)
 
-    @magnetization.setter
-    def magnetization(self, value: tuple[float, float]) -> None:
-        """Set magnetization (A/m) by updating magnetic_moment accordingly.
 
-        Note: ParticleConfig is a frozen dataclass; this setter uses
-        object.__setattr__ to mutate the stored magnetic_moment while
-        preserving the external API. Use sparingly — immutability is the
-        intended default.
-        """
-        if not (isinstance(value, tuple) and len(value) == 2):
-            raise TypeError("magnetization must be a tuple[float, float].")
-        if not all(math.isfinite(v) for v in value):
-            raise ValueError(f"magnetization components must be finite; got {value!r}.")
-        new_moment = tuple(v * self.magnetic_volume for v in value)
-        if math.hypot(*new_moment) <= 0.0:
-            raise ValueError("magnetic_moment computed from magnetization must be non-zero.")
-        object.__setattr__(self, "magnetic_moment", new_moment)
+@dataclass(frozen=True)
+class TwoWayCouplingConfig:
+    r"""Two-way-coupling parameters for training the flow around a fixed (spherical) object.
 
+    NEW. Passing an `ObjectConfig` to
+    [`training.trainer.train`][magnetofluidics_pinn.training.trainer.train]
+    switches it from the ordinary (obstacle-free) Stokes/Navier-Stokes
+    training problem to the two-way-coupled problem solved around an
+    embedded [`SphericalObject`][magnetofluidics_pinn.types.SphericalObject]:
+    interior points are drawn by rejection sampling around the excluded
+    volume (see
+    [`sampling.collocation.sample_collocation_points_with_obstacle`]
+    [magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]),
+    and an additional loss term enforces the object's own rigid-body
+    velocity on its surface (see
+    [`boundary_conditions.flow_bc.rigid_body_velocity_condition`]
+    [magnetofluidics_pinn.boundary_conditions.flow_bc.rigid_body_velocity_condition]).
+    `train` itself stays a single entry point either way; this dataclass is
+    what makes the two problems reuse it instead of needing a separate
+    `train_around_obstacle` function.
+
+    Kept as its own dataclass rather than folded into
+    [`TrainingConfig`][magnetofluidics_pinn.config.TrainingConfig], since
+    `object_velocity` in particular is expected to vary from call to call
+    within a single outer search (see
+    [`trajectory.two_way_coupling.solve_force_balanced_velocity`]
+    [magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity],
+    which retrains at a new candidate `object_velocity` on every
+    bracketing step): a small, per-call dataclass keeps that variation
+    local, instead of requiring a fresh `TrainingConfig` — an object
+    otherwise meant to be reused unchanged across an entire optimization
+    run — for every candidate velocity.
+
+    Args:
+    - `object`: The embedded sphere; must fit strictly inside the
+      training domain. Checked by
+      [`sampling.collocation.sample_collocation_points_with_obstacle`]
+      [magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]
+      at training time, not here, since this dataclass has no `Domain` of
+      its own to check `obstacle` against.
+    - `object_velocity`: The sphere's own axial translational velocity,
+      in the lab frame — the quantity
+      [`trajectory.two_way_coupling.solve_force_balanced_velocity`]
+      [magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity]
+      searches over. `0.0` recovers a *fixed* (anchored) object.
+    - `n_object_surface_points`: Number of collocation points drawn on
+      the object's surface each Adam epoch (and once, fixed, for the
+      L-BFGS phase).
+    - `object_loss_weight`: Weight for the object-surface velocity
+      term; defaults to
+      [`DEFAULT_BOUNDARY_LOSS_WEIGHT`][magnetofluidics_pinn.config.DEFAULT_BOUNDARY_LOSS_WEIGHT],
+      the same weight every other Dirichlet velocity boundary (wall,
+      inlet) already uses — physically, the object surface is just
+      another such boundary.
+
+    Raises:
+    - `ValueError`: If `object_velocity` is not finite, if
+      `n_object_surface_points` is not strictly positive, or if
+      `object_loss_weight` is not finite and non-negative.
+    """
+    
+    particle_config: ParticleConfig
+    particle_velocity: tuple[float, float] = (0.0, 0.0) # Lab frame velocity
+    particle_position: tuple[float, float] = (0.0, 0.0) # Instantaneous position
+    time: float = 0.0 # Current time
+    n_surface_points: int = 200
+    object_loss_weight: float = DEFAULT_BOUNDARY_LOSS_WEIGHT
+    
+    def __post_init__(self) -> None:
+        if math.hypot(*self.particle_velocity) <= 0.0:
+            raise ValueError("particle_velocity must be non-zero.")
+        if self.n_surface_points <= 0:
+            raise ValueError(
+                "n_surface_points must be strictly positive; "
+                f"got {self.n_surface_points!r}."
+            )
+        _check_if_finite_positive(self.object_loss_weight, "object_loss_weight")
+    
+    @property
+    def particle_velocity_magnitude(self) -> float:
+        """Returns the magnitude of the particle velocity."""
+        return math.hypot(*self.particle_velocity)
+    
+    @property
+    def axial_particle_velocity(self) -> float:
+        """Returns the axial component of the particle velocity."""
+        return self.particle_velocity[1]
+    
+    @property
+    def radial_particle_velocity(self) -> float:
+        """Returns the radial component of the particle velocity."""
+        return self.particle_velocity[0]
+    
+    @property
+    def particle_state(self):
+        """Returns a ParticleState object representing the particle's current state."""
+        return ParticleState(
+            position=torch.tensor(self.particle_position),
+            velocity=torch.tensor(self.particle_velocity),
+            time=self.time
+        )
 
 @dataclass(frozen=True)
 class TrainingConfig:
@@ -371,9 +480,6 @@ class TrainingConfig:
       cross-field check in `__post_init__`.
     - `learning_rate`: Initial learning rate for the Adam phase.
     - `n_epochs`: Number of Adam epochs.
-    - `device`: Any device string accepted by `torch.device` (e.g. `"cpu"`,
-      `"cuda"`, `"cuda:0"`); resolved automatically when `None`.
-    - `random_seed`: Seed used for reproducible sampling and initialization.
     - `gradient_clip_norm`: Maximum gradient norm during the Adam phase, or
       `None` to disable clipping. Guards against the occasional large
       gradient spike that nested second-order autograd (needed for the PDE
@@ -393,37 +499,46 @@ class TrainingConfig:
       -> 0.24 -> 0.09 after rounds 1-4) before diminishing returns set in.
     - `lbfgs_iterations_per_round`: `max_iter` passed to `torch.optim.LBFGS`
       for each round.
+    - `device`: Any device string accepted by `torch.device` (e.g. `"cpu"`,
+      `"cuda"`, `"cuda:0"`); resolved automatically when `None`.
+    - `random_seed`: Seed used for reproducible sampling and initialization.
+    - `verbose`: If `True`, print one progress line every `log_every`
+      epochs during the Adam phase (always including the last), and one
+      line per round during the L-BFGS phase, plus a one-line summary at
+      the end. If `False` (the default), `train` prints nothing.
+    - `log_every`: Epoch interval between printed Adam-phase progress
+      lines when `verbose=True`; ignored otherwise.
+    Raises:
+    - `ValueError`: If any of the strictly-positive fields is not strictly
+      positive, if `axis_clearance_fraction` is invalid or paired with an
+      unsafe `residual_form`, or if `device` does not resolve to `"cuda"`
+      or `"cpu"`.
     """
     
     n_interior_points: int = 10_000
     n_boundary_points: int = 2_000
     n_axis_points: int = 512
-    # NEW: axis/singularity-treatment knobs, grouped with n_axis_points
-    # since all three concern how the symmetry axis is handled, even
-    # though residual_form and axis_clearance_fraction address a different
-    # mechanism (see each field's docstring above).
     residual_form: Literal["standard", "r_weighted"] = "standard"
     axis_clearance_fraction: float | None = None
     learning_rate: float = 1.0e-3
     n_epochs: int = 20_000
-    device: str | None = None
-    random_seed: int = 42
     gradient_clip_norm: float | None = 1.0
     use_lbfgs_refinement: bool = True
     lbfgs_n_interior_points: int = 4_000
     lbfgs_n_boundary_points: int = 450
     lbfgs_rounds: int = 4
     lbfgs_iterations_per_round: int = 500
-    # NEW: independent weights for the decomposed interior-residual terms
-    # and the two additional physics-fidelity loss terms (see docstring
-    # above and `training.trainer`). Defaults are a starting point, not a
-    # proven-optimal choice; re-tune against the verification notebook.
     momentum_loss_weight: float = 1.0
     continuity_loss_weight: float = 20.0
     positivity_loss_weight: float = 1.0
     conservation_loss_weight: float = 20.0
     n_conservation_stations: int = 8
     n_conservation_quadrature_points: int = 64
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype: str = "float32"
+    random_seed: int = 42
+    verbose: bool = False
+    log_every: int = 100
     
     def __post_init__(self) -> None:
         """Validate configuration parameters and resolve target device."""
@@ -436,12 +551,6 @@ class TrainingConfig:
             raise ValueError("n_boundary_points must be at least 3.")
         if self.n_axis_points <= 0:
             raise ValueError("n_axis_points must be strictly positive.")
-        # NEW: axis_clearance_fraction range check, and its cross-field
-        # interaction with residual_form. A "standard" residual is singular
-        # exactly at r=0 (see stokes_residual's own r <= 0 check) and
-        # numerically fragile arbitrarily close to it, so shrinking the
-        # clearance all the way to 0.0 is only accepted under the
-        # "r_weighted" form, which was built precisely to tolerate that.
         if self.axis_clearance_fraction is not None:
             if not math.isfinite(self.axis_clearance_fraction) or not (0.0 <= self.axis_clearance_fraction < 1.0):
                 raise ValueError(
@@ -459,8 +568,6 @@ class TrainingConfig:
             raise ValueError("learning_rate must be strictly positive.")
         if self.n_epochs <= 0:
             raise ValueError("n_epochs must be strictly positive.")
-        # NEW: validate the four new loss weights and the conservation
-        # quadrature resolution, mirroring the existing validation style.
         for weight_name in (
                 "momentum_loss_weight", "continuity_loss_weight",
                 "positivity_loss_weight", "conservation_loss_weight",
@@ -473,16 +580,24 @@ class TrainingConfig:
                 f"n_conservation_stations must be strictly positive; got {self.n_conservation_stations!r}.")
         if self.n_conservation_quadrature_points < 2:
             raise ValueError(
-                "n_conservation_quadrature_points must be at least 2 for trapezoidal "
+                f"n_conservation_quadrature_points must be at least 2 for trapezoidal "
                 f"quadrature; got {self.n_conservation_quadrature_points!r}."
             )
-        resolved_device = resolve_device(self.device)
-        if resolved_device.type not in ("cuda", "cpu"):
+        if self.verbose and self.log_every < 1:
+            raise ValueError(f"log_every must be at least 1 when verbose=True; got {self.log_every!r}.")
+        if self.device not in ("cuda", "cpu"):
             raise ValueError(
-                f"device type must be 'cuda' or 'cpu', got '{resolved_device.type}'."
+                f"device type must be 'cuda' or 'cpu', got '{self.device}'."
             )
-        # Dataclass is frozen; mutate through object.__setattr__
-        object.__setattr__(self, "device", resolved_device)
+        
+    @property
+    def torch_device(self) -> torch.device:
+        """Lazy device resolution without mutating frozen dataclass fields."""
+        return resolve_device(self.device)
+
+    @property
+    def torch_dtype(self) -> torch.dtype:
+        return torch.float32 if self.dtype == "float32" else torch.float64
 
 
 def set_random_seed(seeds: int | None = None) -> None:
@@ -495,8 +610,7 @@ def set_random_seed(seeds: int | None = None) -> None:
     if seeds is not None:
         import random
         import numpy as np
-        import torch
-
+        
         random.seed(seeds)
         np.random.seed(seeds)
         torch.manual_seed(seeds)
@@ -504,4 +618,3 @@ def set_random_seed(seeds: int | None = None) -> None:
             torch.cuda.manual_seed_all(seeds)
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-    

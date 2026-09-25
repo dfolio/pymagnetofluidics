@@ -267,7 +267,7 @@ def integrate_trajectory(
     verbose: bool = False,
     log_every: int = 10,
 ) -> list[list[ParticleState]]:
-    """Integrate the trajectories of one or several magnetic particles using SciPy's adaptive IVP solvers.
+    """Integrate particle trajectories with optimized host-GPU tensor management.
 
     Args:
     - `flow_network`: Trained network mapping coordinates to velocity and pressure.
@@ -326,12 +326,6 @@ def integrate_trajectory(
             f"mobility_tensor must have shape ({len(initial_states)}, {n_dims}, {n_dims}) "
             f"(n_particles, n_dims, n_dims); got {tuple(mobility_tensor.shape)}."
         )
-    # NEW: fail fast, with a clear message, rather than letting the first
-    # `solve_ivp` right-hand-side evaluation raise deep inside
-    # `faxen_corrected_velocity`'s own r > 0 guard. `ParticleConfig`'s
-    # default `position == (0.0, 0.0)` sits exactly on the symmetry axis;
-    # combined with a non-zero `radius` (Faxén correction active), that
-    # guard is otherwise only discovered mid-solve.
     if particle_config.radius > 0.0:
         on_axis_particles = [
             index for index, state in enumerate(initial_states) if state.position[0].item() <= 0.0
@@ -348,6 +342,9 @@ def integrate_trajectory(
     # Resolve execution context properties once up-front to eliminate device shifting overhead
     network_device = resolve_module_device(flow_network)
     network_dtype = resolve_module_dtype(flow_network)
+    
+    # Set flow network to evaluation mode to suppress autograd overhead on weights
+    flow_network.eval()
 
     r_max_particle = particle_config.max_surface_extension / scales.length
     effective_wall_limit = domain.radius - r_max_particle
@@ -369,7 +366,8 @@ def integrate_trajectory(
         current_mobility = mobility_tensor[p_index].to(device=network_device, dtype=network_dtype)
 
         def ode_system(t: float, y: np.ndarray) -> np.ndarray:
-            pos_tensor = torch.tensor(y, device=network_device, dtype=network_dtype).unsqueeze(0)
+            # Pinned, non-blocking transfer for scalar state vector
+            pos_tensor = torch.as_tensor(y, device=network_device, dtype=network_dtype).unsqueeze(0)
 
             # 1. Hydrodynamic flow advection contribution (with optional Faxen Laplacian correction)
             if a_nd > 0.0:
@@ -385,8 +383,8 @@ def integrate_trajectory(
             u_mag = torch.matmul(f_mag, current_mobility.T)
 
             # Reduce contributions and unpack vector into standard NumPy format
-            v_drift = (u_flow + u_mag).squeeze(0).cpu().numpy()
-            return v_drift
+            # Squeeze and return as NumPy float64 for SciPy host solver
+            return (u_flow + u_mag).squeeze(0).cpu().numpy().astype(np.float64)
 
         return ode_system
 

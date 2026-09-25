@@ -25,7 +25,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from magnetofluidics_pinn.config import MagneticFieldConfig, FluidConfig, ParticleConfig
+from magnetofluidics_pinn.config import DomainConfig, MagneticFieldConfig, ParticleConfig
 from magnetofluidics_pinn.types import Domain
 
 
@@ -35,9 +35,9 @@ class Scales:
 
     Args:
     - `length`: Characteristic length, in `meter` (from
-      `FluidConfig.reference_length`).
+      `DomainConfig.reference_length`).
     - `velocity`: Characteristic velocity, in `meter-per-second` (from
-      `FluidConfig.reference_velocity`).
+      `DomainConfig.reference_velocity`).
     - `time`: Characteristic time, in `second`, derived as
       $\text{length} / \text{velocity}$.
     - `pressure`: Characteristic pressure, in `pascal`, derived from the
@@ -54,7 +54,7 @@ class Scales:
     magnetic_field: float
 
 
-def compute_scales(fluid_config: FluidConfig, field_config: MagneticFieldConfig) -> Scales:
+def compute_scales(domain_config: DomainConfig, field_config: MagneticFieldConfig) -> Scales:
     """Derive the characteristic scales from the fluid and field configuration.
 
     Args:
@@ -70,20 +70,20 @@ def compute_scales(fluid_config: FluidConfig, field_config: MagneticFieldConfig)
       `magnitude` is not strictly positive, which would make the
       normalization ill-defined (division by zero or sign flip).
     """
-    if fluid_config.reference_length <= 0.0:
-        raise ValueError("fluid_config.reference_length must be strictly positive.")
-    if fluid_config.reference_velocity <= 0.0:
-        raise ValueError("fluid_config.reference_velocity must be strictly positive.")
+    if domain_config.reference_length <= 0.0:
+        raise ValueError("domain_config.reference_length must be strictly positive.")
+    if domain_config.reference_velocity <= 0.0:
+        raise ValueError("domain_config.reference_velocity must be strictly positive.")
     if field_config.magnitude <= 0.0:
         raise ValueError("field_config.magnitude must be strictly positive.")
 
-    length = fluid_config.reference_length
-    velocity = fluid_config.reference_velocity
+    length = domain_config.reference_length
+    velocity = domain_config.reference_velocity
     time = length / velocity
     # Viscous pressure scale, appropriate for the low-Reynolds-number (Stokes)
     # regime this package targets first; both regimes share the same scales
     # so that switching regimes does not require re-deriving a domain.
-    pressure = fluid_config.dynamic_viscosity * velocity / length
+    pressure = domain_config.fluid.dynamic_viscosity * velocity / length
     magnetic_field = field_config.magnitude
 
     return Scales(
@@ -112,6 +112,7 @@ def nondimensionalize_domain(domain: Domain, scales: Scales) -> Domain:
         kind=domain.kind,
         length=domain.length / scales.length,
         radius=domain.radius / scales.length,
+        u_max=domain.u_max / scales.velocity,
         branch_angle=domain.branch_angle,
     )
 
@@ -132,6 +133,7 @@ def redimensionalize_domain(domain: Domain, scales: Scales) -> Domain:
         kind=domain.kind,
         length=domain.length * scales.length,
         radius=domain.radius * scales.length,
+        u_max=domain.u_max * scales.velocity,
         branch_angle=domain.branch_angle,
     )
 
@@ -277,15 +279,15 @@ def nondimensionalize_particle(particle_config: ParticleConfig, scales: Scales) 
     return particle_config.radius / scales.length
 
 
-def compute_mobility_scale(fluid_config: FluidConfig) -> float:
+def compute_mobility_scale(domain_config: DomainConfig) -> float:
     """Calculates the characteristic hydrodynamic mobility scale (SI).
 
     $$M_{ref} = 1 / (6 * \\pi * \\mu * L_{ref})$$
     """
-    return 1.0 / (6.0 * np.pi * fluid_config.dynamic_viscosity * fluid_config.reference_length)
+    return 1.0 / (6.0 * np.pi * domain_config.fluid.dynamic_viscosity * domain_config.reference_length)
 
 
-def nondimensionalize_mobility(particle_config: ParticleConfig, fluid_config: FluidConfig,
+def nondimensionalize_mobility(particle_config: ParticleConfig, fluid_config: DomainConfig,
                                scales: Scales) -> torch.Tensor:
     """Generates the dimensionless mobility tensor based on the particle’s shape.
 

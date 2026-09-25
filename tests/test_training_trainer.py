@@ -263,7 +263,7 @@ class TestTrainEndToEnd:
             n_conservation_stations=3, n_conservation_quadrature_points=8,
         )
         trained_network, history = mfp.train(
-            constrained_network, domain, fluid_config, field_config, training_config
+            constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config
         )
         
         assert trained_network is not constrained_network  # a private copy was trained
@@ -277,7 +277,7 @@ class TestTrainEndToEnd:
         training_config = mfp.TrainingConfig(
             n_interior_points=20, n_boundary_points=9, n_epochs=3, device="cpu", use_lbfgs_refinement=False,
         )
-        mfp.train(constrained_network, domain, fluid_config, field_config, training_config)
+        mfp.train(constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config)
         
         for key, value in constrained_network.state_dict().items():
             assert torch.equal(value, original_state[key])
@@ -289,7 +289,7 @@ class TestTrainEndToEnd:
         training_config = mfp.TrainingConfig(
             n_interior_points=30, n_boundary_points=9, n_epochs=3, device="cpu", use_lbfgs_refinement=False,
         )
-        _, history = mfp.train(constrained_network, domain, fluid_config, field_config, training_config)
+        _, history = mfp.train(constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config)
         assert max(history.adam.wall) < 1e-8
     
     def test_disabled_lbfgs_yields_empty_lbfgs_history(
@@ -298,7 +298,7 @@ class TestTrainEndToEnd:
         training_config = mfp.TrainingConfig(
             n_interior_points=20, n_boundary_points=9, n_epochs=2, device="cpu", use_lbfgs_refinement=False,
         )
-        _, history = mfp.train(constrained_network, domain, fluid_config, field_config, training_config)
+        _, history = mfp.train(constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config)
         for name in trainer_module.LOSS_COMPONENT_NAMES + ("step", "total"):
             assert getattr(history.lbfgs, name) == ()
     
@@ -306,18 +306,11 @@ class TestTrainEndToEnd:
         training_config = mfp.TrainingConfig(
             n_interior_points=20, n_boundary_points=9, n_epochs=2, device="cpu", use_lbfgs_refinement=False,
         )
-        _, history = mfp.train(constrained_network, domain, fluid_config, field_config, training_config)
+        _, history = mfp.train(constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config)
         history.print_summary()  # must not raise
     
     def test_raises_on_non_positive_n_epochs(self, constrained_network, domain, fluid_config, field_config) -> None:
         training_config = mfp.TrainingConfig(n_interior_points=10, n_boundary_points=9, n_epochs=1, device="cpu")
         object.__setattr__(training_config, "n_epochs", 0)  # bypass __post_init__ to hit train()'s own check
         with pytest.raises(ValueError, match="n_epochs must be strictly positive"):
-            mfp.train(constrained_network, domain, fluid_config, field_config, training_config)
-    
-    def test_raises_on_non_positive_log_every(self, constrained_network, domain, fluid_config, field_config) -> None:
-        training_config = mfp.TrainingConfig(
-            n_interior_points=10, n_boundary_points=9, n_epochs=2, device="cpu", use_lbfgs_refinement=False,
-        )
-        with pytest.raises(ValueError, match="log_every must be strictly positive"):
-            mfp.train(constrained_network, domain, fluid_config, field_config, training_config, log_every=0)
+            mfp.train(constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config)

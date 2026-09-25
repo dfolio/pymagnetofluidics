@@ -7,6 +7,7 @@ from typing import Callable
 import pytest
 import torch
 import torch.nn as nn
+from triton.tools.triton_to_gluon_translator.common_helpers import tl_dot_get_reshape_shape
 
 import magnetofluidics_pinn as mfp
 from .conftest import make_poiseuille_network
@@ -20,8 +21,9 @@ from magnetofluidics_pinn.physics.hydrodynamic_drag import (
     faxen_corrected_velocity,
     surface_traction_force,
 )
-from magnetofluidics_pinn.types import SphericalObstacle
-
+from magnetofluidics_pinn.config import ParticleConfig
+from magnetofluidics_pinn.types import ParticleState
+from magnetofluidics_pinn.device_utils import resolve_module_device
 
 # ============================================================================
 # EXACT ANALYTICAL GROUND-TRUTH TESTS (VIA POISEUILLE NETWORK)
@@ -166,8 +168,10 @@ def test_surface_traction_with_constrained_mlp(
     - `device`: Target PyTorch compute device.
     """
     net = constrained_network.to(device)
-    obstacle = SphericalObstacle(radius=0.15, axial_position=2.0)
-    force_z = surface_traction_force(net, obstacle, n_quadrature_points=45)
+    particle_config = ParticleConfig(radius=0.15)
+    particule_state = ParticleState(position=torch.tensor([0, 2.0], device=device), velocity=torch.zeros([1,2], device=device))
+    force_z = surface_traction_force(net, particle_config=particle_config, particle_state=particule_state,
+                                     n_quadrature_points=45)
 
     assert force_z.numel() == 1
     assert not torch.isnan(force_z)
@@ -457,6 +461,8 @@ def test_surface_traction_invalid_quadrature_points(raw_network: torch.nn.Module
     Args:
     - `raw_network`: MLP network fixture from `conftest.py`.
     """
-    obstacle = SphericalObstacle(radius=0.2, axial_position=1.0)
+    device = resolve_module_device(raw_network)
+    particle_config = ParticleConfig(radius=0.15)
+    particule_state = ParticleState(position=torch.tensor([0, 2.0], device=device), velocity=torch.zeros([1,2], device=device))
     with pytest.raises(ValueError, match="n_quadrature_points must be at least 2"):
-        surface_traction_force(raw_network, obstacle, n_quadrature_points=1)
+        surface_traction_force(raw_network, particle_config=particle_config, particle_state=particule_state, n_quadrature_points=1)

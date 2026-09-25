@@ -1,6 +1,6 @@
 r"""Force-balanced particle motion under a genuine two-way flow coupling.
 
-NEW module. `trajectory.integrator.integrate_trajectory` treats the
+`trajectory.integrator.integrate_trajectory` treats the
 magnetic microrobot as a point (or Faxén-corrected finite) tracer inside
 an *undisturbed* ambient flow, then adds a magnetic drift term under an
 explicit "unit-mobility" placeholder — both docstrings already flag this
@@ -52,64 +52,92 @@ interesting, and `gradient_field`/`biot_savart_field` remain
 depends on that, and any other force (gravity, buoyancy, a future
 field type) folds in exactly the same way, by the caller summing it into
 the same scalar before calling in.
+
+**CHANGED — `train()` replaces `train_around_obstacle()`.** Both
+functions below previously called a dedicated `train_around_obstacle()`
+entry point in `training.trainer`. That function has been folded into
+`train()` (see that module's docstring): the flow field for a given
+candidate velocity is now obtained by calling `train()` with an
+[`ObstacleConfig`][magnetofluidics_pinn.config.ObstacleConfig] built from
+`obstacle` and the candidate `obstacle_velocity`. `verbose`, which
+`train_around_obstacle` previously took as a separate keyword argument
+hard-wired to `False` here (retraining silently at every bracketing step,
+independent of whatever the caller's own `training_config.verbose` was
+set to), now lives on `TrainingConfig` itself; the same silencing is
+preserved below via `dataclasses.replace(current_config, verbose=False)`
+rather than mutating the caller's config in place.
 """
 
 from __future__ import annotations
 
-from typing import Callable
+import dataclasses  # NEW — used to silence verbose logging on a per-call copy of the config; see module docstring.
+from typing import Callable, Any
 
 import torch
 from torch import nn
 from scipy.optimize import brentq
 
-from magnetofluidics_pinn.config import FluidConfig, TrainingConfig
+from magnetofluidics_pinn.config import (
+    FluidConfig,
+    ParticleConfig,
+    TwoWayCouplingConfig,
+    TrainingConfig,
+)  # CHANGED: added ObstacleConfig.
 from magnetofluidics_pinn.physics.hydrodynamic_drag import surface_traction_force
-from magnetofluidics_pinn.training.trainer import ObstacleTrainingHistory, train_around_obstacle
-from magnetofluidics_pinn.types import Domain, ParticleState, SphericalObstacle
+from magnetofluidics_pinn.training.trainer import TrainingHistory, train
+from magnetofluidics_pinn.types import Domain, ParticleState
 
 
 def solve_force_balanced_velocity(
     network: nn.Module,
     domain: Domain,
-    obstacle: SphericalObstacle,
     fluid_config: FluidConfig,
+    particle_config: ParticleConfig,
+    particle_state: ParticleState,
     training_config: TrainingConfig,
     applied_force_z: float,
     velocity_bracket: tuple[float, float],
-    n_obstacle_surface_points: int = 200,
+    n_surface_points: int = 200,
     n_quadrature_points: int = 181,
     velocity_tolerance: float = 1.0e-3,
     refinement_config: TrainingConfig | None = None,
-    verbose: bool = False,
-) -> tuple[float, nn.Module, ObstacleTrainingHistory]:
+) -> tuple[float, nn.Module, TrainingHistory]:
     r"""Solve for the particle's force-balanced translational velocity, at a fixed position.
 
-    NEW. Brackets and roots the scalar force residual
+    Brackets and roots the scalar force residual
     $F_{\text{applied}} + F_z^{\text{drag}}(U_z)$ over `velocity_bracket`
     with `scipy.optimize.brentq`, retraining
-    ([`train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle])
-    the two-way-coupled flow field at each candidate $U_z$ and reading its
-    drag off
+    ([`train`][magnetofluidics_pinn.training.trainer.train] with
+    [`TwoWayCouplingConfig`][magnetofluidics_pinn.config.TwoWayCouplingConfig])
+    the two-way-coupled flow field at each candidate $U_z$ and evaluating hydrodynamic
+    drag via
     [`surface_traction_force`][magnetofluidics_pinn.physics.hydrodynamic_drag.surface_traction_force].
-    Successive candidates are *warm-started* from the previous candidate's
-    converged network — consecutive brentq iterates are close together in
-    $U_z$, so fine-tuning from the last solution converges far faster than
-    retraining from scratch every time; `refinement_config` lets those
-    warm-started re-solves use a much smaller epoch/round budget than the
-    first, cold-started one.
+
+    Successive candidates are warm-started from the previous iterate's converged
+    network parameters. `refinement_config` allows warm-started re-solves to use a
+    reduced optimization budget compared to the cold start.
 
     Args:
     - `network`: Starting flow network for the *first* (cold-started)
       candidate velocity evaluated (`velocity_bracket`'s lower end);
       every subsequent candidate warm-starts from the previous one's
-      result. Never mutated — `train_around_obstacle` already
-      deep-copies before training.
-    - `domain`, `obstacle`, `fluid_config`: As in
-      [`train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle].
+      result. Never mutated — `train` already deep-copies before training.
+    - `domain`, `object`, `fluid_config`: As in
+      [`train`][magnetofluidics_pinn.training.trainer.train], `object`
+      being wrapped into the
+      [`ObjectConfig`][magnetofluidics_pinn.config.ObjectConfig] built
+      internally for each candidate.
+    - `fluid_config`: Physical properties of the fluid.
+    - `particle_config`: Intrinsic physical/geometric properties of the microrobot.
+    - `particle_state`: Instantaneous position and kinematic state.
     - `training_config`: Used for the first, cold-started evaluation.
+      Regardless of its own `verbose` setting, every retraining call this
+      function makes runs silently (see this module's docstring) — pass
+      `verbose=True` to *this* function instead, to report progress across
+      candidates rather than within any single retraining.
     - `applied_force_z`: The sum of every externally applied axial force
       on the particle (magnetic today; anything else the caller adds
-      later), evaluated at `obstacle.axial_position`. `0.0` finds the
+      later), evaluated at `object.axial_position`. `0.0` finds the
       velocity of a passively-advected, non-actuated particle.
     - `velocity_bracket`: `(low, high)` with `low < high`; the force
       residual must have opposite signs at the two ends (checked below) —
@@ -117,8 +145,9 @@ def solve_force_balanced_velocity(
       Faxén-corrected point-particle estimate
       ([`physics.hydrodynamic_drag.faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity])
       at the same position.
-    - `n_obstacle_surface_points`, `n_quadrature_points`: Forwarded to
-      `train_around_obstacle` and `surface_traction_force` respectively.
+    - `n_object_surface_points`: Forwarded to each candidate's
+      `ObjectConfig`.
+    - `n_quadrature_points`: Forwarded to `surface_traction_force`.
     - `velocity_tolerance`: `brentq`'s `xtol`, in the same dimensionless
       velocity units as `velocity_bracket`.
     - `refinement_config`: `TrainingConfig` used for every candidate
@@ -126,17 +155,10 @@ def solve_force_balanced_velocity(
       for all of them, unchanged. Since every candidate after the first
       is warm-started, this is typically set to far fewer epochs/rounds
       than a cold start needs.
-    - `verbose`: If `True`, print each candidate velocity and the
-      resulting drag force and residual.
 
     Returns:
-    - A tuple `(particle_velocity, trained_network, history)`:
-      `particle_velocity` is the force-balanced $U_z$; `trained_network`
-      is the flow field converged *at* that velocity (re-evaluated once
-      more exactly there after `brentq` returns, so it is never left at
-      whatever the second-to-last bracketing step happened to produce);
-      `history` is that final training call's
-      [`ObstacleTrainingHistory`][magnetofluidics_pinn.training.trainer.ObstacleTrainingHistory].
+    - A tuple `(particle_velocity, trained_network, history)` containing the root $U_z$,
+      the flow network converged at $U_z$, and the final training history.
 
     Raises:
     - `ValueError`: If `velocity_bracket[0] >= velocity_bracket[1]`, or if
@@ -147,20 +169,56 @@ def solve_force_balanced_velocity(
     if velocity_low >= velocity_high:
         raise ValueError(f"velocity_bracket must satisfy low < high; got {velocity_bracket!r}.")
 
-    state: dict[str, object] = {"network": network, "history": None}
+    state: dict[str, Any] = {"network": network, "history": None}
 
     def force_residual(candidate_velocity: float) -> float:
         current_config = training_config if state["history"] is None else (refinement_config or training_config)
-        trained, history = train_around_obstacle(
-            state["network"], domain, obstacle, candidate_velocity, fluid_config, current_config,
-            n_obstacle_surface_points=n_obstacle_surface_points, verbose=False,
+        silent_config = dataclasses.replace(current_config, verbose=False)
+        candidate_state = ParticleState(
+            position=particle_state.position,
+            velocity=torch.tensor(
+                [0.0, candidate_velocity],
+                device=particle_state.position.device,
+                dtype=particle_state.position.dtype,
+            ),
+            time=particle_state.time,
         )
-        drag_force = surface_traction_force(trained, obstacle, n_quadrature_points).item()
+        pos_tuple = (
+            float(particle_state.position[0].item()),
+            float(particle_state.position[1].item()),
+        )
+        vel_tuple = (0.0, float(candidate_velocity))
+        
+        coupling_config = TwoWayCouplingConfig(
+            particle_config=particle_config,
+            particle_velocity=vel_tuple,
+            particle_position=pos_tuple,
+            n_surface_points=n_surface_points,
+        )
+        
+        trained, history = train(
+            state["network"],
+            domain,
+            fluid_config=fluid_config,
+            training_config=silent_config,
+            coupling_config=coupling_config,
+        )
+        # Evaluate drag force with disabled network parameter gradients
+        trained.eval()
+        with torch.no_grad():
+            drag_force = surface_traction_force(
+                trained, particle_config=particle_config, particle_state=particle_state,
+                n_quadrature_points=n_quadrature_points
+            ).item()
         state["network"] = trained
         state["history"] = history
         residual = applied_force_z + drag_force
-        if verbose:
-            print(f"  U_z = {candidate_velocity:+.5f}  ->  F_drag = {drag_force:+.5f}, residual = {residual:+.5f}")
+        # GPU cache cleanup between brentq candidate evaluations
+        device = next(trained.parameters()).device
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        if training_config.verbose:
+            print(f"  U_z = {candidate_velocity:+.3e}  ->  F_drag = {drag_force:+.3e}, residual = {residual:+.3e}")
         return residual
 
     residual_low = force_residual(velocity_low)
@@ -168,8 +226,8 @@ def solve_force_balanced_velocity(
     if residual_low * residual_high > 0.0:
         raise ValueError(
             f"velocity_bracket={velocity_bracket!r} does not bracket a sign change in the force "
-            f"residual (residual({velocity_low})={residual_low:.4g}, residual({velocity_high})="
-            f"{residual_high:.4g}); widen the bracket."
+            f"residual (residual({velocity_low})={residual_low:.4e}, residual({velocity_high})="
+            f"{residual_high:.4e}); widen the bracket."
         )
 
     particle_velocity = brentq(force_residual, velocity_low, velocity_high, xtol=velocity_tolerance)
@@ -187,21 +245,20 @@ def advance_particle_two_way(
     domain: Domain,
     fluid_config: FluidConfig,
     training_config: TrainingConfig,
-    obstacle_radius: float,
+    object_radius: float,
     initial_axial_position: float,
     applied_force_fn: Callable[[float], float],
     n_steps: int,
     time_step: float,
     velocity_bracket: tuple[float, float],
     refinement_config: TrainingConfig | None = None,
-    n_obstacle_surface_points: int = 200,
+    n_object_surface_points: int = 200,
     n_quadrature_points: int = 181,
     velocity_tolerance: float = 1.0e-3,
-    verbose: bool = False,
 ) -> list[ParticleState]:
     r"""Advance a two-way-coupled particle through the channel, one force-balanced step at a time.
 
-    NEW. An explicit-Euler stepper built directly on
+    An explicit-Euler stepper built directly on
     [`solve_force_balanced_velocity`][magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity]:
     at each of `n_steps` steps, freezes the particle at its current axial
     position, solves for the velocity balancing `applied_force_fn` there
@@ -218,11 +275,11 @@ def advance_particle_two_way(
     - `network`: Starting flow network for the first step (see
       `solve_force_balanced_velocity`'s `network` argument).
     - `domain`, `fluid_config`, `training_config`, `refinement_config`,
-      `n_obstacle_surface_points`, `n_quadrature_points`,
+      `n_object_surface_points`, `n_quadrature_points`,
       `velocity_tolerance`, `verbose`: Forwarded to
       `solve_force_balanced_velocity` at every step.
-    - `obstacle_radius`: Dimensionless particle radius (see
-      `SphericalObstacle.radius`); fixed for the whole trajectory.
+    - `object_radius`: Dimensionless particle radius (see
+      `SphericalObject.radius`); fixed for the whole trajectory.
     - `initial_axial_position`: Dimensionless starting $z$-position, on
       the axis.
     - `applied_force_fn`: Callable mapping the particle's *current* axial
@@ -244,7 +301,7 @@ def advance_particle_two_way(
       [`ParticleState`][magnetofluidics_pinn.types.ParticleState] instances
       (including the initial state at `time=0.0`), each with `position`
       `(0.0, z)` — the radial component is always exactly `0.0`, per
-      `SphericalObstacle`'s on-axis constraint — and `velocity` `(0.0,
+      `SphericalObject`'s on-axis constraint — and `velocity` `(0.0,
       U_z)`, on the CPU, in the package's usual dimensionless units.
 
     Raises:
@@ -264,36 +321,41 @@ def advance_particle_two_way(
     current_position = float(initial_axial_position)
     current_network = network
     current_time = 0.0
-    states = [
-        ParticleState(
+    particle_state = ParticleState(
             position=torch.tensor([0.0, current_position]),
             velocity=torch.zeros(2),
             time=current_time,
         )
-    ]
-
+    particle_config = ParticleConfig(radius=object_radius)
+    states = [particle_state]
     for step in range(n_steps):
-        if not (obstacle_radius < current_position < domain.length - obstacle_radius):
+        if not (object_radius < current_position < domain.length - object_radius):
             raise RuntimeError(
                 f"Particle reached z={current_position!r} at step {step}, no longer strictly "
-                f"inside [obstacle_radius, domain.length - obstacle_radius] = "
-                f"[{obstacle_radius!r}, {domain.length - obstacle_radius!r}]; stopping before "
-                "the obstacle would straddle the inlet, outlet, or wall. Returning the states "
+                f"inside [object_radius, domain.length - object_radius] = "
+                f"[{object_radius!r}, {domain.length - object_radius!r}]; stopping before "
+                "the object would straddle the inlet, outlet, or wall. Returning the states "
                 "completed so far is not possible from inside this exception — catch it and use "
                 "a smaller time_step or fewer n_steps."
             )
-        obstacle = SphericalObstacle(axial_position=current_position, radius=obstacle_radius)
+        particle_state = ParticleState(
+            position=torch.tensor([0.0, current_position]),
+            velocity=torch.zeros(2),
+            time=current_time,
+        )
         applied_force = applied_force_fn(current_position)
-        if verbose:
+        if training_config.verbose:
             print(f"Step {step + 1}/{n_steps}: z={current_position:.5f}, "
                   f"applied_force_z={applied_force:.5f}")
 
         particle_velocity, current_network, _ = solve_force_balanced_velocity(
-            current_network, domain, obstacle, fluid_config, training_config,
+            current_network, domain, fluid_config,
+            particle_config=particle_config, particle_state=particle_state,
+            training_config=training_config,
             applied_force_z=applied_force, velocity_bracket=velocity_bracket,
-            n_obstacle_surface_points=n_obstacle_surface_points,
+            n_surface_points=n_object_surface_points,
             n_quadrature_points=n_quadrature_points, velocity_tolerance=velocity_tolerance,
-            refinement_config=refinement_config, verbose=verbose,
+            refinement_config=refinement_config,
         )
 
         current_position = current_position + particle_velocity * time_step

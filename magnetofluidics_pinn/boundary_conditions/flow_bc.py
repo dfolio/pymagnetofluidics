@@ -43,7 +43,7 @@ def inlet_velocity_condition(
     # Classical (Hagen-)Poiseuille profile for axisymmetric pipe flow: purely
     # axial, parabolic in r, maximal on the axis, and zero at the wall.
     radial_position = coordinates[:, 0:1]
-    axial_velocity = peak_velocity * (1.0 - (radial_position / domain.radius) ** 2)
+    axial_velocity = peak_velocity * (1.0 - (radial_position / domain.radius).square())
     radial_velocity = torch.zeros_like(axial_velocity)
     return torch.cat([radial_velocity, axial_velocity], dim=1)
 

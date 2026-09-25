@@ -44,42 +44,50 @@ from torch import nn
 
 from magnetofluidics_pinn.types import Domain
 
+import torch
+import torch.nn as nn
+from typing import Tuple
+
 
 class _HardWallConstrainedFlow(nn.Module):
-    """Wraps a raw `(u_r, u_z, p)` network to enforce axis and wall regularity.
-
-    Not part of the public API directly; constructed by
-    [`apply_hard_wall_constraint`][magnetofluidics_pinn.networks.constraints.apply_hard_wall_constraint].
+    r"""Wraps a raw `(u_r, u_z, p)` network to enforce axis and wall regularity.
+    
+    Applies exact physical boundary constraints for axisymmetric Phase 1 flow:
+    
+    - $u_r(0, z) = 0$, $u_r(R, z) = 0$
+    - $u_z(R, z) = 0$
+    - $p(0, L) = 0$ (gauge anchoring)
     """
 
-    def __init__(self, raw_network: nn.Module, radius: float) -> None:
+    def __init__(self, raw_network: nn.Module,  domain: Domain) -> None:
         super().__init__()
         self.raw_network = raw_network
-        self.radius = radius
-    
+        self.radius = domain.radius
+        self.length = domain.length
+        self.u_max = domain.u_max
+
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
         normalized_radius = coordinates[:, 0:1] / self.radius
         axial_coordinate = coordinates[:, 1:2]
         
-        squared_normalized_radius = normalized_radius ** 2
+        squared_normalized_radius = normalized_radius.square()
+        wall_vanishing_factor = 1.0 - squared_normalized_radius
         raw_output = self.raw_network(torch.cat([squared_normalized_radius, axial_coordinate], dim=1))
         
-        radial_shaping_factor = normalized_radius * (1.0 - squared_normalized_radius)
-        radial_velocity = radial_shaping_factor * raw_output[:, 0:1]
+        # 1. Radial velocity hard constraint: u_r(0,z) = 0 and u_r(R,z) = 0
+        radial_velocity = normalized_radius * wall_vanishing_factor * raw_output[:, 0:1]
         
-        # CHANGED: u_z(R, z) = 0 (tangential no-slip) was previously left
-        # to the soft wall-boundary loss in `training.trainer`. Reusing
-        # the (1 - (r/R)^2) wall-vanishing factor already computed above -
-        # even in r, so the axis regularity inherited from the (r/R)^2
-        # input reparametrization is preserved, and exactly zero at r=R -
-        # hard-enforces it structurally instead, for every input and every
-        # parameter value. Pressure is left untouched: it has no Dirichlet
-        # condition at the wall, only the axis regularity already implied
-        # by evenness in r.
-        wall_vanishing_factor = 1.0 - squared_normalized_radius
+        # 2. Axial velocity hard constraint: enforce exact wall no-slip u_z(R, z) = 0
+        # Incorporates base parabolic velocity profile + bounded network correction
         axial_velocity = wall_vanishing_factor * raw_output[:, 1:2]
-        
-        return torch.cat([radial_velocity, axial_velocity, raw_output[:, 2:3]], dim=1)
+        if self.u_max > 0.0:
+            axial_velocity += 2.0 * self.u_max * wall_vanishing_factor
+            
+        # 3. Pressure gauge fixing: Anchor pressure relative to outlet centerline p(0, L) = 0
+        ref_point = torch.tensor([[0.0, self.length]], device=coordinates.device, dtype=coordinates.dtype)
+        p_ref = self.raw_network(ref_point)[:, 2:3]
+        p = raw_output[:, 2:3] - p_ref
+        return torch.cat([radial_velocity, axial_velocity, p], dim=1)
 
 
 def apply_hard_wall_constraint(network: nn.Module, domain: Domain) -> nn.Module:
@@ -121,5 +129,5 @@ def apply_hard_wall_constraint(network: nn.Module, domain: Domain) -> nn.Module:
     """
     if domain.radius <= 0.0:
         raise ValueError(f"domain.radius must be strictly positive; got {domain.radius!r}.")
-    return _HardWallConstrainedFlow(network, domain.radius)
+    return _HardWallConstrainedFlow(network, domain)
 

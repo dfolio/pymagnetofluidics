@@ -12,7 +12,8 @@ import math
 import torch
 
 from magnetofluidics_pinn.device_utils import resolve_device
-from magnetofluidics_pinn.types import CollocationPoints, Domain, SphericalObstacle
+from magnetofluidics_pinn.config import ParticleConfig
+from magnetofluidics_pinn.types import CollocationPoints, Domain, ParticleState
 
 # Fraction of the channel radius kept clear around the symmetry axis
 # (r = 0) when drawing interior points, used whenever a caller does not
@@ -202,12 +203,13 @@ def sample_collocation_points(
     return CollocationPoints(interior=interior, boundary=boundary, initial=None)
  
  
-def sample_collocation_points_with_obstacle(
+def sample_collocation_points_with_particle(
     domain: Domain,
-    obstacle: SphericalObstacle,
+    particle_state: ParticleState,
+    particle_config: ParticleConfig,
     n_interior: int,
     n_boundary: int,
-    n_obstacle_surface: int,
+    n_surface_points: int,
     random_seed: int,
     axis_clearance_fraction: float | None = None,
     oversampling_factor: float = _DEFAULT_OVERSAMPLING_FACTOR,
@@ -277,8 +279,8 @@ def sample_collocation_points_with_obstacle(
       raise `oversampling_factor`, or draw a smaller `n_interior`, rather
       than silently training on fewer points than requested.
     """
-    if n_interior <= 0 or n_boundary <= 0 or n_obstacle_surface <= 0:
-        raise ValueError("n_interior, n_boundary, and n_obstacle_surface must be strictly positive.")
+    if n_interior <= 0 or n_boundary <= 0 or n_surface_points <= 0:
+        raise ValueError("n_interior, n_boundary, and n_surface_points must be strictly positive.")
     if domain.kind != "channel":
         raise ValueError(
             "sample_collocation_points_with_obstacle currently only supports "
@@ -291,13 +293,13 @@ def sample_collocation_points_with_obstacle(
             "axis_clearance_fraction must be None, or lie in [0.0, 1.0); "
             f"got {axis_clearance_fraction!r}."
         )
-    if obstacle.radius >= domain.radius:
+    if particle_config.radius >= domain.radius:
         raise ValueError(
-            f"obstacle.radius ({obstacle.radius!r}) must be strictly less than domain.radius "
+            f"obstacle.radius ({particle_config.radius!r}) must be strictly less than domain.radius "
             f"({domain.radius!r}); a sphere reaching the channel wall is not representable here."
         )
-    obstacle_z_min = obstacle.axial_position - obstacle.radius
-    obstacle_z_max = obstacle.axial_position + obstacle.radius
+    obstacle_z_min = particle_state.axial_position - particle_config.radius
+    obstacle_z_max = particle_state.axial_position + particle_config.radius
     if not (0.0 < obstacle_z_min and obstacle_z_max < domain.length):
         raise ValueError(
             "obstacle must fit strictly inside the channel's axial extent (0, domain.length); "
@@ -322,7 +324,8 @@ def sample_collocation_points_with_obstacle(
     candidate_r = torch.sqrt(r_min**2 + (domain.radius**2 - r_min**2) * xi)
     candidate_z = domain.length * torch.rand(n_candidates, 1, generator=generator, device=resolved_device)
  
-    outside_obstacle = (candidate_z - obstacle.axial_position) ** 2 + candidate_r**2 >= obstacle.radius**2
+    outside_obstacle = int((candidate_z - particle_state.axial_position) ** 2 + candidate_r**2 >=
+                         particle_config.radius**2)
     surviving_r = candidate_r[outside_obstacle]
     surviving_z = candidate_z[outside_obstacle]
     if surviving_r.shape[0] < n_interior:
@@ -366,13 +369,13 @@ def sample_collocation_points_with_obstacle(
     # the interior and vessel-boundary points) rather than a fixed grid,
     # consistent with this module's per-epoch resampling philosophy for
     # the Adam training phase.
-    theta = math.pi * torch.rand(n_obstacle_surface, 1, generator=generator, device=resolved_device)
+    theta = math.pi * torch.rand(n_surface_points, 1, generator=generator, device=resolved_device)
     obstacle_surface = torch.cat(
         [
-            obstacle.radius * torch.sin(theta),
-            obstacle.axial_position + obstacle.radius * torch.cos(theta),
+            particle_config.radius * torch.sin(theta),
+            particle_state.axial_position + particle_config.radius * torch.cos(theta),
         ],
         dim=1,
     )
  
-    return CollocationPoints(interior=interior, boundary=boundary, initial=None, obstacle_surface=obstacle_surface)
+    return CollocationPoints(interior=interior, boundary=boundary, initial=None, particle_surface=obstacle_surface)

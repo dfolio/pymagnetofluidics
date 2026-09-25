@@ -204,7 +204,18 @@ class VerificationThresholds:
       rescaled by a reference quantity, since the residual is already
       nondimensional by construction of
       [`scaling.compute_scales`][magnetofluidics_pinn.scaling.compute_scales].
-
+    - `conservation_of_mass_tolerance`: Bound on the conservation-of-mass
+      residual RMS, in the package's own dimensionless residual units.
+    - `noslip_tolerance`: Bound on the no-slip residual RMS, in the package's
+       own dimensionless residual units.
+    - `two_way_residual_tolerance`: Bound on the two-way residual RMS, in the
+       package's own dimensionless residual units.
+    - `manufactured_force_tolerance`: Bound on the manufactured-force residual
+       RMS, in the package's own dimensionless residual units.
+    - `quadrature_convergence_tolerance`: Bound on the quadrature convergence
+       residual RMS, in the package's own dimensionless residual units.
+    - `faxen_consistency_tolerance`: Bound on the Faxén consistency residual
+      RMS, in the package's own dimensionless residual units.
     Raises:
     - `ValueError`: If any field is not finite and strictly positive.
     """
@@ -220,6 +231,10 @@ class VerificationThresholds:
     held_out_residual_tolerance: float
     conservation_of_mass_tolerance: float
     noslip_tolerance: float
+    two_way_residual_tolerance: float      # NEW
+    manufactured_force_tolerance: float    # NEW
+    quadrature_convergence_tolerance: float  # NEW
+    faxen_consistency_tolerance: float     # NEW
 
     def __post_init__(self) -> None:
         for field in fields(self):
@@ -243,6 +258,13 @@ def default_thresholds(
     held_out_residual_tolerance: float = 1.0e-2,
     conservation_of_mass_tolerance: float = 5.0e-2,
     noslip_tolerance: float = 0.15,
+    two_way_residual_tolerance: float = 2.0e-1,       # NEW — loose on purpose: the obstacle problem
+                                                           # competes nine loss terms for a much smaller
+                                                           # budget than the baseline Phase-1 recipe.
+    manufactured_force_tolerance: float = 1.0e-4,     # NEW — matches the old MANUFACTURED_TOLERANCE
+    quadrature_convergence_tolerance: float = 2.0e-2, # NEW — matches the old QUADRATURE_TOLERANCE
+    faxen_consistency_tolerance: float = 0.15,        # NEW — matches the old FAXEN_TOLERANCE
+
 ) -> VerificationThresholds:
     r"""Build a `VerificationThresholds` instance from reference scales and calibratable factors.
 
@@ -276,6 +298,14 @@ def default_thresholds(
       mass residual, in the package's own dimensionless residual units.
     - `noslip_tolerance`: Absolute bound on the no-slip residual, in the
       package's own dimensionless residual units.
+    - `two_way_residual_tolerance`: Absolute bound on the two-way residual, in the
+      package's own dimensionless residual units.
+    - `manufactured_force_tolerance`: Absolute bound on the manufactured-force residual, in the
+      package's own dimensionless residual units.
+    - `quadrature_convergence_tolerance`: Absolute bound on the quadrature convergence residual, in the
+      package's own dimensionless residual units.
+    - `faxen_consistency_tolerance`: Absolute bound on the Faxén consistency residual, in the
+      package's own dimensionless residual units.
 
     Returns:
     - A populated
@@ -302,5 +332,9 @@ def default_thresholds(
         pressure_gradient_relative_tolerance=pressure_gradient_relative_tolerance,
         held_out_residual_tolerance=held_out_residual_tolerance,
         conservation_of_mass_tolerance=conservation_of_mass_tolerance,
-        noslip_tolerance=noslip_tolerance
+        noslip_tolerance=noslip_tolerance,
+        two_way_residual_tolerance=two_way_residual_tolerance,        # NEW
+        manufactured_force_tolerance=manufactured_force_tolerance,    # NEW
+        quadrature_convergence_tolerance=quadrature_convergence_tolerance,  # NEW
+        faxen_consistency_tolerance=faxen_consistency_tolerance,      # NEW
     )

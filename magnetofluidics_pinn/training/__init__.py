@@ -12,10 +12,6 @@ from magnetofluidics_pinn.training.trainer import (
     LossHistory as LossHistory,
     TrainingHistory as TrainingHistory,
     LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES,
-    train_around_obstacle as train_around_obstacle,
-    ObstacleLossHistory as ObstacleLossHistory,
-    ObstacleTrainingHistory as ObstacleTrainingHistory,
-    OBSTACLE_LOSS_COMPONENT_NAMES as OBSTACLE_LOSS_COMPONENT_NAMES,
 )
 
 __all__ = [
@@ -24,8 +20,4 @@ __all__ = [
     "LossHistory",
     "TrainingHistory",
     "LOSS_COMPONENT_NAMES",
-    "train_around_obstacle",
-    "ObstacleLossHistory",
-    "ObstacleTrainingHistory",
-    "OBSTACLE_LOSS_COMPONENT_NAMES",
 ]
