@@ -8,7 +8,7 @@ author:
 
 bibliography: ../docs/references.bib
 
-keep-ipynb: true
+keep-ipynb: false
 format:
   html:
     toc: true
