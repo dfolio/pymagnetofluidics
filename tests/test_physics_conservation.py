@@ -61,7 +61,9 @@ class TestAxialFlowRate:
 
     def test_differentiable_through_network_parameters(self) -> None:
         """The flow rate must be usable inside a training loss (real gradients, no NaNs)."""
-        network = mfp.build_mlp(2, 3, (8, 8), device="cpu")
+        # FIXED: build_mlp now takes an explicit training_config instead of device=.
+        training_config = mfp.TrainingConfig(device="cpu")
+        network = mfp.build_mlp(2, 3, (8, 8), training_config=training_config)
         axial_positions = torch.linspace(0.0, 1.0, 5)
         loss = torch.mean((mfp.axial_flow_rate(network, 1.0, axial_positions, 32) - 1.0) ** 2)
         loss.backward()

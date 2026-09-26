@@ -19,8 +19,8 @@ from typing import Literal
 
 import torch
 
-from magnetofluidics_pinn.types import ParticleState
 from magnetofluidics_pinn.device_utils import resolve_device
+from magnetofluidics_pinn.types import ParticleState
 
 # Numerical tolerance for "is this vector a unit vector" checks; loose
 # enough to tolerate float rounding, tight enough to catch a genuinely
@@ -46,10 +46,22 @@ _DEFAULT_REFERENCE_VELOCITY = 1.0e-3  # meter/second
 DEFAULT_BOUNDARY_LOSS_WEIGHT: float = 10.0
 
 
-def _check_if_finite_positive(value: float, name: str="") -> None:
+def _check_if_finite_positive_strictly(value: float, name: str = "") -> None:
     """Raise ValueError if `value` is not finite and strictly positive."""
     if not math.isfinite(value) or value <= 0.0:
-        raise ValueError(f"{name}  must be finite and strictly positive; got {value!r}.")
+        raise ValueError(f"{name} must be finite and strictly positive; got {value!r}.")
+
+
+def _check_if_finite_positive(value: float, name: str = "") -> None:
+    """Raise ValueError if `value` is not finite and strictly positive."""
+    if not math.isfinite(value) or value < 0.0:
+        raise ValueError(f"{name} must be finite and non-negative; got {value!r}.")
+
+
+def _check_if_positive(value: float, name: str = "") -> None:
+    """Raise ValueError if `value` is not finite and strictly positive."""
+    if value < 0.0:
+        raise ValueError(f"{name} must be positive; got {value!r}.")
 
 
 @dataclass(frozen=True)
@@ -91,7 +103,7 @@ class FluidConfig:
     def __post_init__(self) -> None:
         for field_name in ("dynamic_viscosity", "density"):
             value = getattr(self, field_name)
-            _check_if_finite_positive(value, field_name)
+            _check_if_finite_positive_strictly(value, field_name)
 
 
 @dataclass(frozen=True)
@@ -123,14 +135,14 @@ class DomainConfig:
     
     kind: Literal["channel", "bifurcation"] = "channel"
     length: float = _DEFAULT_REFERENCE_LENGTH * 8.0  # m
-    radius: float = _DEFAULT_REFERENCE_LENGTH        # m
+    radius: float = _DEFAULT_REFERENCE_LENGTH  # m
     u_max: float = _DEFAULT_REFERENCE_VELOCITY  # m/s
     branch_angle: float | None = None
     fluid: FluidConfig = FluidConfig()  # Fluid embedded by default
     
     def __post_init__(self) -> None:
-        _check_if_finite_positive(self.length, "length")
-        _check_if_finite_positive(self.radius, "radius")
+        _check_if_finite_positive_strictly(self.length, "length")
+        _check_if_finite_positive_strictly(self.radius, "radius")
         # _check_if_finite_positive(self.u_max, "u_max")
         if self.kind == "bifurcation":
             if self.branch_angle is None or not math.isfinite(self.branch_angle):
@@ -140,7 +152,7 @@ class DomainConfig:
                 "branch_angle is only meaningful when kind='bifurcation'; "
                 f"got kind={self.kind!r} with branch_angle={self.branch_angle!r}."
             )
-        
+    
     @property
     def reference_length(self) -> float:
         """Characteristic length scale, in meter, used to nondimensionalize every spatial coordinate."""
@@ -151,7 +163,7 @@ class DomainConfig:
         """Characteristic velocity scale, in meter/second, used to nondimensionalize
         velocity and (with reference_length) time and pressure."""
         return self.u_max
-
+    
     @property
     def reynolds(self) -> float:
         r"""Reynolds number of the flow, $Re = \rho U_c L_c / \mu$.
@@ -271,8 +283,8 @@ class ParticleConfig:
     """
     
     kind: Literal["spherical", "swarms", "cylinder", "spheroid"] = "spherical"
-    radius: float = 0.0       # [m]
-    length: float = 0.0       # [m]
+    radius: float = 0.0  # [m]
+    length: float = 0.0  # [m]
     aspect_ratio: float = 1.0
     number: int = 1
     magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)  # [A m^2]
@@ -280,6 +292,10 @@ class ParticleConfig:
     
     def __post_init__(self) -> None:
         _check_if_finite_positive(self.radius, "radius")
+        _check_if_finite_positive(self.length, "length")
+        _check_if_finite_positive_strictly(self.aspect_ratio, "aspect_ratio")
+        _check_if_positive(self.number, "number")
+        _check_if_finite_positive(self.magnetic_ratio, "magnetic_ratio")
         if not all(math.isfinite(component) for component in self.magnetic_moment):
             raise ValueError(f"magnetic_moment components must be finite; got {self.magnetic_moment!r}.")
         if math.hypot(*self.magnetic_moment) <= 0.0:
@@ -290,7 +306,7 @@ class ParticleConfig:
             raise ValueError(f"length of cylinder must be positive; got {self.length!r}.")
         if self.kind == "spheroid" and not (0 < self.aspect_ratio <= 1):
             raise ValueError(f"aspect_ratio of spheroid must be between 0 and 1; got {self.aspect_ratio!r}.")
-        
+    
     @property
     def max_surface_extension(self) -> float:
         """Returns the maximum radial extension from the centre of mass."""
@@ -299,7 +315,7 @@ class ParticleConfig:
         return self.radius
     
     @property
-    def volume(self) -> float :
+    def volume(self) -> float:
         """Returns the particle volume in cubic meters."""
         if self.kind == "spherical":
             return (4.0 / 3.0) * math.pi * self.radius ** 3
@@ -310,19 +326,19 @@ class ParticleConfig:
         elif self.kind == "swarms":
             return self.number * (4.0 / 3.0) * math.pi * self.radius ** 3
         raise ValueError(f"Unknown kind: {self.kind}")
-
+    
     @property
-    def magnetic_volume(self) -> float :
+    def magnetic_volume(self) -> float:
         """"Returns the magnetic volume"""
-        return self.volume*self.magnetic_ratio
-        
+        return self.volume * self.magnetic_ratio
+    
     @property
     def magnetization(self) -> tuple[float | int, ...]:
         """Returns the magnetization vector in A/m."""
         return tuple(m / self.magnetic_volume for m in self.magnetic_moment)
     
     def with_magnetization(self, magnetization: tuple[float | int, ...]) -> ParticleConfig:
-        """Pure functional updater replacing unsafe object.__setattr__ mutations."""
+        """Pure functional updater replacing unsafe particle.__setattr__ mutations."""
         mag_vol = self.volume * self.magnetic_ratio
         new_moment = tuple(m * self.magnetic_volume for m in magnetization)
         return replace(self, magnetic_moment=new_moment)
@@ -330,81 +346,85 @@ class ParticleConfig:
 
 @dataclass(frozen=True)
 class TwoWayCouplingConfig:
-    r"""Two-way-coupling parameters for training the flow around a fixed (spherical) object.
+    r"""Two-way-coupling parameters for training the flow around a fixed (spherical) particle.
 
-    NEW. Passing an `ObjectConfig` to
+    NEW. Passing an `TwoWayCouplingConfig` to
     [`training.trainer.train`][magnetofluidics_pinn.training.trainer.train]
-    switches it from the ordinary (obstacle-free) Stokes/Navier-Stokes
+    switches it from the ordinary (particle-free) Stokes/Navier-Stokes
     training problem to the two-way-coupled problem solved around an
-    embedded [`SphericalObject`][magnetofluidics_pinn.types.SphericalObject]:
-    interior points are drawn by rejection sampling around the excluded
-    volume (see
-    [`sampling.collocation.sample_collocation_points_with_obstacle`]
-    [magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]),
-    and an additional loss term enforces the object's own rigid-body
+    embedded, rigidly-translating spherical particle (see
+    [`ParticleConfig`][magnetofluidics_pinn.config.ParticleConfig] and
+    [`ParticleState`][magnetofluidics_pinn.types.ParticleState]): interior
+    points are drawn by rejection sampling around the excluded volume (see
+    [`sampling.collocation.sample_collocation_points_with_particle`]
+    [magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_particle]),
+    and an additional loss term enforces the particle's own rigid-body
     velocity on its surface (see
     [`boundary_conditions.flow_bc.rigid_body_velocity_condition`]
     [magnetofluidics_pinn.boundary_conditions.flow_bc.rigid_body_velocity_condition]).
     `train` itself stays a single entry point either way; this dataclass is
     what makes the two problems reuse it instead of needing a separate
-    `train_around_obstacle` function.
+    `train_around_particle` function.
 
     Kept as its own dataclass rather than folded into
     [`TrainingConfig`][magnetofluidics_pinn.config.TrainingConfig], since
-    `object_velocity` in particular is expected to vary from call to call
+    `particle_velocity` in particular is expected to vary from call to call
     within a single outer search (see
     [`trajectory.two_way_coupling.solve_force_balanced_velocity`]
     [magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity],
-    which retrains at a new candidate `object_velocity` on every
+    which retrains at a new candidate `particle_velocity` on every
     bracketing step): a small, per-call dataclass keeps that variation
-    local, instead of requiring a fresh `TrainingConfig` — an object
+    local, instead of requiring a fresh `TrainingConfig` — an particle
     otherwise meant to be reused unchanged across an entire optimization
     run — for every candidate velocity.
 
     Args:
-    - `object`: The embedded sphere; must fit strictly inside the
+    - `particle_config`: The embedded sphere's intrinsic properties
+      (radius, magnetic moment, ...). Must fit strictly inside the
       training domain. Checked by
-      [`sampling.collocation.sample_collocation_points_with_obstacle`]
-      [magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_obstacle]
+      [`sampling.collocation.sample_collocation_points_with_particle`]
+      [magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_particle]
       at training time, not here, since this dataclass has no `Domain` of
-      its own to check `obstacle` against.
-    - `object_velocity`: The sphere's own axial translational velocity,
+      its own to check `particle` against.
+    - `particle_velocity`: The sphere's own axial translational velocity,
       in the lab frame — the quantity
       [`trajectory.two_way_coupling.solve_force_balanced_velocity`]
       [magnetofluidics_pinn.trajectory.two_way_coupling.solve_force_balanced_velocity]
-      searches over. `0.0` recovers a *fixed* (anchored) object.
-    - `n_object_surface_points`: Number of collocation points drawn on
-      the object's surface each Adam epoch (and once, fixed, for the
+      searches over. `0.0` recovers a *fixed* (anchored) particle.
+    - `n_surface_points`: Number of collocation points drawn on
+      the particle's surface each Adam epoch (and once, fixed, for the
       L-BFGS phase).
-    - `object_loss_weight`: Weight for the object-surface velocity
+    - `particle_loss_weight`: Weight for the particle-surface velocity
       term; defaults to
       [`DEFAULT_BOUNDARY_LOSS_WEIGHT`][magnetofluidics_pinn.config.DEFAULT_BOUNDARY_LOSS_WEIGHT],
       the same weight every other Dirichlet velocity boundary (wall,
-      inlet) already uses — physically, the object surface is just
+      inlet) already uses — physically, the particle surface is just
       another such boundary.
 
     Raises:
-    - `ValueError`: If `object_velocity` is not finite, if
-      `n_object_surface_points` is not strictly positive, or if
-      `object_loss_weight` is not finite and non-negative.
+    - `ValueError`: If either component of `particle_velocity` is not
+      finite, if `n_surface_points` is not strictly positive, or if
++     `particle_loss_weight` is not finite and non-negative.
     """
     
     particle_config: ParticleConfig
-    particle_velocity: tuple[float, float] = (0.0, 0.0) # Lab frame velocity
-    particle_position: tuple[float, float] = (0.0, 0.0) # Instantaneous position
-    time: float = 0.0 # Current time
+    particle_velocity: tuple[float, float] = (0.0, 0.0)  # Lab frame velocity
+    particle_position: tuple[float, float] = (0.0, 0.0)  # Instantaneous position
+    time: float = 0.0  # Current time
     n_surface_points: int = 200
-    object_loss_weight: float = DEFAULT_BOUNDARY_LOSS_WEIGHT
+    particle_loss_weight: float = DEFAULT_BOUNDARY_LOSS_WEIGHT
     
     def __post_init__(self) -> None:
-        if math.hypot(*self.particle_velocity) <= 0.0:
-            raise ValueError("particle_velocity must be non-zero.")
+        if not all(math.isfinite(component) for component in self.particle_velocity):
+            raise ValueError(f"particle_velocity components must be finite; "
+                             f"got {self.particle_velocity!r}.")
         if self.n_surface_points <= 0:
             raise ValueError(
                 "n_surface_points must be strictly positive; "
                 f"got {self.n_surface_points!r}."
             )
-        _check_if_finite_positive(self.object_loss_weight, "object_loss_weight")
+        _check_if_finite_positive_strictly(self.particle_loss_weight,
+                                           "particle_loss_weight")
     
     @property
     def particle_velocity_magnitude(self) -> float:
@@ -423,12 +443,13 @@ class TwoWayCouplingConfig:
     
     @property
     def particle_state(self):
-        """Returns a ParticleState object representing the particle's current state."""
+        """Returns a ParticleState particle representing the particle's current state."""
         return ParticleState(
             position=torch.tensor(self.particle_position),
             velocity=torch.tensor(self.particle_velocity),
             time=self.time
         )
+
 
 @dataclass(frozen=True)
 class TrainingConfig:
@@ -589,12 +610,12 @@ class TrainingConfig:
             raise ValueError(
                 f"device type must be 'cuda' or 'cpu', got '{self.device}'."
             )
-        
+    
     @property
     def torch_device(self) -> torch.device:
         """Lazy device resolution without mutating frozen dataclass fields."""
         return resolve_device(self.device)
-
+    
     @property
     def torch_dtype(self) -> torch.dtype:
         return torch.float32 if self.dtype == "float32" else torch.float64

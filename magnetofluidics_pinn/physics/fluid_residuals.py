@@ -60,7 +60,7 @@ from typing import Callable, Literal, NamedTuple
 import torch
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
-from magnetofluidics_pinn.config import FluidConfig
+from magnetofluidics_pinn.config import FluidConfig, DomainConfig
 
 # The two supported interior-residual singularity treatments; shared between
 # `stokes_residual` and `navier_stokes_residual` so both validate and
@@ -354,7 +354,7 @@ def _stokes_momentum_residuals(
 def stokes_residual(
     network: Callable[[torch.Tensor], torch.Tensor],
     coordinates: torch.Tensor,
-    fluid_config: FluidConfig,
+    domain_config: DomainConfig,
     residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible Stokes-flow residual.
@@ -369,7 +369,7 @@ def stokes_residual(
       pressure and the preceding columns being velocity components.
     - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
       gradients, sampled inside the domain.
-    - `fluid_config`: Fluid configuration; must have `regime == "stokes"`.
+    - `domain_config`: Domain configuration; must have `regime == "stokes"`.
     - `residual_form`: NEW. `"standard"` (default) evaluates the equations
       as classically written, and requires `r > 0` everywhere (unchanged
       from every prior release). `"r_weighted"` evaluates the same
@@ -386,7 +386,7 @@ def stokes_residual(
       $r^2$ ($r$-momentum).
  
     Raises:
-    - `ValueError`: If `fluid_config.regime` is not `"stokes"`, if
+    - `ValueError`: If `domain_config.fluid.regime` is not `"stokes"`, if
       `residual_form` is not `"standard"` or `"r_weighted"`, if
       `coordinates` does not have shape `(n_points, 2)` (the axisymmetric
       `(r, z)` convention this function implements), if `coordinates` does
@@ -395,9 +395,9 @@ def stokes_residual(
       where that form's residual is singular), or if `network`'s output does
       not have exactly 3 columns (`u_r`, `u_z`, `p`).
     """
-    if fluid_config.regime != "stokes":
+    if domain_config.fluid.regime != "stokes":
         raise ValueError(
-            f"Expected a Stokes fluid configuration, got regime={fluid_config.regime!r}."
+            f"Expected a Stokes fluid configuration, got regime={domain_config.fluid.regime!r}."
         )
     radius = _validate_inputs(
         coordinates=coordinates,
@@ -423,7 +423,7 @@ def stokes_residual(
 def navier_stokes_residual(
     network: Callable[[torch.Tensor], torch.Tensor],
     coordinates: torch.Tensor,
-    fluid_config: FluidConfig,
+    domain_config: DomainConfig,
     residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible, unsteady Navier-Stokes residual.
@@ -464,8 +464,8 @@ def navier_stokes_residual(
       time column, appended after the steady `(r, z)` pair
       [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
       uses).
-    - `fluid_config`: Fluid configuration; must have
-      `regime == "navier_stokes"`.
+    - `domain_config`: Domain configuration; must have
+      `fluid.regime == "navier_stokes"`.
     - `residual_form`: NEW. Same meaning as
       [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]'s
       `residual_form`: `"standard"` (default) requires `r > 0`;
@@ -480,7 +480,7 @@ def navier_stokes_residual(
       returns them.
 
     Raises:
-    - `ValueError`: If `fluid_config.regime` is not `"navier_stokes"`, if
+    - `ValueError`: If `domain_config.fluid.regime` is not `"navier_stokes"`, if
       `residual_form` is not `"standard"` or `"r_weighted"`, if
       `coordinates` does not have shape `(n_points, 3)` (the axisymmetric
       `(r, z, t)` convention this function implements), if `coordinates`
@@ -488,10 +488,10 @@ def navier_stokes_residual(
       under `residual_form="standard"`, on or across the symmetry axis),
       or if `network`'s output does not have exactly 3 columns.
     """
-    if fluid_config.regime != "navier_stokes":
+    if domain_config.fluid.regime != "navier_stokes":
         raise ValueError(
             "Expected a Navier-Stokes fluid configuration, "
-            f"got regime={fluid_config.regime!r}."
+            f"got regime={domain_config.fluid.regime!r}."
         )
     radius = _validate_inputs(
         coordinates=coordinates,
@@ -519,7 +519,7 @@ def navier_stokes_residual(
     
     stokes_mom_r, stokes_mom_z = _stokes_momentum_residuals(derivs, radius, residual_form)
     
-    reynolds = fluid_config.reynolds
+    reynolds = domain_config.reynolds
     if residual_form == "standard":
         momentum_r = reynolds * material_derivative_r - stokes_mom_r
         momentum_z = reynolds * material_derivative_z - stokes_mom_z

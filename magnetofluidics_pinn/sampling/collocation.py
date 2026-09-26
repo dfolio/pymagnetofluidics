@@ -11,8 +11,8 @@ import math
 
 import torch
 
-from magnetofluidics_pinn.device_utils import resolve_device
 from magnetofluidics_pinn.config import ParticleConfig
+from magnetofluidics_pinn.device_utils import resolve_device
 from magnetofluidics_pinn.types import CollocationPoints, Domain, ParticleState
 
 # Fraction of the channel radius kept clear around the symmetry axis
@@ -76,13 +76,13 @@ def boundary_face_sizes(n_boundary: int) -> tuple[int, int, int]:
 
 
 def sample_collocation_points(
-    domain: Domain,
-    n_interior: int,
-    n_boundary: int,
-    random_seed: int,
-    n_initial: int | None = None,
-    axis_clearance_fraction: float | None = None,  # NEW
-    device: str | torch.device | None = None,
+        domain: Domain,
+        n_interior: int,
+        n_boundary: int,
+        random_seed: int,
+        n_initial: int | None = None,
+        axis_clearance_fraction: float | None = None,  # NEW
+        device: str | torch.device | None = None,
 ) -> CollocationPoints:
     """Sample interior, boundary, and (optionally) initial points.
 
@@ -158,7 +158,7 @@ def sample_collocation_points(
     )
     resolved_device = resolve_device(device)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
-
+    
     # Interior points: uniform in z, but *volume*-uniform in r rather than
     # linearly uniform. Revolving an annulus at radius r around the axis
     # gives it measure proportional to r dr, so drawing r linearly from
@@ -171,12 +171,12 @@ def sample_collocation_points(
     # r = sqrt(r_min^2 + (R^2 - r_min^2) * xi), xi ~ Uniform(0, 1).
     r_min = domain.radius * resolved_axis_clearance_fraction  # CHANGED: was the module constant directly.
     xi = torch.rand(n_interior, 1, generator=generator, device=resolved_device)
-    interior_r = torch.sqrt(r_min**2 + (domain.radius**2 - r_min**2) * xi)
+    interior_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi)
     interior_z = domain.length * torch.rand(n_interior, 1, generator=generator, device=resolved_device)
     interior = torch.cat([interior_r, interior_z], dim=1)
-
+    
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
-
+    
     wall_points = torch.cat(
         [
             torch.full((n_wall, 1), domain.radius, device=resolved_device),
@@ -199,21 +199,21 @@ def sample_collocation_points(
         dim=1,
     )
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
-
+    
     return CollocationPoints(interior=interior, boundary=boundary, initial=None)
- 
- 
+
+
 def sample_collocation_points_with_particle(
-    domain: Domain,
-    particle_state: ParticleState,
-    particle_config: ParticleConfig,
-    n_interior: int,
-    n_boundary: int,
-    n_surface_points: int,
-    random_seed: int,
-    axis_clearance_fraction: float | None = None,
-    oversampling_factor: float = _DEFAULT_OVERSAMPLING_FACTOR,
-    device: str | torch.device | None = None,
+        domain: Domain,
+        particle_state: ParticleState,
+        particle_config: ParticleConfig,
+        n_interior: int,
+        n_boundary: int,
+        n_surface_points: int,
+        random_seed: int,
+        axis_clearance_fraction: float | None = None,
+        oversampling_factor: float = _DEFAULT_OVERSAMPLING_FACTOR,
+        device: str | torch.device | None = None,
 ) -> CollocationPoints:
     r"""Sample interior, boundary, and obstacle-surface points around an embedded sphere.
  
@@ -306,13 +306,13 @@ def sample_collocation_points_with_particle(
             f"got axial span [{obstacle_z_min!r}, {obstacle_z_max!r}] against domain.length="
             f"{domain.length!r}."
         )
- 
+    
     resolved_axis_clearance_fraction = (
         _AXIS_CLEARANCE_FRACTION if axis_clearance_fraction is None else axis_clearance_fraction
     )
     resolved_device = resolve_device(device)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
- 
+    
     # Interior points, by rejection sampling: draw candidates from the same
     # volume-correct (r dr) distribution `sample_collocation_points` uses,
     # then discard any candidate whose (z, r) falls inside the obstacle
@@ -321,11 +321,10 @@ def sample_collocation_points_with_particle(
     n_candidates = math.ceil(oversampling_factor * n_interior)
     r_min = domain.radius * resolved_axis_clearance_fraction
     xi = torch.rand(n_candidates, 1, generator=generator, device=resolved_device)
-    candidate_r = torch.sqrt(r_min**2 + (domain.radius**2 - r_min**2) * xi)
+    candidate_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi)
     candidate_z = domain.length * torch.rand(n_candidates, 1, generator=generator, device=resolved_device)
- 
-    outside_obstacle = int((candidate_z - particle_state.axial_position) ** 2 + candidate_r**2 >=
-                         particle_config.radius**2)
+    
+    outside_obstacle = (candidate_z - particle_state.axial_position) ** 2 + candidate_r ** 2 >= particle_config.radius ** 2
     surviving_r = candidate_r[outside_obstacle]
     surviving_z = candidate_z[outside_obstacle]
     if surviving_r.shape[0] < n_interior:
@@ -337,7 +336,7 @@ def sample_collocation_points_with_particle(
             "points, rather than silently training on an under-sized batch."
         )
     interior = torch.stack([surviving_r[:n_interior], surviving_z[:n_interior]], dim=1)
- 
+    
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
     wall_points = torch.cat(
         [
@@ -361,7 +360,7 @@ def sample_collocation_points_with_particle(
         dim=1,
     )
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
- 
+    
     # Obstacle surface: uniform in the meridian polar angle theta in [0,
     # pi], matching the parametrization
     # `physics.hydrodynamic_drag.surface_traction_force` integrates over
@@ -377,5 +376,5 @@ def sample_collocation_points_with_particle(
         ],
         dim=1,
     )
- 
+    
     return CollocationPoints(interior=interior, boundary=boundary, initial=None, particle_surface=obstacle_surface)

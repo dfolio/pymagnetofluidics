@@ -26,21 +26,21 @@ penalty discouraging a negative predicted axial velocity
 constraint (`.conservation_loss_weight`, see `physics.conservation`)
 [@hu2025pecann; @sigalingging2026massconserving].
 
-**CHANGED (in v0.1.6)— single `train()` entry point for both the obstacle-free and
+**CHANGED (in v0.1.6)— single `train()` entry point for both the particle-free and
 two-way-coupled problems.** This module previously exposed two, largely
-parallel, public functions: `train()` for the ordinary (obstacle-free)
-Stokes/Navier-Stokes problem, and `train_around_obstacle()` for the
+parallel, public functions: `train()` for the ordinary (particle-free)
+Stokes/Navier-Stokes problem, and `train_around_particle()` for the
 two-way-coupled problem solved around an embedded
-[`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle]. The
+[`SphericalParticle`][magnetofluidics_pinn.types.SphericalParticle]. The
 two entry points shared essentially everything — batch construction, loss
 weighting, the Adam/L-BFGS phase structure, history bookkeeping — and
 differed only in which collocation sampler was called and whether one
-extra (obstacle-surface) loss term was included, which is exactly the
+extra (particle-surface) loss term was included, which is exactly the
 condition an optional argument is meant to express rather than a second
 function. `train()` now accepts an optional
-[`ObstacleConfig`][magnetofluidics_pinn.config.ObstacleConfig]: omitted (the
+[`CouplingConfig`][magnetofluidics_pinn.config.CouplingConfig]: omitted (the
 default), it reproduces every previous `train()` call's behavior exactly;
-supplied, it reproduces every previous `train_around_obstacle()` call's
+supplied, it reproduces every previous `train_around_particle()` call's
 behavior exactly, without a second, independently-maintained copy of the
 training loop. `verbose` and `log_every` move onto
 [`TrainingConfig`][magnetofluidics_pinn.config.TrainingConfig] for the same
@@ -65,14 +65,9 @@ from magnetofluidics_pinn.boundary_conditions.flow_bc import (
     outlet_pressure_condition,
     rigid_body_velocity_condition,
 )
-from magnetofluidics_pinn.config import (
-    DEFAULT_BOUNDARY_LOSS_WEIGHT,  # NEW — promoted from this module's own _BOUNDARY_LOSS_WEIGHT; see config.py.
-    FluidConfig,
-    MagneticFieldConfig,
-    ParticleConfig,
-    TwoWayCouplingConfig,  # NEW
-    TrainingConfig,
-)
+from magnetofluidics_pinn.config import (DEFAULT_BOUNDARY_LOSS_WEIGHT, FluidConfig, MagneticFieldConfig, ParticleConfig,
+                                         TrainingConfig,
+                                         TwoWayCouplingConfig)  # NEW — promoted from this module's own _BOUNDARY_LOSS_WEIGHT; see config.py.; NEW
 from magnetofluidics_pinn.device_utils import resolve_device
 from magnetofluidics_pinn.physics.conservation import axial_flow_rate, poiseuille_reference_flow_rate
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
@@ -112,27 +107,27 @@ LOSS_COMPONENT_NAMES: tuple[str, ...] = (
 )
 
 
-def _component_names(obstacle_config: TwoWayCouplingConfig | None) -> tuple[str, ...]:
+def _component_names(coupling_config: TwoWayCouplingConfig | None) -> tuple[str, ...]:
     """Full ordered set of scalar loss-component names for one `train()` call.
 
-    NEW. Single point of truth for the one difference the optional
-    `obstacle` term makes to every loss-tracking container in this module
-    (`_LossComponents`, `LossHistory`, and every accumulator built from
-    them): `LOSS_COMPONENT_NAMES` plus `"obstacle"`, appended last, when
-    `obstacle_config` is not `None`; `LOSS_COMPONENT_NAMES` unchanged
+    Single point of truth for the one difference the optional
+    two-way-coupling term makes to every loss-tracking container in this
+    module (`_LossComponents`, `LossHistory`, and every accumulator built
+    from them): `LOSS_COMPONENT_NAMES` plus `"particle"`, appended last,
+    when `coupling_config` is not `None`; `LOSS_COMPONENT_NAMES` unchanged
     otherwise. Every other function in this module derives its component
     set from this one instead of re-deriving the same conditional
     independently.
 
     Args:
-    - `obstacle_config`: The `ObstacleConfig` passed to `train()` for this
-      call, or `None` for the obstacle-free problem.
+    - `coupling_config`: The `TwoWayCouplingConfig` passed to `train()` for this
+      call, or `None` for the uncoupled problem.
 
     Returns:
-    - `LOSS_COMPONENT_NAMES`, with `"obstacle"` appended when
-      `obstacle_config is not None`.
+    - `LOSS_COMPONENT_NAMES`, with `"particle"` appended when
+      `coupling_config is not None`.
     """
-    return LOSS_COMPONENT_NAMES + (("obstacle",) if obstacle_config is not None else ())
+    return LOSS_COMPONENT_NAMES + (("particle",) if coupling_config is not None else ())
 
 
 def _stokes_residual_losses(
@@ -250,8 +245,8 @@ def _pressure_boundary_loss(
     """Mean-squared error between predicted and target boundary pressure."""
     predicted_pressure = network(coordinates)[:, 2:3]
     return torch.mean((predicted_pressure - target_pressure).square())
- 
- 
+
+
 def _particle_conservation_loss(
         network: nn.Module,
         domain: Domain,
@@ -302,7 +297,7 @@ def _particle_conservation_loss(
         particle_state.axial_position + particle_config.radius, domain.length, n_downstream + 2, device=device
     )[1:-1]
     axial_positions = torch.cat([upstream_positions, downstream_positions])
- 
+    
     predicted_flow_rate = axial_flow_rate(network, domain.radius, axial_positions, n_quadrature_points)
     reference_flow_rate = poiseuille_reference_flow_rate(domain.radius, peak_velocity)
     return torch.mean((predicted_flow_rate - reference_flow_rate).square())
@@ -349,21 +344,6 @@ def _build_training_batch(
         device: torch.device,
 ) -> _TrainingBatch:
     """Sample and label one interior/boundary batch, ready for loss evaluation.
-
-    
-    CHANGED. Now also the two-way-coupled counterpart of the former
-    `_build_obstacle_training_batch`: when `obstacle_config` is not
-    `None`, sampling routes through
-    [`sample_collocation_points_with_particle`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points_with_particle]
-    instead of
-    [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points],
-    and the obstacle-surface points are additionally labelled with the
-    particle's own rigid-body velocity via
-    [`rigid_body_velocity_condition`][magnetofluidics_pinn.boundary_conditions.flow_bc.rigid_body_velocity_condition].
-    The radial component of that velocity is always `0.0`: a
-    `SphericalObstacle` is only representable in this axisymmetric package
-    while centered on the axis, so its only translational degree of
-    freedom is axial.
 
     Args:
     - `domain`: Vessel geometry to sample from; must already be
@@ -462,9 +442,7 @@ class _LossComponents:
       from its analytic reference.
     - `total`: The weighted sum of the eight terms above, via
       [`compose_loss`][magnetofluidics_pinn.training.losses.compose_loss].
-    - `particle`: CHANGED — was a separate `_ObstacleLossComponents`
-      subclass-like dataclass; folded in here as an optional field.
-      Mean-squared error between the network's predicted velocity on the
+    - `particle`: Mean-squared error between the network's predicted velocity on the
       particle's surface and its prescribed rigid-body velocity; `None`
       unless this call to `train()` was given an `ParticleConfig`.
     """
@@ -496,17 +474,6 @@ def _evaluate_loss_components(
     a fresh callable per term - is what lets both training phases log or
     record each component's value without a second, wasted forward pass.
 
-    CHANGED. Now also the two-way-coupled counterpart of the former
-    `_evaluate_particle_loss_components`: every term but `obstacle` is
-    computed identically regardless of `particle_config` (the interior,
-    wall, inlet, and outlet points already exclude/avoid the obstacle by
-    construction of `batch` when one is present), and the global
-    conservation term switches between
-    [`_conservation_loss`][magnetofluidics_pinn.training.trainer._conservation_loss]
-    and
-    [`_particle_conservation_loss`][magnetofluidics_pinn.training.trainer._particle_conservation_loss]
-    depending on whether `particle_config` is `None`.
-
     Args:
     - `network`: Network to evaluate.
     - `batch`: Interior and boundary points, as built by
@@ -519,7 +486,7 @@ def _evaluate_loss_components(
       (`momentum_loss_weight`, `continuity_loss_weight`,
       `positivity_loss_weight`, `conservation_loss_weight`) and the
       conservation term's quadrature resolution.
-    - `particle_config`: `None` for the ordinary (obstacle-free) problem;
+    - `particle_config`: `None` for the ordinary (particle-free) problem;
       otherwise supplies the embedded sphere (for
       [`_particle_conservation_loss`][magnetofluidics_pinn.training.trainer._particle_conservation_loss]) and `particle_loss_weight`.
 
@@ -604,7 +571,7 @@ def _record_loss_components(components: _LossComponents) -> dict[str, float]:
     Returns:
     - A dict mapping `"total"` and every name in
       [`_component_names`][magnetofluidics_pinn.training.trainer._component_names]
-      (derived from whether `components.obstacle` is `None`) to its
+      (derived from whether `components.particle` is `None`) to its
       corresponding scalar value.
     """
     names = LOSS_COMPONENT_NAMES + (("particle",) if components.particle is not None else ())
@@ -678,12 +645,12 @@ class TrainingHistory:
         """
         has_lbfgs = len(self.lbfgs.step) > 0
         fields = LOSS_COMPONENT_NAMES + (("particle",) if self.adam.particle is not None else ()) + ("total",)
-
+        
         print("\n" + "=" * 78)
         print(
             f"{'Loss Component':<20} | {'Initial (Adam)':<14} | {'Post-Adam':<14} | {'Final Loss':<14} | {'Factor':<8}")
         print("-" * 78)
-
+        
         for f in fields:
             initial = getattr(self.adam, f)[0]
             post_adam = getattr(self.adam, f)[-1]
@@ -868,7 +835,6 @@ def train(
     return trained_network, TrainingHistory(adam=adam_history, lbfgs=lbfgs_history)
 
 
-
 def _run_adam_phase(
         trained_network: nn.Module,
         domain: Domain,
@@ -906,7 +872,7 @@ def _run_adam_phase(
     accumulator: dict[str, list[float]] = {
         name: [] for name in ("step",) + component_names + ("total",)
     }
-
+    
     for epoch in range(training_config.n_epochs):
         # Re-sampling every epoch, with a deterministically-varying seed,
         # exposes the network to a fresh set of collocation points instead
@@ -921,7 +887,7 @@ def _run_adam_phase(
         components = _evaluate_loss_components(
             trained_network, batch, domain, fluid_config, training_config, coupling_config
         )
-
+        
         optimizer.zero_grad()
         components.total.backward()
         if training_config.gradient_clip_norm is not None:
@@ -933,17 +899,17 @@ def _run_adam_phase(
                 trained_network.parameters(), training_config.gradient_clip_norm
             )
         optimizer.step()
-
+        
         current_values = _record_loss_components(components)
         accumulator["step"].append(epoch)
         for name, value in current_values.items():
             accumulator[name].append(value)
-
+        
         if training_config.verbose and (
                 epoch % training_config.log_every == 0 or epoch == training_config.n_epochs - 1
         ):
             print(_format_progress_line(f"Epoch {epoch:5d}", current_values))
-
+    
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})
 
 
@@ -994,25 +960,25 @@ def _run_lbfgs_phase(
         history_size=100,
         line_search_fn="strong_wolfe",
     )
-
+    
     component_names = _component_names(coupling_config)
     accumulator: dict[str, list[float]] = {
         name: [] for name in ("step",) + component_names + ("total",)
     }
-
+    
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
         components = _evaluate_loss_components(
             trained_network, batch, domain, fluid_config, training_config, coupling_config
         )
         components.total.backward()
-
+        
         current_values = _record_loss_components(components)
         accumulator["step"].append(len(accumulator["step"]))
         for name, value in current_values.items():
             accumulator[name].append(value)
         return components.total
-
+    
     round_width = len(str(training_config.lbfgs_rounds))
     for round_index in range(training_config.lbfgs_rounds):
         optimizer.step(closure)
@@ -1020,5 +986,5 @@ def _run_lbfgs_phase(
             prefix = f"L-BFGS round {round_index + 1:{round_width}d}/{training_config.lbfgs_rounds}"
             last_values = {name: accumulator[name][-1] for name in ("total",) + component_names}
             print(_format_progress_line(prefix, last_values))
-
+    
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})

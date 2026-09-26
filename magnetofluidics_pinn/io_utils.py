@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
+from sympy.physics.biomechanics import activation
 from torch import nn
 
 from magnetofluidics_pinn.config import (
@@ -55,6 +56,7 @@ _REQUIRED_CHECKPOINT_KEYS = frozenset(
         "domain_config",
         "fluid_config",
         "field_config",
+        "particle_config",
         "training_config",
     }
 )
@@ -110,7 +112,9 @@ class NetworkArchitecture:
           [`load_checkpoint`][magnetofluidics_pinn.io_utils.load_checkpoint]
           does) after loading a `state_dict` into it.
         """
-        network = build_mlp(self.n_inputs, self.n_outputs, self.hidden_layers, self.activation)
+        network = build_mlp(self.n_inputs, self.n_outputs, self.hidden_layers,
+                            training_config=TrainingConfig(device="cpu"),
+                            activation=self.activation)
         if self.hard_wall_constraint_radius is not None:
             # `apply_hard_wall_constraint` only reads `domain.radius`; the
             # other `Domain` fields are placeholders with no effect on the

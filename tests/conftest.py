@@ -38,16 +38,34 @@ def fluid_config() -> mfp.FluidConfig:
 
 
 @pytest.fixture
+def domain_config() -> mfp.DomainConfig:
+    """A default domain configuration."""
+    return mfp.DomainConfig()
+
+
+@pytest.fixture
 def field_config() -> mfp.MagneticFieldConfig:
     """A default uniform-field magnetic configuration."""
     return mfp.MagneticFieldConfig()
 
 
 @pytest.fixture
+def particle_config() -> mfp.ParticleConfig:
+    """A small spherical particle, comfortably inside `domain`'s radius."""
+    return mfp.ParticleConfig(radius=0.2)
+
+
+@pytest.fixture
+def particle_state() -> mfp.ParticleState:
+    """An on-axis particle state, inside `domain`'s axial extent."""
+    return mfp.ParticleState(position=torch.tensor([0.0, 2.0]), velocity=torch.zeros(2), time=0.0)
+
+
+@pytest.fixture
 def raw_network() -> torch.nn.Module:
     """A small, unconstrained (r, z) -> (u_r, u_z, p) network, CPU, fixed seed."""
-    torch.manual_seed(0)
-    return mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(8, 8), device="cpu")
+    training_config = mfp.TrainingConfig(device="cpu", random_seed=0)
+    return mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(8, 8), training_config=training_config)
 
 
 @pytest.fixture
@@ -76,13 +94,13 @@ def make_poiseuille_network(radius: float, peak_velocity: float):
 
 
 @pytest.fixture
-def navier_stokes_fluid_config() -> mfp.FluidConfig:
+def navier_stokes_domain_config() -> mfp.DomainConfig:
     """A default unsteady, convective Navier-Stokes fluid configuration.
 
     Returns:
     - `mfp.FluidConfig` with `regime="navier_stokes"` and non-zero Reynolds number.
     """
-    return mfp.FluidConfig(regime="navier_stokes")
+    return mfp.DomainConfig(fluid=mfp.FluidConfig(regime="navier_stokes"))
 
 
 @pytest.fixture
@@ -92,5 +110,5 @@ def unsteady_network() -> torch.nn.Module:
     Returns:
     - `torch.nn.Module` mapping 3 coordinate inputs to 3 output channels.
     """
-    torch.manual_seed(42)
-    return mfp.build_mlp(n_inputs=3, n_outputs=3, hidden_layers=(8, 8), device="cpu")
+    training_config = mfp.TrainingConfig(device="cpu", random_seed=42)
+    return mfp.build_mlp(n_inputs=3, n_outputs=3, hidden_layers=(8, 8), training_config=training_config)
