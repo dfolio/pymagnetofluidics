@@ -364,41 +364,34 @@ def test_stokes_residual_wrong_regime(
 # ============================================================================
 
 
-# @pytest.mark.xfail(
-#     reason=(
-#         "Pre-existing bug, unrelated to the ParticleConfig/ParticleState refactor: "
-#         "navier_stokes_residual reads `fluid_config.reynolds`, but `reynolds` is a "
-#         "property of DomainConfig (it needs reference_velocity/reference_length, which "
-#         "live there), not of FluidConfig. AttributeError on every call. Flagged, not "
-#         "fixed, here pending a decision on which config should own the property."
-#     ),
-#     strict=True,
-#     raises=AttributeError,
-# )
-# def test_navier_stokes_residual_nominal(
-#     unsteady_network: torch.nn.Module,
-#     navier_stokes_domain_config: mfp.DomainConfig,
-#     device: torch.device,
-# ) -> None:
-#     """Validate unsteady convective Navier-Stokes residual computation.
-#
-#     Args:
-#     - `unsteady_network`: Unsteady (r, z, t) network fixture.
-#     - `navier_stokes_domain_config`: Navier-Stokes configuration fixture.
-#     - `device`: Target PyTorch compute device.
-#     """
-#     net = unsteady_network.to(device)
-#     coords = torch.tensor(
-#         [[0.5, 1.0, 0.0], [0.8, 2.0, 0.1]],
-#         dtype=torch.float32,
-#         device=device,
-#         requires_grad=True,
-#     )
-#     res = navier_stokes_residual(net, coords, navier_stokes_domain_config, residual_form="standard")
-#
-#     assert res.shape == (2, 3)
-#     assert not torch.isnan(res).any()
-#     assert res.device == coords.device
+def test_navier_stokes_residual_nominal(
+    unsteady_network: torch.nn.Module,
+    navier_stokes_domain_config: mfp.DomainConfig,
+    device: torch.device,
+) -> None:
+    """Validate unsteady convective Navier-Stokes residual computation.
+
+    Re-enabled: was disabled pending the `fluid_config.reynolds` ->
+    `domain_config.reynolds` fix (see `navier_stokes_domain_config`'s own
+    `DomainConfig` type); that fix landed, and this passes unchanged.
+
+    Args:
+    - `unsteady_network`: Unsteady (r, z, t) network fixture.
+    - `navier_stokes_domain_config`: Navier-Stokes configuration fixture.
+    - `device`: Target PyTorch compute device.
+    """
+    net = unsteady_network.to(device)
+    coords = torch.tensor(
+        [[0.5, 1.0, 0.0], [0.8, 2.0, 0.1]],
+        dtype=torch.float32,
+        device=device,
+        requires_grad=True,
+    )
+    res = navier_stokes_residual(net, coords, navier_stokes_domain_config, residual_form="standard")
+
+    assert res.shape == (2, 3)
+    assert not torch.isnan(res).any()
+    assert res.device == coords.device
 
 
 def test_navier_stokes_residual_dimension_rejection(

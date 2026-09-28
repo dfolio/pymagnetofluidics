@@ -78,3 +78,50 @@ class TestHardWallConstraint:
         bad_domain = mfp.Domain(kind="channel", length=1.0, radius=0.0, branch_angle=None)
         with pytest.raises(ValueError, match="domain.radius must be strictly positive"):
             mfp.apply_hard_wall_constraint(raw_network, bad_domain)
+
+
+class TestBaseProfileFromMaximumVelocity:
+    """`Domain.u_max > 0` adds a parabolic base profile on top of the network's correction."""
+
+    @staticmethod
+    def _zero_raw_network() -> torch.nn.Module:
+        class ZeroRaw(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self._p = torch.nn.Parameter(torch.zeros(1))
+
+            def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+                return torch.zeros(coordinates.shape[0], 3) + 0.0 * self._p
+
+        return ZeroRaw()
+
+    def test_no_base_profile_when_u_max_is_unknown(self) -> None:
+        domain = mfp.Domain(kind="channel", length=4.0, radius=1.0, u_max=0.0)
+        network = mfp.apply_hard_wall_constraint(self._zero_raw_network(), domain)
+        assert network(torch.tensor([[0.0, 1.0]]))[0, 1].item() == pytest.approx(0.0)
+
+    def test_base_profile_is_parabolic_and_vanishes_at_the_wall(self) -> None:
+        domain = mfp.Domain(kind="channel", length=4.0, radius=1.0, u_max=1.0)
+        network = mfp.apply_hard_wall_constraint(self._zero_raw_network(), domain)
+        radial = torch.linspace(0.0, 1.0, 7)
+        profile = network(torch.stack([radial, torch.ones_like(radial)], dim=1))[:, 1]
+
+        assert profile[-1].item() == pytest.approx(0.0, abs=1e-6)
+        # Parabolic: u_z(r) / u_z(0) = 1 - (r/R)^2, whatever the peak is.
+        assert torch.allclose(profile / profile[0], 1.0 - radial**2, atol=1e-5)
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason=(
+            "The base profile is built as 2 * u_max * (1 - (r/R)^2), so its centerline value is "
+            "2 * u_max, but Domain.u_max is documented as the *maximum* inlet velocity and the trainer "
+            "imposes a unit inlet peak (training.trainer._DIMENSIONLESS_PEAK_INLET_VELOCITY = 1.0). The "
+            "factor 2 is only right if u_max means the mean velocity (peak = 2 * mean for Poiseuille "
+            "flow). Latent today, because build_channel_domain never forwards u_max - see "
+            "test_geometry.py's matching xfail. Flagged, not fixed."
+        ),
+    )
+    def test_centerline_value_equals_the_documented_maximum_velocity(self) -> None:
+        domain = mfp.Domain(kind="channel", length=4.0, radius=1.0, u_max=1.0)
+        network = mfp.apply_hard_wall_constraint(self._zero_raw_network(), domain)
+        assert network(torch.tensor([[0.0, 1.0]]))[0, 1].item() == pytest.approx(domain.u_max)

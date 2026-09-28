@@ -585,8 +585,7 @@ class TrainingConfig:
                     "'standard' residual is singular at r=0. Either raise "
                     "axis_clearance_fraction above 0.0 or set residual_form='r_weighted'."
                 )
-        if self.learning_rate <= 0.0:
-            raise ValueError("learning_rate must be strictly positive.")
+        _check_if_finite_positive_strictly(self.learning_rate,"learning_rate")
         if self.n_epochs <= 0:
             raise ValueError("n_epochs must be strictly positive.")
         for weight_name in (

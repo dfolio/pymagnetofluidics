@@ -290,7 +290,7 @@ def analytical_network(coordinates: torch.Tensor) -> torch.Tensor:
     return mfp.hagen_poiseuille_velocity_field(coordinates, domain, PEAK_VELOCITY, REFERENCE_PRESSURE)
 
 
-exact_residual = mfp.stokes_residual(analytical_network, exact_coordinates, fluid_config, residual_form="standard")
+exact_residual = mfp.stokes_residual(analytical_network, exact_coordinates, domain_config, residual_form="standard")
 exact_residual_summary = mfp.summarize_residual(exact_residual, ("momentum_r", "momentum_z", "continuity"))
 exact_residual_summary
 ```
@@ -350,7 +350,7 @@ exact_coordinates_r_weighted = torch.cat(
 ).requires_grad_(True)
 
 exact_residual_r_weighted = mfp.stokes_residual(
-    analytical_network, exact_coordinates_r_weighted, fluid_config, residual_form="r_weighted"
+    analytical_network, exact_coordinates_r_weighted, domain_config, residual_form="r_weighted"
 )
 exact_residual_summary_r_weighted = mfp.summarize_residual(
     exact_residual_r_weighted, ("momentum_r", "momentum_z", "continuity")
@@ -706,7 +706,7 @@ reported separately rather than folded into the error.
 #| tbl-cap: "Stokes residual on a held-out collocation batch, independent of every training-time seed."
 N_HELD_OUT_POINTS = 5_000
 held_out_residual = mfp.evaluate_held_out_residual(
-    trained_network_standard, domain, fluid_config, random_seed=EXACT_GRID_SEED + 2, n_points=N_HELD_OUT_POINTS,
+    trained_network_standard, domain, domain_config, random_seed=EXACT_GRID_SEED + 2, n_points=N_HELD_OUT_POINTS,
     residual_form=training_config_standard.residual_form,
     axis_clearance_fraction=training_config_standard.axis_clearance_fraction,
 )
@@ -925,7 +925,7 @@ the full channel length.
 RESIDUAL_RADIAL_GRID = torch.linspace(domain.radius * 1.0e-3, domain.radius, 150, device=DEVICE, dtype=DTYPE)
 RESIDUAL_AXIAL_GRID = torch.linspace(0.0, domain.length, 150, device=DEVICE, dtype=DTYPE)
 residual_grids = mfp.evaluate_residual_grid(
-    trained_network_standard, domain, fluid_config, RESIDUAL_RADIAL_GRID, RESIDUAL_AXIAL_GRID,
+    trained_network_standard, domain, domain_config, RESIDUAL_RADIAL_GRID, RESIDUAL_AXIAL_GRID,
     residual_form=training_config_standard.residual_form,
 )
 mfp.plot_residual_heatmap(RESIDUAL_RADIAL_GRID, RESIDUAL_AXIAL_GRID, residual_grids["momentum_z"], "momentum_z")
@@ -988,7 +988,7 @@ initial_state = mfp.ParticleState(
 field_fn = lambda coordinates: mfp.uniform_field(
     coordinates, magnitude=field_config.magnitude, orientation=field_config.orientation
 )
-mobility = mfp.nondimensionalize_mobility(particle_config, fluid_config, scales).unsqueeze(0)
+mobility = mfp.nondimensionalize_mobility(particle_config, scales).unsqueeze(0)
 
 trajectories = mfp.integrate_trajectory(
     flow_network=trained_network_standard, field_fn=field_fn, domain=domain, scales=scales,
@@ -1125,7 +1125,7 @@ pressure_gradient_metrics_r_weighted = mfp.compute_pressure_gradient_error(
     trained_network_r_weighted, domain, PEAK_VELOCITY, n_axial_points=100
 )
 held_out_residual_r_weighted = mfp.evaluate_held_out_residual(
-    trained_network_r_weighted, domain, fluid_config, random_seed=EXACT_GRID_SEED + 2, n_points=N_HELD_OUT_POINTS,
+    trained_network_r_weighted, domain, domain_config, random_seed=EXACT_GRID_SEED + 2, n_points=N_HELD_OUT_POINTS,
     residual_form=training_config_r_weighted.residual_form,
     axis_clearance_fraction=training_config_r_weighted.axis_clearance_fraction,
 )
@@ -1154,7 +1154,7 @@ training run ever saw.
 #| label: comparison-fair-held-out
 FAIR_COMPARISON_SEED = EXACT_GRID_SEED + 3
 held_out_residual_r_weighted_under_standard_form = mfp.evaluate_held_out_residual(
-    trained_network_r_weighted, domain, fluid_config, random_seed=FAIR_COMPARISON_SEED, n_points=N_HELD_OUT_POINTS,
+    trained_network_r_weighted, domain, domain_config, random_seed=FAIR_COMPARISON_SEED, n_points=N_HELD_OUT_POINTS,
     residual_form="standard", axis_clearance_fraction=None,
 )
 fair_comparison_ratio = (
@@ -1340,7 +1340,7 @@ learned an equally faithful $z$-momentum balance, the same question
 #| fig-cap: "Held-out axial-momentum residual magnitude, r-weighted formulation, including the axis itself — compare against @fig-residual-heatmap."
 RESIDUAL_RADIAL_GRID_R_WEIGHTED = torch.linspace(0.0, domain.radius, 150, device=DEVICE, dtype=DTYPE)
 residual_grids_r_weighted = mfp.evaluate_residual_grid(
-    trained_network_r_weighted, domain, fluid_config, RESIDUAL_RADIAL_GRID_R_WEIGHTED, RESIDUAL_AXIAL_GRID,
+    trained_network_r_weighted, domain, domain_config, RESIDUAL_RADIAL_GRID_R_WEIGHTED, RESIDUAL_AXIAL_GRID,
     residual_form=training_config_r_weighted.residual_form,
 )
 mfp.plot_residual_heatmap(

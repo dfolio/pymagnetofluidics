@@ -39,7 +39,7 @@ import torch
 from torch import nn
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
-from magnetofluidics_pinn.config import FluidConfig
+from magnetofluidics_pinn.config import DomainConfig
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.physics.conservation import axial_flow_rate
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
@@ -85,26 +85,26 @@ def summarize_residual(residual: torch.Tensor, component_names: tuple[str, ...])
     records = [
         {
             "component": name,
-            "max_abs": detached[:, index].abs().max().item(),
-            "rms": torch.sqrt(torch.mean(detached[:, index] ** 2)).item(),
+            "max_abs"  : detached[:, index].abs().max().item(),
+            "rms"      : torch.sqrt(torch.mean(detached[:, index] ** 2)).item(),
         }
         for index, name in enumerate(component_names)
     ]
     records.append(
         {
             "component": "total",
-            "max_abs": detached.abs().max().item(),
-            "rms": torch.sqrt(torch.mean(detached ** 2)).item(),
+            "max_abs"  : detached.abs().max().item(),
+            "rms"      : torch.sqrt(torch.mean(detached ** 2)).item(),
         }
     )
     return pd.DataFrame.from_records(records).set_index("component")
 
 
 def evaluate_structural_constraints(
-    network: nn.Module,
-    domain: Domain,
-    n_probe_points: int,
-    random_seed: int = 0,
+        network: nn.Module,
+        domain: Domain,
+        n_probe_points: int,
+        random_seed: int = 0,
 ) -> dict[str, float]:
     r"""Probe the axis- and wall-regularity conditions at random axial positions.
 
@@ -136,29 +136,29 @@ def evaluate_structural_constraints(
     """
     if n_probe_points <= 0:
         raise ValueError(f"n_probe_points must be strictly positive; got {n_probe_points!r}.")
-
+    
     resolved_device = resolve_module_device(network)
     resolved_dtype = resolve_module_dtype(network)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
     axial_probe = domain.length * torch.rand(
         n_probe_points, 1, generator=generator, device=resolved_device, dtype=resolved_dtype
     )
-
+    
     axis_points = torch.cat([torch.zeros_like(axial_probe), axial_probe], dim=1).requires_grad_(True)
     wall_points = torch.cat([torch.full_like(axial_probe, domain.radius), axial_probe], dim=1)
-
+    
     axis_output = network(axis_points)
     grad_axis_uz = scalar_field_gradient(axis_output[:, 1:2], axis_points)[:, 0:1]
     grad_axis_p = scalar_field_gradient(axis_output[:, 2:3], axis_points)[:, 0:1]
     with torch.no_grad():
         wall_output = network(wall_points)
-
+    
     return {
-        "max_abs_ur_axis": axis_output[:, 0:1].detach().abs().max().item(),
-        "max_abs_ur_wall": wall_output[:, 0:1].abs().max().item(),
-        "max_abs_uz_wall": wall_output[:, 1:2].abs().max().item(),
+        "max_abs_ur_axis"    : axis_output[:, 0:1].detach().abs().max().item(),
+        "max_abs_ur_wall"    : wall_output[:, 0:1].abs().max().item(),
+        "max_abs_uz_wall"    : wall_output[:, 1:2].abs().max().item(),
         "max_abs_duz_dr_axis": grad_axis_uz.detach().abs().max().item(),
-        "max_abs_dp_dr_axis": grad_axis_p.detach().abs().max().item(),
+        "max_abs_dp_dr_axis" : grad_axis_p.detach().abs().max().item(),
     }
 
 
@@ -190,13 +190,13 @@ class ProfileEvaluation:
     Raises:
     - `ValueError`: If any tensor's shape is inconsistent with the others.
     """
-
+    
     z_stations: tuple[float, ...]
     radial_grid: torch.Tensor
     predicted_uz: torch.Tensor
     predicted_ur: torch.Tensor
     analytical_uz: torch.Tensor
-
+    
     def __post_init__(self) -> None:
         n_stations = len(self.z_stations)
         n_radial = self.radial_grid.shape[0]
@@ -217,11 +217,11 @@ class ProfileEvaluation:
 
 
 def evaluate_velocity_profiles(
-    network: nn.Module,
-    domain: Domain,
-    z_stations: tuple[float, ...],
-    radial_grid: torch.Tensor,
-    peak_velocity: float,
+        network: nn.Module,
+        domain: Domain,
+        z_stations: tuple[float, ...],
+        radial_grid: torch.Tensor,
+        peak_velocity: float,
 ) -> ProfileEvaluation:
     """Evaluate predicted and analytical axial-velocity profiles at a set of axial stations.
 
@@ -245,23 +245,23 @@ def evaluate_velocity_profiles(
         raise ValueError("z_stations must contain at least one axial station.")
     if radial_grid.ndim != 1:
         raise ValueError(f"radial_grid must be a 1-D tensor; got shape {tuple(radial_grid.shape)}.")
-
+    
     resolved_device = resolve_module_device(network)
     resolved_dtype = resolve_module_dtype(network)
     radial_grid = radial_grid.to(device=resolved_device, dtype=resolved_dtype)
-
+    
     n_radial = radial_grid.shape[0]
     station_tensor = torch.as_tensor(z_stations, dtype=resolved_dtype, device=resolved_device)
     radial_mesh = radial_grid.unsqueeze(0).expand(len(z_stations), -1).reshape(-1, 1)
     axial_mesh = station_tensor.unsqueeze(1).expand(-1, n_radial).reshape(-1, 1)
     coordinates = torch.cat([radial_mesh, axial_mesh], dim=1)
-
+    
     with torch.no_grad():
         prediction = network(coordinates)
     predicted_ur = prediction[:, 0].reshape(len(z_stations), n_radial)
     predicted_uz = prediction[:, 1].reshape(len(z_stations), n_radial)
     analytical_uz = peak_velocity * (1.0 - (radial_grid / domain.radius) ** 2)
-
+    
     return ProfileEvaluation(
         z_stations=z_stations,
         radial_grid=radial_grid.detach(),
@@ -318,11 +318,11 @@ def _analytical_velocity(coordinates: torch.Tensor, radius: float, peak_velocity
 
 
 def compute_global_l2_error(
-    network: nn.Module,
-    domain: Domain,
-    radial_grid: torch.Tensor,
-    axial_grid: torch.Tensor,
-    peak_velocity: float,
+        network: nn.Module,
+        domain: Domain,
+        radial_grid: torch.Tensor,
+        axial_grid: torch.Tensor,
+        peak_velocity: float,
 ) -> float:
     r"""Compute the global relative $L^2$ velocity error against Hagen-Poiseuille flow.
 
@@ -357,7 +357,7 @@ def compute_global_l2_error(
     with torch.no_grad():
         predicted_velocity = network(coordinates)[:, :2]
     analytical_velocity = _analytical_velocity(coordinates, domain.radius, peak_velocity)
-
+    
     denominator = torch.linalg.norm(analytical_velocity)
     if denominator.item() == 0.0:
         raise ValueError("Analytical velocity field norm is zero; the relative L2 error is undefined.")
@@ -365,11 +365,11 @@ def compute_global_l2_error(
 
 
 def compute_max_pointwise_error(
-    network: nn.Module,
-    domain: Domain,
-    radial_grid: torch.Tensor,
-    axial_grid: torch.Tensor,
-    peak_velocity: float,
+        network: nn.Module,
+        domain: Domain,
+        radial_grid: torch.Tensor,
+        axial_grid: torch.Tensor,
+        peak_velocity: float,
 ) -> float:
     r"""Compute the maximum pointwise velocity error against Hagen-Poiseuille flow.
 
@@ -431,9 +431,9 @@ def compute_profile_invariance(profile_evaluation: ProfileEvaluation) -> pd.Data
     deviation_from_mean = profile_evaluation.predicted_uz - mean_profile
     records = [
         {
-            "z_station": z_station,
-            "max_abs_error_vs_analytical": error[index].abs().max().item(),
-            "rms_error_vs_analytical": torch.sqrt(torch.mean(error[index] ** 2)).item(),
+            "z_station"                          : z_station,
+            "max_abs_error_vs_analytical"        : error[index].abs().max().item(),
+            "rms_error_vs_analytical"            : torch.sqrt(torch.mean(error[index] ** 2)).item(),
             "max_abs_deviation_from_mean_profile": deviation_from_mean[index].abs().max().item(),
         }
         for index, z_station in enumerate(profile_evaluation.z_stations)
@@ -461,16 +461,16 @@ def compute_radial_leakage(profile_evaluation: ProfileEvaluation, peak_velocity:
         raise ValueError(f"peak_velocity must be finite and strictly positive; got {peak_velocity!r}.")
     max_abs_radial_leakage = profile_evaluation.predicted_ur.abs().max().item()
     return {
-        "max_abs_radial_leakage": max_abs_radial_leakage,
+        "max_abs_radial_leakage"   : max_abs_radial_leakage,
         "normalized_radial_leakage": max_abs_radial_leakage / peak_velocity,
     }
 
 
 def compute_flow_rate_curve(
-    network: nn.Module,
-    domain: Domain,
-    axial_grid: torch.Tensor,
-    n_quadrature_points: int = 64,
+        network: nn.Module,
+        domain: Domain,
+        axial_grid: torch.Tensor,
+        n_quadrature_points: int = 64,
 ) -> torch.Tensor:
     """Evaluate the predicted volumetric flow rate $Q(z)$ at a set of axial stations.
 
@@ -528,17 +528,17 @@ def compute_flow_rate_errors(flow_rate_curve: torch.Tensor, reference_flow_rate:
     deviation = flow_rate_curve.detach() - reference_flow_rate
     max_abs_error = deviation.abs().max().item()
     return {
-        "max_abs_flow_rate_error": max_abs_error,
+        "max_abs_flow_rate_error"     : max_abs_error,
         "max_relative_flow_rate_error": max_abs_error / reference_flow_rate,
-        "flow_rate_span": (flow_rate_curve.max() - flow_rate_curve.min()).item(),
-        "flow_rate_std": flow_rate_curve.std(unbiased=False).item(),
+        "flow_rate_span"              : (flow_rate_curve.max() - flow_rate_curve.min()).item(),
+        "flow_rate_std"               : flow_rate_curve.std(unbiased=False).item(),
     }
 
 
 def evaluate_axis_pressure_profile(
-    network: nn.Module,
-    domain: Domain,
-    n_axial_points: int = 50,
+        network: nn.Module,
+        domain: Domain,
+        n_axial_points: int = 50,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Evaluate a network's predicted pressure along the symmetry axis, $p(r=0, z)$.
 
@@ -574,10 +574,10 @@ def evaluate_axis_pressure_profile(
 
 
 def compute_pressure_gradient_error(
-    network: nn.Module,
-    domain: Domain,
-    peak_velocity: float,
-    n_axial_points: int = 50,
+        network: nn.Module,
+        domain: Domain,
+        peak_velocity: float,
+        n_axial_points: int = 50,
 ) -> dict[str, float]:
     r"""Fit the network's axial pressure profile and compare its slope to the analytical gradient.
 
@@ -598,22 +598,22 @@ def compute_pressure_gradient_error(
     analytical_slope = analytical_pressure_gradient(domain.radius, peak_velocity)
     absolute_error = abs(fitted_slope - analytical_slope)
     return {
-        "predicted_pressure_gradient": float(fitted_slope),
-        "fitted_intercept": float(fitted_intercept),
+        "predicted_pressure_gradient" : float(fitted_slope),
+        "fitted_intercept"            : float(fitted_intercept),
         "analytical_pressure_gradient": float(analytical_slope),
-        "absolute_error": float(absolute_error),
-        "relative_error": float(absolute_error / abs(analytical_slope)),
+        "absolute_error"              : float(absolute_error),
+        "relative_error"              : float(absolute_error / abs(analytical_slope)),
     }
 
 
 def evaluate_held_out_residual(
-    network: nn.Module,
-    domain: Domain,
-    fluid_config: FluidConfig,
-    random_seed: int,
-    n_points: int,
-    residual_form: Literal["standard", "r_weighted"] = "standard",
-    axis_clearance_fraction: float | None = None,
+        network: nn.Module,
+        domain: Domain,
+        domain_config: DomainConfig,
+        random_seed: int,
+        n_points: int,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
+        axis_clearance_fraction: float | None = None,
 ) -> pd.DataFrame:
     """Evaluate the Stokes residual on a fresh, independent collocation batch.
 
@@ -626,7 +626,7 @@ def evaluate_held_out_residual(
     Args:
     - `network`: Trained flow network mapping `(r, z)` to `(u_r, u_z, p)`.
     - `domain`: Already-nondimensionalized vessel geometry.
-    - `fluid_config`: Fluid configuration selecting the flow regime.
+    - `domain_config`: Domain configuration selecting the flow regime.
     - `random_seed`: Seed for the held-out collocation batch; should differ
       from every seed used during training.
     - `n_points`: Number of interior points to draw.
@@ -656,17 +656,17 @@ def evaluate_held_out_residual(
         axis_clearance_fraction=axis_clearance_fraction, device=resolved_device,
     )
     interior = collocation.interior.clone().requires_grad_(True)
-    residual = stokes_residual(network, interior, fluid_config, residual_form=residual_form)
+    residual = stokes_residual(network, interior, domain_config, residual_form=residual_form)
     return summarize_residual(residual, _RESIDUAL_COMPONENT_NAMES)
 
 
 def evaluate_residual_grid(
-    network: nn.Module,
-    domain: Domain,
-    fluid_config: FluidConfig,
-    radial_grid: torch.Tensor,
-    axial_grid: torch.Tensor,
-    residual_form: Literal["standard", "r_weighted"] = "standard",
+        network: nn.Module,
+        domain: Domain,
+        domain_config: DomainConfig,
+        radial_grid: torch.Tensor,
+        axial_grid: torch.Tensor,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> dict[str, torch.Tensor]:
     """Evaluate the Stokes residual over a structured `(r, z)` grid, for visualization.
 
@@ -679,7 +679,7 @@ def evaluate_residual_grid(
     Args:
     - `network`: Trained flow network mapping `(r, z)` to `(u_r, u_z, p)`.
     - `domain`: Already-nondimensionalized vessel geometry.
-    - `fluid_config`: Fluid configuration selecting the flow regime.
+    - `domain_config`: Domain configuration selecting the flow regime.
     - `radial_grid`, `axial_grid`: 1-D tensors spanning the evaluation grid.
       Under `residual_form="standard"`, `radial_grid` must not touch or
       cross the symmetry axis (see
@@ -706,7 +706,7 @@ def evaluate_residual_grid(
     radial_grid = radial_grid.to(device=resolved_device, dtype=resolved_dtype)
     axial_grid = axial_grid.to(device=resolved_device, dtype=resolved_dtype)
     coordinates = _cartesian_grid(radial_grid, axial_grid).requires_grad_(True)
-    residual = stokes_residual(network, coordinates, fluid_config, residual_form=residual_form)
+    residual = stokes_residual(network, coordinates, domain_config, residual_form=residual_form)
     n_radial, n_axial = radial_grid.shape[0], axial_grid.shape[0]
     return {
         name: residual[:, index].detach().abs().reshape(n_radial, n_axial)
@@ -715,11 +715,11 @@ def evaluate_residual_grid(
 
 
 def compare_trajectory_to_analytical(
-    trajectory: list[ParticleState],
-    initial_position: tuple[float, float],
-    peak_velocity: float,
-    radius: float,
-    particle_radius: float = 0.0,
+        trajectory: list[ParticleState],
+        initial_position: tuple[float, float],
+        peak_velocity: float,
+        radius: float,
+        particle_radius: float = 0.0,
 ) -> pd.DataFrame:
     """Compare an integrated particle trajectory against its closed-form reference.
 
@@ -754,7 +754,7 @@ def compare_trajectory_to_analytical(
     predicted_z = np.array([state.position[1].item() for state in trajectory])
     records = [
         {
-            "time": t, "predicted_r": pr, "analytical_r": ar, "radial_error": abs(pr - ar),
+            "time"       : t, "predicted_r": pr, "analytical_r": ar, "radial_error": abs(pr - ar),
             "predicted_z": pz, "analytical_z": az, "axial_error": abs(pz - az),
         }
         for t, pr, ar, pz, az in zip(time_grid, predicted_r, analytical_r, predicted_z, analytical_z)

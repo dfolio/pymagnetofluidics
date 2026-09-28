@@ -103,6 +103,36 @@ def navier_stokes_domain_config() -> mfp.DomainConfig:
     return mfp.DomainConfig(fluid=mfp.FluidConfig(regime="navier_stokes"))
 
 
+class _AnalyticalFlowNetwork(torch.nn.Module):
+    """A network stand-in returning the exact closed-form Hagen-Poiseuille field.
+
+    Used to check `verification.metrics`'s evaluators against a "network"
+    whose true error is known in closed form to be exactly zero (up to
+    floating-point noise), rather than only checking that they run.
+    Carries one dummy parameter purely so `device_utils.resolve_module_device`/
+    `resolve_module_dtype` (which every metrics.py evaluator calls) can infer a
+    device and dtype from it, exactly as they would from a real trained network.
+    """
+
+    def __init__(self, domain: mfp.Domain, peak_velocity: float, reference_pressure: float = 0.0) -> None:
+        super().__init__()
+        self.domain = domain
+        self.peak_velocity = peak_velocity
+        self.reference_pressure = reference_pressure
+        self._dummy_parameter = torch.nn.Parameter(torch.zeros(1))
+
+    def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
+        return mfp.hagen_poiseuille_velocity_field(
+            coordinates, self.domain, self.peak_velocity, self.reference_pressure
+        )
+
+
+@pytest.fixture
+def analytical_flow_network(domain: mfp.Domain) -> torch.nn.Module:
+    """A network whose output is exactly the analytical Hagen-Poiseuille field for `domain`."""
+    return _AnalyticalFlowNetwork(domain, peak_velocity=1.0)
+
+
 @pytest.fixture
 def unsteady_network() -> torch.nn.Module:
     """A small, unconstrained (r, z, t) -> (u_r, u_z, p) network on CPU.
