@@ -79,74 +79,200 @@ print(f"magnetofluidics_pinn: v{mfp.__version__}")
 
 # Executive Summary & Physical Setup
 
-This notebook verifies the two-way hydrodynamic and magnetic coupling between a
-single spherical magnetic microrobot and an axisymmetric viscous Stokes flow in
-a microchannel.
+This notebook exercises `magnetofluidics_pinn`'s two-way particle–flow coupling:
+rather than advecting a point (or Faxén-corrected finite) tracer through an
+*undisturbed* flow field, the package solves for the flow a rigid, translating
+spherical particle actually perturbs, reads the resulting hydrodynamic drag
+directly off that flow's own stress tensor ([
+`physics.hydrodynamic_drag.surface_traction_force`](https://www.google.com/search?q=../magnetofluidics_pinn/physics/hydrodynamic_drag.py&utm_source=gemini)),
+and closes the particle's equation of motion by balancing drag against applied
+forces ([
+`trajectory.two_way_coupling`](https://www.google.com/search?q=../magnetofluidics_pinn/trajectory/two_way_coupling.py&utm_source=gemini)).
+
+Four claims are checked, each with a table row populated once its section has
+run:
+
+1. **Flow validity.** The flow trained around the fixed particle satisfies
+   governing Stokes equations and conserves inlet volumetric flow rate upstream
+   and downstream of the sphere.
+2. **Drag-force correctness.** `surface_traction_force`'s Cauchy-stress integral
+   vanishes within quadrature error when applied to a genuine Stokes solution
+   over a virtual test sphere.
+3. **Consistency with the existing one-way model.** In the regime where Faxén's
+   law holds ([
+   `physics.hydrodynamic_drag.faxen_corrected_velocity`](https://www.google.com/search?q=../magnetofluidics_pinn/physics/hydrodynamic_drag.py&utm_source=gemini)),
+   the two-way solver's force-balanced velocity for a passive particle agrees
+   with it.
+4. **Directional force response.** Adding an externally applied force shifts the
+   force-balanced velocity in the physically correct direction.
+
+## What this notebook does **not** verify
+
+- **Off-axis particles.** The axisymmetric `(r, z)` formulation can only
+  represent a particle that is a solid of revolution about the symmetry axis; [
+  `ParticleState`](https://www.google.com/search?q=../magnetofluidics_pinn/types.py&utm_source=gemini)
+  enforces this by storing only axial position.
+- **A literature-matched wall-correction curve.** Reproducing Ben Richou,
+  Ambari & Naciri [-@richou2003correction]'s curve requires sweeping several
+  blockage ratios $a^*/R^*$, each its own full training run.
+- **Long trajectories, particle swarms, or non-uniform fields.** Spatially
+  varying magnetic fields remain `NotImplementedError` stubs elsewhere in the
+  package, and each step of a two-way trajectory requires retraining.
+
+# Problem Statement & Mathematical Formulation
+
+## Governing equations
+
+In dimensionless axisymmetric cylindrical coordinates $(r^*, z^*)$, steady
+Stokes flow obeys momentum and continuity equations:
+$$-\pdv{p^*}{r^*} + \laplacian u_r^* - \frac{u_r^*}{r^{*2}} = 0, \qquad -\pdv{p^*}{z^*} + \laplacian u_z^* = 0, \qquad \frac{1}{r^*}\pdv{ (r^* u_r^*)}{r^*} + \pdv{u_z^*}{z^*} = 0.$$
+
+A rigid sphere of radius $a^*$, centered at $z_p^*$ and translating axially
+at $U_z^*$, adds a boundary face:
+$$\vb{u}^*\big\vert{}_{S} = (0,\ U_z^*), \qquad S = \left\{ (r^*, z^*) : (z^* - z_p^*)^2 + r^{*2} = a^{*2}\right\},$$
+enforced as a soft boundary loss (`rigid_body_velocity_condition`).
+
+## Hydrodynamic drag from the stress tensor
+
+Cauchy stress gives the hydrodynamic force exerted on the sphere:
+$$\vb{f}_z^* = \oint_{S} t_z \; dA, \qquad t_z = \sigma_{zz} n_z + \sigma_{zr} n_r, \qquad \sigma_{zz} = -p^* + 2\pdv{u_z^*}{z^*}, \qquad \sigma_{zr} = \pdv{u_z^*}{r^*} + \pdv{u_r^*}{z^*}.$$
+Parametrizing the meridian by polar angle $\theta \in [0, \pi]$ turns this into
+a 1-D quadrature that `surface_traction_force` evaluates using
+`torch.trapezoid`.
+
+## Force balance and particle mobility
+
+In the overdamped Stokes limit, external force balances hydrodynamic drag
+exactly:
+$$\vb{f}_{\text{applied}}^* + \vb{f}_z^{*,\text{drag}} (U_z^*) = 0.$$
+`solve_force_balanced_velocity` solves this scalar equation for $U_z^*$ using
+`scipy.optimize.brentq`.
 
 ### Configuration Parameters
 
 We define the fluid properties, domain geometry, and particle dimensions:
 
 ```{python}
-# Physical configurations
-field_cfg = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, 
-orientation=(1.0, 0.0))
-fluid_cfg = mfp.FluidConfig(dynamic_viscosity=1.0e-3, density=1000.0,
-                        regime="stokes",)
-domain_cfg = mfp.DomainConfig(kind="channel",radius=7.5e-4, length=10.0e-3, u_max=1.0e-3,
-                          fluid=fluid_cfg)
-physical_domain = mfp.build_channel_domain(domain_cfg)
-scales = mfp.compute_scales(domain_cfg, field_cfg)
+#| label: reference-problem
+radius = 7.5e-4              # 750 µm
+reference_velocity = 1.0e-3  # 1 mm/s
+length = 8.0 * radius        # 6 mm -- long enough for upstream/downstream margins
+dynamic_viscosity = 1.0e-3   # 1 mPa s
+density = 1.0e3               # 1000 kg/m^3
+
+n_interior_points: int = 8_000  # Number of interior collocation points per 
+                                # Adam epoch
+n_boundary_points: int = 2_000  # Number of boundary collocation points per 
+                                # Adam epoch
+n_epochs = 1_500
+lbfgs_n_interior_points: int = 15_000
+lbfgs_n_boundary_points: int = 2_000
+lbfgs_rounds = 10
+lbfgs_iterations_per_round = 400
+log_every = int(n_epochs / 5)
+residual_form = "standard"  # "standard" or "r_weighted"
+
+fluid_config = mfp.FluidConfig(regime="stokes", 
+                               dynamic_viscosity=dynamic_viscosity, density=density,)
+domain_config = mfp.DomainConfig(kind="channel", length=length, 
+                                 radius=radius, fluid=fluid_config)
+field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, orientation=(1.0, 0.0))
+
+physical_domain = mfp.build_channel_domain(domain_config)
+scales = mfp.compute_scales(domain_config, field_config)
 domain = mfp.nondimensionalize_domain(physical_domain, scales)
+R, L = domain.radius, domain.length
 
-particle_cfg = mfp.ParticleConfig(
-    kind="spherical", 
-    radius=domain.radius*0.25,
-    magnetic_moment=(1.0e-6,0.0),
-)
+PEAK_VELOCITY_NONDIM = 1.0  # Non-dimensional peak centerline velocity
+PEAK_VELOCITY_PHYSICAL = domain_config.u_max  # Physical velocity scale (1.0e-3 m/s)
+REFERENCE_PRESSURE = domain_config.p_max
+Q_REF = mfp.poiseuille_reference_flow_rate(R, PEAK_VELOCITY_NONDIM)
+thresholds = mfp.default_thresholds(dtype=DTYPE, peak_velocity=PEAK_VELOCITY_NONDIM)
 
-particle_axial_position = 0.5 * domain.length
+pd.Series({"domain.radius": domain.radius, "domain.length": domain.length,
+           "scales.length [m]": scales.length, "scales.velocity [m/s]": scales.velocity,
+           "scales.pressure [Pa]": scales.pressure})
+
+particle_axial_position = 0.5 * L
+particle_radius = 0.25 * R
+particle_config = mfp.ParticleConfig(kind="spherical", radius=particle_radius)
+
+INITIAL_PARTICLE_VELOCITY = (0.0, 1.0e-9)
 INITIAL_PARTICLE_POSITION = (0.0, particle_axial_position)
-v_rel_test = 1.0e-3
-INITIAL_PARTICLE_VELOCITY = (0.0, v_rel_test)
 particle_state = mfp.ParticleState(
-    position=torch.tensor(INITIAL_PARTICLE_POSITION, device=DEVICE, dtype=DTYPE),  # Centered in the channel
-    velocity=torch.tensor(INITIAL_PARTICLE_VELOCITY, device=DEVICE, dtype=DTYPE),  # Moving along the channel axis
-    time= 0.0
+    position=torch.tensor(INITIAL_PARTICLE_POSITION, device=DEVICE, dtype=DTYPE),
+    velocity=torch.tensor(INITIAL_PARTICLE_VELOCITY, device=DEVICE, dtype=DTYPE),
+    time=0.0,
 )
+pd.Series({"particle_axial_position": particle_axial_position,
+           "particle_radius": particle_radius,
+           "blockage ratio a*/R*": particle_radius / R})
 
+reynolds_number_channel = domain_config.reynolds
+reynolds_number_particle = domain_config.reynolds_particle(particle_state)
+regime_table = pd.Series({
+    "channel Reynolds number Re_R": reynolds_number_channel,
+    "particle-scale Reynolds number Re_p": reynolds_number_particle,
+    "reference flow regime": "Stokes model assumed; Re_R is not asymptotically small",
+})
+regime_table
+
+```
+
+```{python}
+#| label: reference-physical-scales
 # Reference physical scales
-mu = fluid_cfg.dynamic_viscosity
-a_p = particle_cfg.radius
-R_channel = domain_cfg.radius
-u_max = domain_cfg.u_max
+mu = fluid_config.dynamic_viscosity
+a_p = particle_config.radius
+R_channel = domain_config.radius
+u_max = domain_config.u_max
 
 # Theoretical Stokes drag constant C_stokes = 6 * pi * mu * a_p
 C_stokes = 6.0 * np.pi * mu * a_p
 ```
 
-The theoretical Stokes drag coefficient for a sphere of radius $a =$
-`{python} f"{a_p*1e6:.1f}"` $\mu\text{m}$ in a fluid with viscosity $\mu =$
-`{python} f"{mu:.3e}"` $\text{Pa}\cdot\text{s}$ is $C_{\text{Stokes}} =$
-`{python} f"{C_stokes:.6e}"` $\text{N}\cdot\text{s}/\text{m}$.
+## Baseline (undisturbed) flow
 
-# Surface Traction Force Verification
+```{python}
+#| label: baseline-training
+BASELINE_CONFIG = mfp.TrainingConfig(
+    n_interior_points=n_interior_points, n_boundary_points=n_boundary_points,
+    n_epochs=n_epochs, random_seed=RANDOM_SEED, device=str(DEVICE),
+    use_lbfgs_refinement=True,
+    lbfgs_n_interior_points=lbfgs_n_interior_points,
+    lbfgs_n_boundary_points=lbfgs_n_boundary_points,
+    lbfgs_rounds=lbfgs_rounds,
+    lbfgs_iterations_per_round=lbfgs_iterations_per_round,
+    residual_form=residual_form,
+    verbose=True, log_every=log_every,
+)
+baseline_raw = mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32, 32),
+                             training_config=BASELINE_CONFIG,
+                             activation="tanh", )
+baseline_network = mfp.apply_hard_wall_constraint(baseline_raw, domain)
 
-In this test, we verify that the numerical surface traction force computed by integrating the Cauchy stress tensor $\boldsymbol{\sigma} = -p \mathbf{I} + \mu (\nabla \mathbf{u} + \nabla \mathbf{u}^T)$ over the sphere surface matches the analytical Stokes drag.
+t0 = time.perf_counter()
+baseline_network, baseline_history = mfp.train(
+    network=baseline_network, domain=domain, fluid_config=fluid_config, field_config=field_config,
+    training_config=BASELINE_CONFIG, 
+)
+print(f"Baseline trained in {time.perf_counter() - t0:.1f}s | Final total loss: {baseline_history.adam.total[-1]:.3e}")
+baseline_history.print_summary()
 
+baseline_l2_error = mfp.compute_global_l2_error(
+    baseline_network, domain,
+    torch.linspace(0.0, R, 80, device=DEVICE, dtype=DTYPE),
+    torch.linspace(0.0, L, 160, device=DEVICE, dtype=DTYPE),
+    PEAK_VELOCITY_NONDIM,
+)
+print(f"Baseline global relative L2 velocity error: {baseline_l2_error:.3e}")
+
+```
+
+## Two-way-coupled flow around a fixed particle
 
 ```{python}
 #| label: particle-training
-n_interior_points: int = 4_000  #  Number of interior collocation points per Adam epoch
-n_boundary_points: int = 1_000   # Number of boundary collocation points per Adam epoch.
-n_epochs = int(250*4)
-lbfgs_n_interior_points: int = 10_000
-lbfgs_n_boundary_points: int = int(300*4)
-lbfgs_rounds = 4
-lbfgs_iterations_per_round = 400
-log_every = int(n_epochs / 5)
-residual_form = "standard"
-
 PARTICLE_TRAINING_CONFIG = mfp.TrainingConfig(
     n_interior_points=n_interior_points, n_boundary_points=n_boundary_points, n_epochs=n_epochs,
     random_seed=RANDOM_SEED, device=str(DEVICE),
@@ -154,124 +280,691 @@ PARTICLE_TRAINING_CONFIG = mfp.TrainingConfig(
     lbfgs_n_boundary_points=lbfgs_n_boundary_points,
     lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
     residual_form=residual_form,
-    verbose=True, log_every=log_every,
 )
-N_PARTICLE_SURFACE_POINTS = 150
+N_PARTICLE_SURFACE_POINTS = 250
 
 coupling_config = mfp.TwoWayCouplingConfig(
-    particle_config=particle_cfg,
+    particle_config=particle_config,
     particle_velocity=INITIAL_PARTICLE_VELOCITY,
     particle_position=INITIAL_PARTICLE_POSITION,
     n_surface_points=N_PARTICLE_SURFACE_POINTS,
+    particle_loss_weight=10.0,
 )
 
 particle_raw = mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(48, 48, 48), 
-                             training_config = PARTICLE_TRAINING_CONFIG,
+                             training_config=PARTICLE_TRAINING_CONFIG,
                              activation="tanh", )
 particle_network_init = mfp.apply_hard_wall_constraint(particle_raw, domain)
 
 t0 = time.perf_counter()
-particle_net, particle_history = mfp.train(
-    network=particle_network_init, domain=domain, fluid_config=fluid_cfg,
+particle_network, particle_history = mfp.train(
+    network=particle_network_init, domain=domain, fluid_config=fluid_config,
     training_config=PARTICLE_TRAINING_CONFIG, coupling_config=coupling_config,
 )
 print(f"Two-way flow (fixed particle) trained in {time.perf_counter() - t0:.1f}s")
 particle_history.print_summary()
+
 ```
 
 ```{python}
 #| label: fig-particle-loss
 #| fig-cap: "Loss convergence for the two-way-coupled flow around the fixed particle, by component."
 mfp.plot_two_way_history(particle_history)
+
 ```
 
-```{python}
-# Compute traction force via Gauss-Legendre quadrature integration
-n_quad_pts = 181
-F_traction_tensor = mfp.surface_traction_force(
-    flow_network=particle_net,
-    particle_config=particle_cfg,
-    particle_state=particle_state,
-    n_quadrature_points=n_quad_pts
-)
-F_traction_pinn = F_traction_tensor.item()
-
-# Analytical prediction (sphere moving in stationary fluid)
-F_stokes_expected = -C_stokes * v_rel_test
-abs_error_drag = abs(F_traction_pinn - F_stokes_expected)
-rel_error_drag = abs_error_drag / abs(F_stokes_expected)
-```
-## Quantitative Analysis: Surface Traction Accuracy
-
-* **Analytical Stokes Drag:** `{python} f"{F_stokes_expected:.6e}"` $\text{N}$
-* **PINN Surface Traction Force:** `{python} f"{F_traction_pinn:.6e}"` $\text{N}$
-* **Absolute Discrepancy:** `{python} f"{abs_error_drag:.6e}"` $\text{N}$
-* **Relative Error:** `{python} f"{rel_error_drag * 100:.4f}"` $\%$
-
-The surface traction integration module yields a relative error of `{python} f"{rel_error_drag * 100:.4f}"` $\%$ when evaluated with `{python} n_quad_pts` quadrature points across the particle boundary. This validates the auto-differentiation derivative evaluations and stress integration routines.
-
-# Force-Balanced Terminal Velocity Root-Finding
-
-Under an applied magnetic gradient, the particle experiences a magnetic force $F_{\text{mag}}$. The terminal velocity $v_{\text{term}}$ satisfies $F_{\text{net}}(v_{\text{term}}) = F_{\text{mag}} + F_{\text{drag}}(v_{\text{term}}) = 0$.
+### Flow validity around the particle
 
 ```{python}
-def _uniform_field_fn(coordinates: torch.Tensor) -> mfp.MagneticFieldSample:  # FIXED: was mfp.FieldSample
-    return mfp.uniform_field(coordinates, magnitude=1.0, orientation=(1.0, 0.0))
+#| label: fig-particle-field
+#| fig-cap: "Velocity magnitude around the fixed particle. Solid disk marks excluded region."
+n_r, n_z = 140, 260
+r_grid = torch.linspace(0.0, R, n_r, device=DEVICE, dtype=DTYPE)
+z_grid = torch.linspace(0.0, L, n_z, device=DEVICE, dtype=DTYPE)
+rr, zz = torch.meshgrid(r_grid, z_grid, indexing="ij")
+grid_pts = torch.stack([rr.reshape(-1), zz.reshape(-1)], dim=1)
 
-# Prescribed axial magnetic force
-F_mag_axial = 1.0e-8  # 10 nN
+with torch.no_grad():
+    field_pred = particle_network(grid_pts).reshape(n_r, n_z, 3)
+u_r_field = field_pred[..., 0]
+u_z_field = field_pred[..., 1]
+vel_mag = torch.hypot(u_r_field, u_z_field)
 
-# Solve for force-balanced terminal velocity using Brent's method
-v_term_pinn = mfp.solve_force_balanced_velocity(
-    network=particle_net, domain=domain,
-    fluid_config=fluid_cfg,
-    particle_config=particle_cfg,
-    particle_state=particle_state,
-    applied_magnetic_force=F_mag_axial,
-    n_quadrature_points=n_quad_pts,
-    velocity_bounds=(-1.0, 1.0)
-)
+inside_particle = (zz - particle_state.axial_position) ** 2 + rr ** 2 < particle_config.radius ** 2
+vel_mag_masked = np.ma.array(vel_mag.cpu().numpy(), mask=inside_particle.cpu().numpy())
 
-# Expected analytical terminal velocity: v_term = F_mag / C_stokes
-v_term_analytical = F_mag_axial / C_stokes
-v_term_error_rel = abs(v_term_pinn - v_term_analytical) / v_term_analytical
-```
-
-```{python}
-# Sweep candidate velocities to plot the root-finding curve
-v_candidates = np.linspace(0.0, 2.0 * v_term_analytical, 25, device=DEVICE, 
-                           dtype=DTYPE)
-F_net_vals = []
-
-for v_c in v_candidates:
-    state_c = ParticleState(
-        radial_position=0.0,
-        axial_position=5.0e-3,
-        radial_velocity=0.0,
-        axial_velocity=v_c
-    )
-    F_drag_c = surface_traction_force(
-        flow_network=flow_net,
-        particle_config=particle_cfg,
-        particle_state=state_c,
-        n_quadrature_points=n_quad_pts
-    ).item()
-    F_net_vals.append(F_mag_axial + F_drag_c)
-
-F_net_vals = np.array(F_net_vals)
-
-plt.figure(figsize=(7, 4))
-plt.axhline(0, color='k', linestyle='--', alpha=0.6, label="Force Equilibrium ($F_{\\text{net}} = 0$)")
-plt.plot(v_candidates * 1e3, F_net_vals * 1e9, 'o-', color='crimson', label="Net Force Curve $F_{\\text{net}}(v_p)$")
-plt.axvline(v_term_pinn * 1e3, color='navy', linestyle=':', label=f"Solved $v_{{\\text{{term}}}}$ = {v_term_pinn*1e3:.4f} mm/s")
-plt.xlabel("Particle Velocity $v_p$ [mm/s]")
-plt.ylabel("Net Axial Force $F_{\\text{net}}$ [nN]")
-plt.title("Force-Balanced Velocity Root-Finding Profile")
-plt.grid(True, linestyle=':', alpha=0.6)
-plt.legend()
-plt.tight_layout()
+fig, ax = plt.subplots(figsize=(9.0, 3.2))
+im = ax.imshow(vel_mag_masked, origin="lower", extent=[0.0, L, 0.0, R], aspect="auto", cmap="viridis")
+fig.colorbar(im, ax=ax, label=r"$\vert{}\mathbf{u}^*\vert{}$")
+theta_draw = np.linspace(0.0, np.pi, 200)
+ax.plot(particle_state.axial_position + particle_config.radius * np.cos(theta_draw), particle_config.radius * np.sin(theta_draw),
+        color="white", linewidth=1.2)
+ax.set_xlabel("Axial position $z^*$")
+ax.set_ylabel("Radial position $r^*$")
+ax.set_title("Two-way-coupled velocity magnitude around a fixed sphere")
+fig.tight_layout()
 plt.show()
+
 ```
+
+```{python}
+#| label: fig-particle-profiles
+#| fig-cap: "Axial-velocity profile u_z*(r*) at four axial stations."
+z_upstream = torch.tensor([0.20 * particle_state.axial_position, 0.60 * particle_state.axial_position], device=DEVICE, dtype=DTYPE)
+z_downstream = particle_state.axial_position + particle_config.radius + (L - particle_state.axial_position - particle_config.radius) * torch.tensor([0.2, 0.6], device=DEVICE, dtype=DTYPE)
+profile_stations = torch.cat([z_upstream, z_downstream])
+
+upstream_distances = (z_upstream - particle_axial_position).abs()
+downstream_distances = (z_downstream - particle_axial_position).abs()
+upstream_labels = (["upstream (near)", "upstream (far)"] if upstream_distances[0] < upstream_distances[1]
+                   else ["upstream (far)", "upstream (near)"])
+downstream_labels = (["downstream (near)", "downstream (far)"] if downstream_distances[0] < downstream_distances[1]
+                     else ["downstream (far)", "downstream (near)"])
+profile_labels = tuple(upstream_labels + downstream_labels)
+radial_grid_profile = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
+
+fig, ax = plt.subplots(figsize=(7.5, 4.2))
+profile_deviations = []
+for index, (z_station, label, color) in enumerate(zip(profile_stations, profile_labels, plt.cm.tab10.colors)):
+    coords = torch.stack([radial_grid_profile, z_station.expand_as(radial_grid_profile)], dim=1)
+    with torch.no_grad():
+        u_two_way = particle_network(coords)[:, 1]
+        u_baseline = baseline_network(coords)[:, 1]
+    profile_deviations.append((u_two_way - u_baseline).abs().max().item())
+    ax.plot(radial_grid_profile.cpu().numpy(), u_two_way.cpu().numpy(), color=color, linewidth=1.6,
+            label=f"{label} (z*={z_station.item():.2f})")
+    ax.plot(radial_grid_profile.cpu().numpy(), u_baseline.cpu().numpy(), color=color, linestyle="--",
+            linewidth=1.0, alpha=0.7, label="undisturbed baseline" if index == 0 else None)
+ax.set_xlabel("Radial position $r^*$")
+ax.set_ylabel("Axial velocity $u_z^*$")
+ax.set_title("Particle-perturbed vs. undisturbed axial-velocity profiles")
+ax.legend(fontsize=7, ncol=2, loc="lower left")
+ax.grid(True, linestyle=":", alpha=0.5)
+fig.tight_layout()
+plt.show()
+
+distance_to_particle = (profile_stations - particle_axial_position).abs()
+nearest_profile_index = int(distance_to_particle.argmin())
+farthest_profile_index = int(distance_to_particle.argmax())
+profile_relaxation_ratio = (
+    profile_deviations[nearest_profile_index] / profile_deviations[farthest_profile_index]
+    if profile_deviations[farthest_profile_index] > 0.0 else float("nan")
+)
+
+```
+
+```{python}
+#| label: fig-particle-flowrate
+#| fig-cap: "Predicted volumetric flow rate Q(z) upstream and downstream of particle."
+N_FLOWRATE_STATIONS = 40
+z_upstream_curve = torch.linspace(
+    0.05 * L, particle_axial_position - particle_radius, N_FLOWRATE_STATIONS, device=DEVICE, dtype=DTYPE
+)
+z_downstream_curve = torch.linspace(
+    particle_axial_position + particle_radius, 0.95 * L, N_FLOWRATE_STATIONS, device=DEVICE, dtype=DTYPE
+)
+q_upstream_curve = mfp.compute_flow_rate_curve(particle_network, domain, z_upstream_curve, n_quadrature_points=128)
+q_downstream_curve = mfp.compute_flow_rate_curve(particle_network, domain, z_downstream_curve, n_quadrature_points=128)
+
+fig, ax = plt.subplots(figsize=(8.0, 3.2))
+ax.plot(z_upstream_curve.cpu().numpy(), q_upstream_curve.cpu().numpy(), color="tab:blue",
+        marker=".", markersize=3.0, linewidth=1.0, label="Q(z), two-way")
+ax.plot(z_downstream_curve.cpu().numpy(), q_downstream_curve.cpu().numpy(), color="tab:blue",
+        marker=".", markersize=3.0, linewidth=1.0)
+ax.axhline(Q_REF, color="black", linestyle="--", linewidth=1.0, label="Q_ref* (analytical)")
+ax.axvspan(particle_axial_position - particle_radius, particle_axial_position + particle_radius,
+           color="lightgray", alpha=0.5, label="Particle (excluded)")
+ax.set_xlabel("Axial position $z^*$")
+ax.set_ylabel("$Q(z)^*$")
+ax.set_title("Flow-rate reconnection around the particle")
+ax.legend(fontsize=8, loc="lower center")
+ax.grid(True, linestyle=":", alpha=0.5)
+fig.tight_layout()
+plt.show()
+
+q_curve_max_relative_error = max(
+    ((q_upstream_curve - Q_REF).abs() / Q_REF).max().item(),
+    ((q_downstream_curve - Q_REF).abs() / Q_REF).max().item(),
+)
+print(f"Max relative Q(z) deviation across the continuous curve: {q_curve_max_relative_error:.2%}")
+
+```
+
+```{python}
+#| label: tbl-particle-conservation
+#| tbl-cap: "Volumetric flow rate upstream and downstream against inlet reference."
+q_upstream = mfp.axial_flow_rate(particle_network, R, z_upstream, 128)
+q_downstream = mfp.axial_flow_rate(particle_network, R, z_downstream, 128)
+q_all = torch.cat([q_upstream, q_downstream])
+z_all = torch.cat([z_upstream, z_downstream])
+
+conservation_table = pd.DataFrame({
+    "z*": z_all.tolist(),
+    "station": ["upstream"] * len(z_upstream) + ["downstream"] * len(z_downstream),
+    "Q(z)*": q_all.tolist(),
+    "Q_ref*": [Q_REF] * len(z_all),
+    "relative error": ((q_all - Q_REF).abs() / Q_REF).tolist(),
+})
+conservation_table
+
+```
+
+```{python}
+#| label: particle-profile-data
+radial_grid_particle = torch.linspace(0.0, R, 150, device=DEVICE, dtype=DTYPE)
+z_stations_particle = tuple(z_all.tolist())
+profile_evaluation_particle = mfp.evaluate_velocity_profiles(
+    particle_network, domain, z_stations_particle, radial_grid_particle, PEAK_VELOCITY_NONDIM
+)
+
+```
+
+```{python}
+#| label: fig-particle-profile-comparison
+#| fig-cap: "Predicted axial-velocity profile at four stations vs. Hagen-Poiseuille."
+mfp.plot_velocity_profile_comparison(profile_evaluation_particle)
+
+```
+
+```{python}
+#| label: fig-particle-profile-error
+#| fig-cap: "Axial-velocity profile error against analytical solution."
+mfp.plot_profile_error(profile_evaluation_particle)
+
+```
+
+```{python}
+#| label: fig-particle-leakage
+#| fig-cap: "Predicted radial velocity (leakage) at four stations."
+mfp.plot_radial_leakage(profile_evaluation_particle)
+
+```
+
+```{python}
+#| label: particle-profile-worst
+profile_error_tensor_particle = (
+    profile_evaluation_particle.predicted_uz - profile_evaluation_particle.analytical_uz.unsqueeze(0)
+).abs()
+worst_station_index_particle = int(profile_error_tensor_particle.max(dim=1).values.argmax())
+worst_station_z_particle = z_stations_particle[worst_station_index_particle]
+worst_station_label_particle = conservation_table.iloc[worst_station_index_particle]["station"]
+
+```
+
+```{python}
+#| label: particle-flowrate-stats
+q_dev_upstream = (q_upstream_curve - Q_REF).abs() / Q_REF
+q_dev_downstream = (q_downstream_curve - Q_REF).abs() / Q_REF
+
+```
+
+```{python}
+#| label: fig-particle-pressure
+#| fig-cap: "Predicted axial pressure along symmetry axis."
+N_PRESSURE_POINTS = 200
+axial_positions_pressure, predicted_pressure_particle = mfp.evaluate_axis_pressure_profile(
+    particle_network, domain, n_axial_points=N_PRESSURE_POINTS
+)
+inside_particle_axis = np.abs(axial_positions_pressure - particle_state.axial_position) < particle_config.radius
+predicted_pressure_masked = np.ma.array(predicted_pressure_particle, mask=inside_particle_axis)
+analytical_pressure_baseline = mfp.hagen_poiseuille_pressure(
+    torch.as_tensor(axial_positions_pressure, dtype=DTYPE), R, PEAK_VELOCITY_NONDIM, L, REFERENCE_PRESSURE
+).numpy()
+
+fig, ax = plt.subplots(figsize=(8.0, 3.2))
+ax.plot(axial_positions_pressure, predicted_pressure_masked, color="tab:red", linewidth=1.2,
+        label="Predicted p(r≈0, z), two-way")
+ax.plot(axial_positions_pressure, analytical_pressure_baseline, color="black", linestyle="--", linewidth=1.0,
+        label="Analytical (particle-free) baseline")
+ax.axvspan(particle_state.axial_position - particle_config.radius, particle_state.axial_position + particle_config.radius,
+           color="lightgray", alpha=0.5, label="Particle (excluded)")
+ax.set_xlabel("Axial position $z^*$")
+ax.set_ylabel(r"Pressure $p^*(r{\approx}0, z)$")
+ax.set_title("Axial pressure through the particle vs. the undisturbed baseline")
+ax.legend(fontsize=8)
+ax.grid(True, linestyle=":", alpha=0.5)
+fig.tight_layout()
+plt.show()
+
+```
+
+```{python}
+#| label: check-particle-conservation
+max_conservation_error = q_curve_max_relative_error
+conservation_check = mfp.evaluate_check(
+    "Mass conservation with particle",
+    "Q(z) upstream and downstream of the sphere against the analytical reference",
+    max_conservation_error, thresholds.conservation_of_mass_tolerance, "<=",
+)
+verification_checks = verification_checks + (conservation_check,)
+conservation_verdict = "clears" if conservation_check.passed else "misses"
+mfp.render_verification_table((conservation_check,))
+
+```
+
+```{python}
+#| label: tbl-particle-noslip
+#| tbl-cap: "Predicted velocity on particle surface vs. prescribed rigid-body target."
+theta_probe = torch.linspace(0.03, np.pi - 0.03, 60, device=DEVICE, dtype=DTYPE)
+r_s = particle_config.radius * torch.sin(theta_probe)
+z_s = particle_state.axial_position + particle_config.radius * torch.cos(theta_probe)
+surface_points = torch.stack([r_s, z_s], dim=1)
+with torch.no_grad():
+    surface_pred = particle_network(surface_points)
+surface_target = mfp.rigid_body_velocity_condition(surface_points, (0.0, 0.0))
+surface_error = (surface_pred[:, :2] - surface_target).abs()
+
+noslip_table = pd.Series({
+    "max |u_r| on surface": surface_pred[:, 0].abs().max().item(),
+    "max |u_z - target| on surface": surface_error[:, 1].max().item(),
+    "RMS surface velocity error": torch.sqrt(torch.mean(surface_error ** 2)).item(),
+})
+noslip_table
+
+```
+
+```{python}
+#| label: check-particle-noslip
+max_noslip_error = float(surface_error.max())
+noslip_check = mfp.evaluate_check(
+    "Particle no-slip satisfaction",
+    "Predicted surface velocity error against the sphere's prescribed rigid-body velocity",
+    max_noslip_error, thresholds.noslip_tolerance, "<=",
+)
+verification_checks = verification_checks + (noslip_check,)
+noslip_verdict = "clears" if noslip_check.passed else "misses"
+mfp.render_verification_table((noslip_check,))
+
+```
+
+```{python}
+#| label: check-particle-convergence
+residual_terms = ("momentum_r", "momentum_z", "continuity")
+final_residual = max(getattr(particle_history.lbfgs, name)[-1] for name in residual_terms)
+convergence_check = mfp.evaluate_check(
+    "Two-way flow convergence",
+    "Interior-residual and boundary-loss magnitudes for the particle-perturbed flow",
+    final_residual, thresholds.two_way_residual_tolerance, "<=",
+)
+verification_checks = verification_checks + (convergence_check,)
+convergence_verdict = "clears" if convergence_check.passed else "misses"
+mfp.render_verification_table((convergence_check,))
+
+```
+
+```{python}
+#| label: fig-particle-residual
+#| fig-cap: "Held-out axial-momentum residual magnitude around the fixed particle."
+residual_radial_grid = torch.linspace(R * 1.0e-3, R, 120, device=DEVICE, dtype=DTYPE)
+residual_axial_grid = torch.linspace(0.0, L, 220, device=DEVICE, dtype=DTYPE)
+residual_grids = mfp.evaluate_residual_grid(
+    particle_network, domain, fluid_config, residual_radial_grid, residual_axial_grid, residual_form="standard",
+)
+residual_rr, residual_zz = torch.meshgrid(residual_radial_grid, residual_axial_grid, indexing="ij")
+residual_inside_particle = (residual_zz - particle_state.axial_position) ** 2 + residual_rr ** 2 < particle_config.radius ** 2
+momentum_z_residual = residual_grids["momentum_z"].clone()
+momentum_z_residual[residual_inside_particle] = float("nan")
+
+residual_hotspot_flat_index = int(momentum_z_residual.nan_to_num(0.0).argmax())
+residual_hotspot_r_index, residual_hotspot_z_index = divmod(residual_hotspot_flat_index, momentum_z_residual.shape[1])
+residual_hotspot_r_fraction = (residual_radial_grid[residual_hotspot_r_index] / R).item()
+residual_hotspot_z_fraction = (residual_axial_grid[residual_hotspot_z_index] / L).item()
+
+mfp.plot_residual_heatmap(residual_radial_grid, residual_axial_grid, momentum_z_residual, "momentum_z")
+```
+
+# Verification 1: PINN Traction Force vs. Analytical Drag
+
+```{python}
+#| label: fig-drag-quadrature
+#| fig-cap: "Convergence of drag-force estimate with quadrature nodes."
+quadrature_counts = (11, 21, 41, 81, 181, 361)
+drag_by_quadrature = [mfp.surface_traction_force(particle_network, 
+                                                 particle_config=particle_config,
+                                                 particle_state=particle_state, 
+                                                 n_quadrature_points=n).item() for n in quadrature_counts]
+
+fig, ax = plt.subplots(figsize=(6.0, 3.6))
+ax.plot(quadrature_counts, drag_by_quadrature, marker="o")
+ax.set_xscale("log")
+ax.set_xlabel("Number of quadrature nodes")
+ax.set_ylabel(r"$f_z^*$")
+ax.set_title("Drag-force quadrature convergence")
+ax.grid(True, linestyle=":", alpha=0.5)
+fig.tight_layout()
+plt.show()
+
+drag_force = drag_by_quadrature[-1]
+print(f"f_z* (n=361) = {drag_force:.4f}")
+```
+
+```{python}
+#| label: check-drag-quadrature
+quadrature_relative_change = abs(drag_by_quadrature[-1] - drag_by_quadrature[-2]) / abs(drag_by_quadrature[-1])
+quadrature_check = mfp.evaluate_check(
+    "Drag-force quadrature convergence",
+    "Relative change in the drag-force estimate under the last quadrature-node doubling",
+    quadrature_relative_change, thresholds.quadrature_convergence_tolerance, "<=",
+)
+verification_checks = verification_checks + (quadrature_check,)
+print(f"Relative change, last quadrature doubling: {quadrature_relative_change:.2%}")
+mfp.render_verification_table((quadrature_check,))
+
+```
+
+## Manufactured-solution check: zero net force on a source-free field
+
+```{python}
+#| label: tbl-drag-manufactured
+def exact_poiseuille_network(coordinates: torch.Tensor) -> torch.Tensor:
+    """Closed-form Hagen-Poiseuille field with trained-network calling convention."""
+    return mfp.hagen_poiseuille_velocity_field(coordinates, domain, PEAK_VELOCITY_NONDIM, REFERENCE_PRESSURE)
+
+virtual_particle_config = mfp.ParticleConfig(kind="spherical", radius=0.3 * R)
+virtual_particle_state = mfp.ParticleState(
+    position=torch.tensor([0.0, 0.5 * L], device=DEVICE, dtype=DTYPE),
+    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE), 
+    time=0.0,
+)
+manufactured_forces = {
+    n: mfp.surface_traction_force(exact_poiseuille_network, virtual_particle_config, virtual_particle_state, n).item()
+    for n in (11, 41, 181, 721)
+}
+pd.Series(manufactured_forces, name="f_z* (should -> 0)")
+```
+
+```{python}
+#| label: check-drag-manufactured
+manufactured_residual = abs(manufactured_forces[721])
+manufactured_check = mfp.evaluate_check(
+    "Drag-force manufactured check",
+    "Traction integral of a genuine Stokes solution over a virtual (non-singular) test sphere",
+    manufactured_residual, thresholds.manufactured_force_tolerance, "<=",
+)
+verification_checks = verification_checks + (manufactured_check,)
+mfp.render_verification_table((manufactured_check,))
+```
+
+## Wall confinement vs. the unconfined Stokes law
+
+```{python}
+#| label: tbl-stokes-comparison
+with torch.no_grad():
+    local_undisturbed_uz = baseline_network(torch.tensor([[1.0e-4 * R, particle_state.axial_position]], device=DEVICE, dtype=DTYPE))[0, 1].item()
+stokes_drag = 6.0 * np.pi * particle_radius * local_undisturbed_uz
+confinement_ratio = drag_force / stokes_drag
+confinement_summary = (
+    "above one, compatible with wall confinement dominating over the centerline-vs-bulk curvature effect"
+    if confinement_ratio > 1.0
+    else "below one, compatible with the curvature effect dominating over wall confinement"
+)
+
+pd.Series({
+    "Undisturbed local centerline u_z*": local_undisturbed_uz,
+    "Unconfined Stokes drag 6*pi*a*U*": stokes_drag,
+    "Predicted f_z* (two-way)": drag_force,
+    "Ratio f_z* / (6*pi*a*U*)": confinement_ratio,
+})
+```
+
+```{python}
+#| label: confinement-literature-anchor
+def haberman_sayre_wall_factor(blockage_ratio: float) -> float:
+    lam = blockage_ratio
+    numerator = 1.0 - 2.105 * lam + 2.0865 * lam**3 - 1.7068 * lam**5 + 0.72603 * lam**6
+    denominator = 1.0 - 0.75857 * lam**5
+    return numerator / denominator
+
+haberman_sayre_confinement_factor = 1.0 / haberman_sayre_wall_factor(particle_radius / R)
+```
+
+# Verification 2: Force-Balanced Velocity Root-Finding
+
+## Passive particle: consistency with the existing Faxén-corrected model
+
+```{python}
+#| label: force-balance-passive
+COLD_CONFIG = mfp.TrainingConfig(
+    n_interior_points=500, n_boundary_points=60, n_epochs=300, random_seed=RANDOM_SEED, device=str(DEVICE),
+    use_lbfgs_refinement=True, lbfgs_n_interior_points=1200, lbfgs_n_boundary_points=150,
+    lbfgs_rounds=1, lbfgs_iterations_per_round=80,
+    residual_form=residual_form,
+)
+WARM_CONFIG = mfp.TrainingConfig(
+    n_interior_points=500, n_boundary_points=60, n_epochs=80, random_seed=RANDOM_SEED + 1, device=str(DEVICE),
+    use_lbfgs_refinement=True, lbfgs_n_interior_points=1200, lbfgs_n_boundary_points=150,
+    lbfgs_rounds=1, lbfgs_iterations_per_round=40,
+    residual_form=residual_form,
+)
+
+start_raw = mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(32, 32),
+                          training_config=WARM_CONFIG,
+                          activation="tanh", )
+start_network = mfp.apply_hard_wall_constraint(start_raw, domain)
+
+t0 = time.perf_counter()
+u_passive, network_passive, history_passive = mfp.solve_force_balanced_velocity(
+    start_network, domain, fluid_config=fluid_config, 
+    particle_config=particle_config, 
+    particle_state=particle_state,
+    training_config=COLD_CONFIG,
+    applied_force_z=0.0, 
+    velocity_bracket=(0.2, 1.6),
+    velocity_tolerance=2.0e-2, 
+    refinement_config=WARM_CONFIG, 
+)
+print(f"Force-balanced U_z* (passive) = {u_passive:.4f}  |  solved in {time.perf_counter() - t0:.1f}s")
+
+particle_position = torch.tensor([[0.15 * R, particle_state.axial_position]], requires_grad=True, device=DEVICE, dtype=DTYPE)
+faxen_velocity = mfp.faxen_corrected_velocity(baseline_network, 
+                                              particle_position, particle_radius)[0, 1].item()
+print(f"Faxén-corrected point-tracer estimate at the same position: {faxen_velocity:.4f}")
+
+faxen_relative_error = abs(u_passive - faxen_velocity) / abs(faxen_velocity)
+print(f"Relative difference: {faxen_relative_error:.2%}")
+```
+
+```{python}
+#| label: check-faxen-consistency
+faxen_check = mfp.evaluate_check(
+    "Faxén-limit consistency",
+    "Force-balanced velocity of a passive particle vs. the existing Faxén-corrected point-tracer estimate",
+    faxen_relative_error, thresholds.faxen_consistency_tolerance, "<=",
+)
+verification_checks = verification_checks + (faxen_check,)
+mfp.render_verification_table((faxen_check,))
+```
+
+## Directional response to an applied force
+
+```{python}
+#| label: force-balance-forced
+APPLIED_FORCE = -0.3
+
+t0 = time.perf_counter()
+u_forced, network_forced, history_forced = mfp.solve_force_balanced_velocity(
+    start_network, domain, fluid_config=fluid_config, 
+    particle_config=particle_config, 
+    particle_state=particle_state,
+    training_config=COLD_CONFIG,
+    applied_force_z=APPLIED_FORCE, 
+    velocity_bracket=(-1.0, 1.6),
+    velocity_tolerance=2.0e-2,
+    refinement_config=WARM_CONFIG, 
+)
+print(f"Force-balanced U_z* (applied force = {APPLIED_FORCE}) = {u_forced:.4f}  |  "
+      f"solved in {time.perf_counter() - t0:.1f}s")
+print(f"Passive case: {u_passive:.4f}  |  Forced case: {u_forced:.4f}  |  "
+      f"Slower under resisting force: {u_forced < u_passive}")
+
+ASSISTING_FORCE = 0.3
+u_assisting, network_assisting, history_assisting = mfp.solve_force_balanced_velocity(
+    start_network, domain, fluid_config=fluid_config, 
+    particle_config=particle_config, 
+    particle_state=particle_state,
+    training_config=COLD_CONFIG,
+    applied_force_z=ASSISTING_FORCE,
+    velocity_bracket=(0.2, 2.4),
+    velocity_tolerance=2.0e-2,
+    refinement_config=WARM_CONFIG, 
+)
+print(f"Force-balanced U_z* (assisting force = {ASSISTING_FORCE}) = {u_assisting:.4f}")
+print(f"Monotone response check: {u_forced < u_passive < u_assisting}")
+
+```
+
+```{python}
+#| label: check-force-direction
+direction_check = mfp.evaluate_check(
+    "Directional force response",
+    "Force-balanced velocity decreases when an opposing external force is applied",
+    u_passive - u_forced, 0.0, ">",
+)
+verification_checks = verification_checks + (direction_check,)
+mfp.render_verification_table((direction_check,))
+
+```
+
+# Verification 3: Two-Way Coupled Trajectory Tracking
+
+```{python}
+#| label: fig-trajectory
+#| fig-cap: "A short two-way-coupled trajectory against the existing one-way integrator over the same span."
+N_STEPS = 2
+TIME_STEP = 0.4
+trajectory_start = 0.25 * L
+
+t0 = time.perf_counter()
+two_way_states = mfp.advance_particle_two_way(
+    start_network, domain, fluid_config=fluid_config, training_config=COLD_CONFIG,
+    particle_config=particle_config, initial_axial_position=trajectory_start,
+    applied_force_fn=lambda z: 0.0, n_steps=N_STEPS, time_step=TIME_STEP,
+    velocity_bracket=(0.2, 1.6),
+    velocity_tolerance=3.0e-2, 
+    refinement_config=WARM_CONFIG,
+)
+print(f"Two-way trajectory ({N_STEPS} steps) computed in {time.perf_counter() - t0:.1f}s")
+
+particle_config = mfp.ParticleConfig(kind="spherical", 
+                                     radius=particle_radius * scales.length, magnetic_moment=(1.0, 0.0))
+initial_state = mfp.ParticleState(
+    position=torch.tensor([1.0e-4 * R, trajectory_start], device=DEVICE, dtype=DTYPE), 
+    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE), 
+    time=0.0,
+)
+field_fn = lambda x: mfp.uniform_field(x, magnitude=field_config.magnitude, orientation=field_config.orientation)
+one_way_states = mfp.integrate_trajectory(
+    flow_network=baseline_network, field_fn=field_fn, domain=domain, scales=scales,
+    particle_config=particle_config, initial_states=[initial_state],
+    mobility_tensor=torch.eye(2, device=DEVICE, dtype=DTYPE).unsqueeze(0), time_span=(0.0, N_STEPS * TIME_STEP),
+)[0]
+
+fig, ax = plt.subplots(figsize=(7.0, 3.2))
+ax.plot([s.time for s in two_way_states], [s.position[1].item() for s in two_way_states],
+        marker="o", label="Two-way coupled (this notebook)")
+ax.plot([s.time for s in one_way_states], [s.position[1].item() for s in one_way_states],
+        linestyle="--", label="One-way, Faxén-corrected (`integrate_trajectory`)")
+ax.set_xlabel("Time $t^*$")
+ax.set_ylabel("Axial position $z^*$")
+ax.set_title("Two-way vs. one-way trajectory (passive particle, same starting point)")
+ax.legend(fontsize=8)
+ax.grid(True, linestyle=":", alpha=0.5)
+fig.tight_layout()
+plt.show()
+
+two_way_final_z = two_way_states[-1].position[1].item()
+one_way_times = torch.tensor([s.time for s in one_way_states], device=DEVICE, dtype=DTYPE)
+one_way_positions = torch.stack([s.position[1].to(device=DEVICE, dtype=DTYPE) for s in one_way_states])
+target_time = torch.as_tensor(N_STEPS * TIME_STEP, device=DEVICE, dtype=DTYPE)
+right_index = torch.searchsorted(one_way_times, target_time).clamp(min=1, max=one_way_times.numel() - 1)
+left_index = right_index - 1
+time_fraction = (target_time - one_way_times[left_index]) / (one_way_times[right_index] - one_way_times[left_index])
+one_way_final_z = (one_way_positions[left_index] + time_fraction *
+                   (one_way_positions[right_index] - one_way_positions[left_index])).item()
+print(f"Final z* after t*={N_STEPS * TIME_STEP}: two-way = {two_way_final_z:.4f}, one-way = {one_way_final_z:.4f}")
+
+trajectory_distance_two_way = two_way_final_z - trajectory_start
+trajectory_distance_one_way = one_way_final_z - trajectory_start
+trajectory_relative_difference = (
+    abs(trajectory_distance_two_way - trajectory_distance_one_way) / abs(trajectory_distance_one_way)
+    if trajectory_distance_one_way != 0.0 else float("nan")
+)
+trajectory_vs_faxen_ratio = trajectory_relative_difference / faxen_relative_error if faxen_relative_error > 0.0 else float("nan")
+trajectory_faxen_comparison_phrase = (
+    "noticeably larger than" if trajectory_vs_faxen_ratio > 1.3
+    else "noticeably smaller than" if trajectory_vs_faxen_ratio < 0.7
+    else "roughly the same order as"
+)
+
+```
+
+## Summary & Verification Matrix
+
+```{python}
+#| label: tbl-summary
+#| tbl-cap: "Final verification matrix — every check from every section above."
+mfp.render_verification_table(verification_checks)
+
+```
+
+```{python}
+#| label: summary-verdict
+n_passed = sum(1 for check in verification_checks if check.passed)
+n_total = len(verification_checks)
+failing_checks = tuple(check for check in verification_checks if not check.passed)
+print(f"{n_passed}/{n_total} checks passed under the reduced notebook-scale training recipe.")
+if failing_checks:
+    failing_names = ", ".join(check.name for check in failing_checks)
+    print(f"Checks not clearing their threshold at this budget: {failing_names}.")
+```
+
+```{python}
+#| label: concluding-remarks-derived
+convergence_bucket = (conservation_check, noslip_check, convergence_check)
+convergence_bucket_passed = [check.name for check in convergence_bucket if check.passed]
+convergence_bucket_failed = [check.name for check in convergence_bucket if not check.passed]
+if convergence_bucket_failed and convergence_bucket_passed:
+    convergence_limited_sentence = (
+        f"{', '.join(convergence_bucket_failed)} did not clear its threshold, while "
+        f"{', '.join(convergence_bucket_passed)} did"
+    )
+elif convergence_bucket_failed:
+    convergence_limited_sentence = (
+        f"none of the three ({', '.join(check.name for check in convergence_bucket)}) cleared its threshold"
+    )
+else:
+    convergence_limited_sentence = "all three cleared their thresholds"
+
+```
+
+## Concluding remarks
+
+1. **The coupled flow solve is not yet fully converged at the reduced notebook
+   budget.** The continuous flow-rate curve reaches a maximum relative deviation
+   near the particle. These metrics are reported together to illustrate budget
+   sensitivity.
+2. **The traction integration is independently checked.** The virtual-sphere
+   manufactured solution validates the quadrature/stress integration pathway on
+   a source-free Stokes field.
+3. **The passive force-balance comparison is informative but not a strict Faxén
+   validation.** The blockage ratio $a^*/R^* = 0.25$ sits outside the
+   small-particle asymptotic limit.
+4. **The applied-force test validates the sign of the coupling mechanism.** The
+   applied force is synthetic; reversing force direction confirms monotonic
+   velocity response.
+5. **The physical Stokes assumption requires additional evidence.** $Re_R$
+   provides a low-Reynolds regime baseline, but further sensitivity sweeps can
+   confirm creeping-flow convergence.
+6. **The most valuable next numerical experiment is a coupled blockage-ratio
+   sweep.** Sweeping blockage ratios $a^*/R^*$ under full convergence budgets
+   will allow direct comparison against published confinement curves.
+
+## Scope and limitations
+
+This notebook verifies selected components of the two-way coupling machinery for
+a single spherical particle, on-axis, at one blockage ratio. It does not verify
+off-axis motion, particle swarms, non-uniform fields, or long production
+trajectories.
 
 # References
 

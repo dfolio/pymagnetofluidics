@@ -7,7 +7,7 @@
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/magnetofluidics_pinn.egg-info" />
     </content>
-    <orderEntry type="jdk" jdkName="~/PycharmProjects/pymagnetofluidics/.venv" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.12 (pymagnetofluidics)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
