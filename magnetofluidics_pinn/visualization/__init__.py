@@ -16,6 +16,7 @@ from magnetofluidics_pinn.visualization.plotting import (
     plot_streamlines as plot_streamlines,
     plot_trajectories as plot_trajectories,
     plot_training_history as plot_training_history,
+plot_two_way_history as plot_two_way_history,  # NEW
     plot_velocity_profile_comparison as plot_velocity_profile_comparison,  # NEW
 )
 
@@ -23,6 +24,7 @@ __all__ = [
     "plot_streamlines",
     "plot_trajectories",
     "plot_training_history",
+    "plot_two_way_history",
     # NEW: verification-metrics plots
     "plot_velocity_profile_comparison",
     "plot_profile_error",

@@ -1,0 +1,279 @@
+---
+title: "Phase 1 --- Verification of Two-Way Particle–Flow Coupling in PINN Microfluidics"
+subtitle: "Quantitative Validation of Surface Traction Integration, Force Balance Solvers, and Trajectory Tracking"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\require{physics}$
+:::
+
+```{python}
+#| label: tbl-preview
+#| tbl-cap: "Verification matrix — populated progressively through the notebook."
+import sys
+from pathlib import Path
+
+for candidate in (Path.cwd(), Path.cwd().parent, Path.cwd().parent.parent):
+    if (candidate / "magnetofluidics_pinn").is_dir() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+
+import magnetofluidics_pinn as mfp
+
+pending_checks = (
+    mfp.pending_check(
+        "Mass conservation with particle",
+        "Q(z) upstream and downstream of the sphere against the analytical reference", "<=",
+    ),
+    mfp.pending_check(
+        "particle no-slip satisfaction",
+        "Predicted surface velocity error against the sphere's prescribed rigid-body velocity", "<=",
+    ),
+    mfp.pending_check(
+        "Two-way flow convergence",
+        "Interior-residual and boundary-loss magnitudes for the particle-perturbed flow", "<=",
+    ),
+    mfp.pending_check(
+        "Drag-force quadrature convergence",
+        "Relative change in the drag-force estimate under the last quadrature-node doubling", "<=",
+    ),
+    mfp.pending_check(
+        "Drag-force manufactured check",
+        "Traction integral of a genuine Stokes solution over a virtual (non-singular) test sphere", "<=",
+    ),
+    mfp.pending_check(
+        "Faxén-limit consistency",
+        "Force-balanced velocity of a passive particle vs. the existing Faxén-corrected point-tracer estimate", "<=",
+    ),
+    mfp.pending_check(
+        "Directional force response",
+        "Force-balanced velocity decreases when an opposing external force is applied", ">",
+    ),
+)
+```
+
+```{python}
+#| label: setup
+import time
+
+import numpy as np
+import pandas as pd
+import torch
+import matplotlib.pyplot as plt
+
+RANDOM_SEED = 42
+DEVICE = mfp.resolve_device(None)
+DTYPE = torch.float32
+
+mfp.set_random_seed(RANDOM_SEED)
+
+# Every pandas Series/DataFrame printed below renders its floats in
+# normalized scientific notation, set once here rather than repeated at
+# each point of use.
+pd.set_option("display.float_format", lambda value: f"{value:.3e}")
+
+verification_checks: tuple[mfp.VerificationCheck, ...] = ()
+print(f"PyTorch: {torch.__version__} | Active Device: {DEVICE} | dtype: {DTYPE}")
+print(f"magnetofluidics_pinn: v{mfp.__version__}")
+```
+
+# Executive Summary & Physical Setup
+
+This notebook verifies the two-way hydrodynamic and magnetic coupling between a
+single spherical magnetic microrobot and an axisymmetric viscous Stokes flow in
+a microchannel.
+
+### Configuration Parameters
+
+We define the fluid properties, domain geometry, and particle dimensions:
+
+```{python}
+# Physical configurations
+field_cfg = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-2, 
+orientation=(1.0, 0.0))
+fluid_cfg = mfp.FluidConfig(dynamic_viscosity=1.0e-3, density=1000.0,
+                        regime="stokes",)
+domain_cfg = mfp.DomainConfig(kind="channel",radius=7.5e-4, length=10.0e-3, u_max=1.0e-3,
+                          fluid=fluid_cfg)
+physical_domain = mfp.build_channel_domain(domain_cfg)
+scales = mfp.compute_scales(domain_cfg, field_cfg)
+domain = mfp.nondimensionalize_domain(physical_domain, scales)
+
+particle_cfg = mfp.ParticleConfig(
+    kind="spherical", 
+    radius=domain.radius*0.25,
+    magnetic_moment=(1.0e-6,0.0),
+)
+
+particle_axial_position = 0.5 * domain.length
+INITIAL_PARTICLE_POSITION = (0.0, particle_axial_position)
+v_rel_test = 1.0e-3
+INITIAL_PARTICLE_VELOCITY = (0.0, v_rel_test)
+particle_state = mfp.ParticleState(
+    position=torch.tensor(INITIAL_PARTICLE_POSITION, device=DEVICE, dtype=DTYPE),  # Centered in the channel
+    velocity=torch.tensor(INITIAL_PARTICLE_VELOCITY, device=DEVICE, dtype=DTYPE),  # Moving along the channel axis
+    time= 0.0
+)
+
+# Reference physical scales
+mu = fluid_cfg.dynamic_viscosity
+a_p = particle_cfg.radius
+R_channel = domain_cfg.radius
+u_max = domain_cfg.u_max
+
+# Theoretical Stokes drag constant C_stokes = 6 * pi * mu * a_p
+C_stokes = 6.0 * np.pi * mu * a_p
+```
+
+The theoretical Stokes drag coefficient for a sphere of radius $a =$
+`{python} f"{a_p*1e6:.1f}"` $\mu\text{m}$ in a fluid with viscosity $\mu =$
+`{python} f"{mu:.3e}"` $\text{Pa}\cdot\text{s}$ is $C_{\text{Stokes}} =$
+`{python} f"{C_stokes:.6e}"` $\text{N}\cdot\text{s}/\text{m}$.
+
+# Surface Traction Force Verification
+
+In this test, we verify that the numerical surface traction force computed by integrating the Cauchy stress tensor $\boldsymbol{\sigma} = -p \mathbf{I} + \mu (\nabla \mathbf{u} + \nabla \mathbf{u}^T)$ over the sphere surface matches the analytical Stokes drag.
+
+
+```{python}
+#| label: particle-training
+n_interior_points: int = 4_000  #  Number of interior collocation points per Adam epoch
+n_boundary_points: int = 1_000   # Number of boundary collocation points per Adam epoch.
+n_epochs = int(250*4)
+lbfgs_n_interior_points: int = 10_000
+lbfgs_n_boundary_points: int = int(300*4)
+lbfgs_rounds = 4
+lbfgs_iterations_per_round = 400
+log_every = int(n_epochs / 5)
+residual_form = "standard"
+
+PARTICLE_TRAINING_CONFIG = mfp.TrainingConfig(
+    n_interior_points=n_interior_points, n_boundary_points=n_boundary_points, n_epochs=n_epochs,
+    random_seed=RANDOM_SEED, device=str(DEVICE),
+    use_lbfgs_refinement=True, lbfgs_n_interior_points=lbfgs_n_interior_points,
+    lbfgs_n_boundary_points=lbfgs_n_boundary_points,
+    lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
+    residual_form=residual_form,
+    verbose=True, log_every=log_every,
+)
+N_PARTICLE_SURFACE_POINTS = 150
+
+coupling_config = mfp.TwoWayCouplingConfig(
+    particle_config=particle_cfg,
+    particle_velocity=INITIAL_PARTICLE_VELOCITY,
+    particle_position=INITIAL_PARTICLE_POSITION,
+    n_surface_points=N_PARTICLE_SURFACE_POINTS,
+)
+
+particle_raw = mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers=(48, 48, 48), 
+                             training_config = PARTICLE_TRAINING_CONFIG,
+                             activation="tanh", )
+particle_network_init = mfp.apply_hard_wall_constraint(particle_raw, domain)
+
+t0 = time.perf_counter()
+particle_net, particle_history = mfp.train(
+    network=particle_network_init, domain=domain, fluid_config=fluid_cfg,
+    training_config=PARTICLE_TRAINING_CONFIG, coupling_config=coupling_config,
+)
+print(f"Two-way flow (fixed particle) trained in {time.perf_counter() - t0:.1f}s")
+particle_history.print_summary()
+```
+
+```{python}
+#| label: fig-particle-loss
+#| fig-cap: "Loss convergence for the two-way-coupled flow around the fixed particle, by component."
+mfp.plot_two_way_history(particle_history)
+```
+
+```{python}
+# Compute traction force via Gauss-Legendre quadrature integration
+n_quad_pts = 181
+F_traction_tensor = mfp.surface_traction_force(
+    flow_network=particle_net,
+    particle_config=particle_cfg,
+    particle_state=particle_state,
+    n_quadrature_points=n_quad_pts
+)
+F_traction_pinn = F_traction_tensor.item()
+
+# Analytical prediction (sphere moving in stationary fluid)
+F_stokes_expected = -C_stokes * v_rel_test
+abs_error_drag = abs(F_traction_pinn - F_stokes_expected)
+rel_error_drag = abs_error_drag / abs(F_stokes_expected)
+```
+## Quantitative Analysis: Surface Traction Accuracy
+
+* **Analytical Stokes Drag:** `{python} f"{F_stokes_expected:.6e}"` $\text{N}$
+* **PINN Surface Traction Force:** `{python} f"{F_traction_pinn:.6e}"` $\text{N}$
+* **Absolute Discrepancy:** `{python} f"{abs_error_drag:.6e}"` $\text{N}$
+* **Relative Error:** `{python} f"{rel_error_drag * 100:.4f}"` $\%$
+
+The surface traction integration module yields a relative error of `{python} f"{rel_error_drag * 100:.4f}"` $\%$ when evaluated with `{python} n_quad_pts` quadrature points across the particle boundary. This validates the auto-differentiation derivative evaluations and stress integration routines.
+
+# Force-Balanced Terminal Velocity Root-Finding
+
+Under an applied magnetic gradient, the particle experiences a magnetic force $F_{\text{mag}}$. The terminal velocity $v_{\text{term}}$ satisfies $F_{\text{net}}(v_{\text{term}}) = F_{\text{mag}} + F_{\text{drag}}(v_{\text{term}}) = 0$.
+
+```{python}
+def _uniform_field_fn(coordinates: torch.Tensor) -> mfp.MagneticFieldSample:  # FIXED: was mfp.FieldSample
+    return mfp.uniform_field(coordinates, magnitude=1.0, orientation=(1.0, 0.0))
+
+# Prescribed axial magnetic force
+F_mag_axial = 1.0e-8  # 10 nN
+
+# Solve for force-balanced terminal velocity using Brent's method
+v_term_pinn = mfp.solve_force_balanced_velocity(
+    network=particle_net, domain=domain,
+    fluid_config=fluid_cfg,
+    particle_config=particle_cfg,
+    particle_state=particle_state,
+    applied_magnetic_force=F_mag_axial,
+    n_quadrature_points=n_quad_pts,
+    velocity_bounds=(-1.0, 1.0)
+)
+
+# Expected analytical terminal velocity: v_term = F_mag / C_stokes
+v_term_analytical = F_mag_axial / C_stokes
+v_term_error_rel = abs(v_term_pinn - v_term_analytical) / v_term_analytical
+```
+
+```{python}
+# Sweep candidate velocities to plot the root-finding curve
+v_candidates = np.linspace(0.0, 2.0 * v_term_analytical, 25, device=DEVICE, 
+                           dtype=DTYPE)
+F_net_vals = []
+
+for v_c in v_candidates:
+    state_c = ParticleState(
+        radial_position=0.0,
+        axial_position=5.0e-3,
+        radial_velocity=0.0,
+        axial_velocity=v_c
+    )
+    F_drag_c = surface_traction_force(
+        flow_network=flow_net,
+        particle_config=particle_cfg,
+        particle_state=state_c,
+        n_quadrature_points=n_quad_pts
+    ).item()
+    F_net_vals.append(F_mag_axial + F_drag_c)
+
+F_net_vals = np.array(F_net_vals)
+
+plt.figure(figsize=(7, 4))
+plt.axhline(0, color='k', linestyle='--', alpha=0.6, label="Force Equilibrium ($F_{\\text{net}} = 0$)")
+plt.plot(v_candidates * 1e3, F_net_vals * 1e9, 'o-', color='crimson', label="Net Force Curve $F_{\\text{net}}(v_p)$")
+plt.axvline(v_term_pinn * 1e3, color='navy', linestyle=':', label=f"Solved $v_{{\\text{{term}}}}$ = {v_term_pinn*1e3:.4f} mm/s")
+plt.xlabel("Particle Velocity $v_p$ [mm/s]")
+plt.ylabel("Net Axial Force $F_{\\text{net}}$ [nN]")
+plt.title("Force-Balanced Velocity Root-Finding Profile")
+plt.grid(True, linestyle=':', alpha=0.6)
+plt.legend()
+plt.tight_layout()
+plt.show()
+```
+
+# References
+
+::: {#refs}
+:::

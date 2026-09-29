@@ -184,8 +184,8 @@ def solve_force_balanced_velocity(
             time=particle_state.time,
         )
         pos_tuple = (
-            float(particle_state.position[0].item()),
-            float(particle_state.position[1].item()),
+            float(candidate_state.position[0].item()),
+            float(candidate_state.position[1].item()),
         )
         vel_tuple = (0.0, float(candidate_velocity))
         
@@ -205,11 +205,11 @@ def solve_force_balanced_velocity(
         )
         # Evaluate drag force with disabled network parameter gradients
         trained.eval()
-        with torch.no_grad():
-            drag_force = surface_traction_force(
-                trained, particle_config=particle_config, particle_state=particle_state,
-                n_quadrature_points=n_quadrature_points
-            ).item()
+        #with torch.no_grad():
+        drag_force = surface_traction_force(
+            trained, particle_config=particle_config, particle_state=candidate_state,
+            n_quadrature_points=n_quadrature_points
+        ).item()
         state["network"] = trained
         state["history"] = history
         residual = applied_force_z + drag_force
@@ -245,7 +245,7 @@ def advance_particle_two_way(
     domain: Domain,
     fluid_config: FluidConfig,
     training_config: TrainingConfig,
-    object_radius: float,
+    particle_config: ParticleConfig,
     initial_axial_position: float,
     applied_force_fn: Callable[[float], float],
     n_steps: int,
@@ -326,14 +326,13 @@ def advance_particle_two_way(
             velocity=torch.zeros(2),
             time=current_time,
         )
-    particle_config = ParticleConfig(radius=object_radius)
     states = [particle_state]
     for step in range(n_steps):
-        if not (object_radius < current_position < domain.length - object_radius):
+        if not (particle_config.radius < current_position < domain.length - particle_config.radius):
             raise RuntimeError(
                 f"Particle reached z={current_position!r} at step {step}, no longer strictly "
-                f"inside [object_radius, domain.length - object_radius] = "
-                f"[{object_radius!r}, {domain.length - object_radius!r}]; stopping before "
+                f"inside [object_radius, domain.length - particle_radius] = "
+                f"[{particle_config.radius!r}, {domain.length - particle_config.radius!r}]; stopping before "
                 "the object would straddle the inlet, outlet, or wall. Returning the states "
                 "completed so far is not possible from inside this exception — catch it and use "
                 "a smaller time_step or fewer n_steps."

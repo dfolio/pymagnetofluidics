@@ -118,6 +118,7 @@ from magnetofluidics_pinn.visualization import (plot_flow_rate_deviation as plot
                                                 plot_residual_heatmap as plot_residual_heatmap,
                                                 plot_streamlines as plot_streamlines,
                                                 plot_training_history as plot_training_history,
+                                                plot_two_way_history as plot_two_way_history,
                                                 plot_trajectories as plot_trajectories,
                                                 plot_velocity_profile_comparison as plot_velocity_profile_comparison)
 
@@ -181,6 +182,7 @@ __all__ = [
     "plot_streamlines",
     "plot_trajectories",
     "plot_training_history",
+    "plot_two_way_history",  # NEW
     "plot_velocity_profile_comparison",  # NEW
     "plot_profile_error",  # NEW
     "plot_radial_leakage",  # NEW

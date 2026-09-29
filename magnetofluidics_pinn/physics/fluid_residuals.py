@@ -60,7 +60,7 @@ from typing import Callable, Literal, NamedTuple
 import torch
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
-from magnetofluidics_pinn.config import FluidConfig, DomainConfig
+from magnetofluidics_pinn.config import DomainConfig, FluidConfig
 
 # The two supported interior-residual singularity treatments; shared between
 # `stokes_residual` and `navier_stokes_residual` so both validate and
@@ -119,13 +119,13 @@ def _validate_residual_form(residual_form: str) -> None:
         raise ValueError(
             f"residual_form must be one of {_RESIDUAL_FORMS!r}; got {residual_form!r}."
         )
-    
+
 
 def _validate_inputs(
-    coordinates: torch.Tensor,
-    expected_dim: int,
-    residual_form: str,
-    function_name: str,
+        coordinates: torch.Tensor,
+        expected_dim: int,
+        residual_form: str,
+        function_name: str,
 ) -> torch.Tensor:
     """Validate coordinates and residual form, returning the radial coordinates tensor.
 
@@ -167,9 +167,9 @@ def _validate_inputs(
 
 
 def compute_flow_derivatives(
-    network: Callable[[torch.Tensor], torch.Tensor],
-    coordinates: torch.Tensor,
-    compute_second_order: bool = True,
+        network: Callable[[torch.Tensor], torch.Tensor],
+        coordinates: torch.Tensor,
+        compute_second_order: bool = True,
 ) -> FlowDerivatives:
     r"""Evaluate flow network and compute spatial derivatives via automatic differentiation.
 
@@ -197,18 +197,18 @@ def compute_flow_derivatives(
     velocity_r = output[:, 0:1]
     velocity_z = output[:, 1:2]
     pressure = output[:, 2:3]
-
+    
     grad_velocity_r = scalar_field_gradient(velocity_r, coordinates)
     grad_velocity_z = scalar_field_gradient(velocity_z, coordinates)
     grad_pressure = scalar_field_gradient(pressure, coordinates)
-
+    
     d_velocity_r_dr = grad_velocity_r[:, 0:1]
     d_velocity_r_dz = grad_velocity_r[:, 1:2]
     d_velocity_z_dr = grad_velocity_z[:, 0:1]
     d_velocity_z_dz = grad_velocity_z[:, 1:2]
     dp_dr = grad_pressure[:, 0:1]
     dp_dz = grad_pressure[:, 1:2]
-
+    
     if not compute_second_order:
         return FlowDerivatives(
             velocity_r=velocity_r,
@@ -223,12 +223,12 @@ def compute_flow_derivatives(
             grad_velocity_r=grad_velocity_r,
             grad_velocity_z=grad_velocity_z,
         )
-
+    
     d2_velocity_r_dr2 = scalar_field_gradient(d_velocity_r_dr, coordinates)[:, 0:1]
     d2_velocity_r_dz2 = scalar_field_gradient(d_velocity_r_dz, coordinates)[:, 1:2]
     d2_velocity_z_dr2 = scalar_field_gradient(d_velocity_z_dr, coordinates)[:, 0:1]
     d2_velocity_z_dz2 = scalar_field_gradient(d_velocity_z_dz, coordinates)[:, 1:2]
-
+    
     return FlowDerivatives(
         velocity_r=velocity_r,
         velocity_z=velocity_z,
@@ -250,9 +250,9 @@ def compute_flow_derivatives(
 
 # NEW: Shared axisymmetric vector Laplacian operator for cylindrical flow fields.
 def axisymmetric_vector_laplacian(
-    derivs: FlowDerivatives,
-    radius: torch.Tensor,
-    residual_form: Literal["standard", "r_weighted"] = "standard",
+        derivs: FlowDerivatives,
+        radius: torch.Tensor,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""Evaluate the axisymmetric vector Laplacian $\nabla^2 \mathbf{u} = (\nabla_r^2 \mathbf{u}, \nabla_z^2 \mathbf{u})$.
 
@@ -280,48 +280,48 @@ def axisymmetric_vector_laplacian(
     - `ValueError`: If second-order derivatives were not computed in `derivs`.
     """
     if (
-        derivs.d2_velocity_r_dr2 is None
-        or derivs.d2_velocity_r_dz2 is None
-        or derivs.d2_velocity_z_dr2 is None
-        or derivs.d2_velocity_z_dz2 is None
+            derivs.d2_velocity_r_dr2 is None
+            or derivs.d2_velocity_r_dz2 is None
+            or derivs.d2_velocity_z_dr2 is None
+            or derivs.d2_velocity_z_dz2 is None
     ):
         raise ValueError(
             "axisymmetric_vector_laplacian requires second-order derivatives; "
             "ensure compute_second_order=True in compute_flow_derivatives."
         )
-
+    
     if residual_form == "standard":
         laplacian_r = (
-            derivs.d2_velocity_r_dr2
-            + derivs.d_velocity_r_dr / radius
-            - derivs.velocity_r / radius.square()
-            + derivs.d2_velocity_r_dz2
+                derivs.d2_velocity_r_dr2
+                + derivs.d_velocity_r_dr / radius
+                - derivs.velocity_r / radius.square()
+                + derivs.d2_velocity_r_dz2
         )
         laplacian_z = (
-            derivs.d2_velocity_z_dr2
-            + derivs.d_velocity_z_dr / radius
-            + derivs.d2_velocity_z_dz2
+                derivs.d2_velocity_z_dr2
+                + derivs.d_velocity_z_dr / radius
+                + derivs.d2_velocity_z_dz2
         )
     else:
         r_2 = radius.square()
         laplacian_r = (
-            r_2 * (derivs.d2_velocity_r_dr2 + derivs.d2_velocity_r_dz2)
-            + radius * derivs.d_velocity_r_dr
-            - derivs.velocity_r
+                r_2 * (derivs.d2_velocity_r_dr2 + derivs.d2_velocity_r_dz2)
+                + radius * derivs.d_velocity_r_dr
+                - derivs.velocity_r
         )
         laplacian_z = (
-            radius * (derivs.d2_velocity_z_dr2 + derivs.d2_velocity_z_dz2)
-            + derivs.d_velocity_z_dr
+                radius * (derivs.d2_velocity_z_dr2 + derivs.d2_velocity_z_dz2)
+                + derivs.d_velocity_z_dr
         )
     return laplacian_r, laplacian_z
 
 
 def _continuity_residual(
-    velocity_r: torch.Tensor,
-    d_velocity_r_dr: torch.Tensor,
-    d_velocity_z_dz: torch.Tensor,
-    radius: torch.Tensor,
-    residual_form: Literal["standard", "r_weighted"] = "standard",
+        velocity_r: torch.Tensor,
+        d_velocity_r_dr: torch.Tensor,
+        d_velocity_z_dz: torch.Tensor,
+        radius: torch.Tensor,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     """Evaluate axisymmetric continuity residual under standard or r-weighted form."""
     if residual_form == "standard":
@@ -331,9 +331,9 @@ def _continuity_residual(
 
 # CHANGED: Refactored to compose with `axisymmetric_vector_laplacian`.
 def _stokes_momentum_residuals(
-    derivs: FlowDerivatives,
-    radius: torch.Tensor,
-    residual_form:  Literal["standard", "r_weighted"] = "standard",
+        derivs: FlowDerivatives,
+        radius: torch.Tensor,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Evaluate the steady Stokes momentum residuals: -grad p + laplacian u."""
     laplacian_r, laplacian_z = axisymmetric_vector_laplacian(
@@ -351,11 +351,14 @@ def _stokes_momentum_residuals(
 
 
 # CHANGED: Cleaned up redundant input checks prior to `_validate_inputs`.
+# WARNING: `stokes_residual` and `navier_stokes_residual` don't have the same args!!
+# TODO: make  `stokes_residual` use of `DomainConfig` instead of `FluidConfig` for consistency with
+#  `navier_stokes_residual`
 def stokes_residual(
-    network: Callable[[torch.Tensor], torch.Tensor],
-    coordinates: torch.Tensor,
-    domain_config: DomainConfig,
-    residual_form: Literal["standard", "r_weighted"] = "standard",
+        network: Callable[[torch.Tensor], torch.Tensor],
+        coordinates: torch.Tensor,
+        fluid_config: FluidConfig,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible Stokes-flow residual.
  
@@ -369,7 +372,7 @@ def stokes_residual(
       pressure and the preceding columns being velocity components.
     - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
       gradients, sampled inside the domain.
-    - `domain_config`: Domain configuration; must have `regime == "stokes"`.
+    - `fluid_config`: Fluid configuration; must have `regime == "stokes"`.
     - `residual_form`: NEW. `"standard"` (default) evaluates the equations
       as classically written, and requires `r > 0` everywhere (unchanged
       from every prior release). `"r_weighted"` evaluates the same
@@ -386,7 +389,7 @@ def stokes_residual(
       $r^2$ ($r$-momentum).
  
     Raises:
-    - `ValueError`: If `domain_config.fluid.regime` is not `"stokes"`, if
+    - `ValueError`: If `fluid_config.regime` is not `"stokes"`, if
       `residual_form` is not `"standard"` or `"r_weighted"`, if
       `coordinates` does not have shape `(n_points, 2)` (the axisymmetric
       `(r, z)` convention this function implements), if `coordinates` does
@@ -395,9 +398,9 @@ def stokes_residual(
       where that form's residual is singular), or if `network`'s output does
       not have exactly 3 columns (`u_r`, `u_z`, `p`).
     """
-    if domain_config.fluid.regime != "stokes":
+    if fluid_config.regime != "stokes":
         raise ValueError(
-            f"Expected a Stokes fluid configuration, got regime={domain_config.fluid.regime!r}."
+            f"Expected a Stokes fluid configuration, got regime={fluid_config.regime!r}."
         )
     radius = _validate_inputs(
         coordinates=coordinates,
@@ -420,11 +423,12 @@ def stokes_residual(
 
 
 # CHANGED: Cleaned up redundant input checks prior to `_validate_inputs`.
+# WARNING: `stokes_residual` and `navier_stokes_residual` don't have the same args!!
 def navier_stokes_residual(
-    network: Callable[[torch.Tensor], torch.Tensor],
-    coordinates: torch.Tensor,
-    domain_config: DomainConfig,
-    residual_form: Literal["standard", "r_weighted"] = "standard",
+        network: Callable[[torch.Tensor], torch.Tensor],
+        coordinates: torch.Tensor,
+        domain_config: DomainConfig,
+        residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible, unsteady Navier-Stokes residual.
 
@@ -464,8 +468,8 @@ def navier_stokes_residual(
       time column, appended after the steady `(r, z)` pair
       [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
       uses).
-    - `domain_config`: Domain configuration; must have
-      `fluid.regime == "navier_stokes"`.
+    - `fluid_config`: Fluid configuration; must have
+      `fluid_config.regime == "navier_stokes"`.
     - `residual_form`: NEW. Same meaning as
       [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]'s
       `residual_form`: `"standard"` (default) requires `r > 0`;
@@ -480,7 +484,7 @@ def navier_stokes_residual(
       returns them.
 
     Raises:
-    - `ValueError`: If `domain_config.fluid.regime` is not `"navier_stokes"`, if
+    - `ValueError`: If `fluid_config.regime` is not `"navier_stokes"`, if
       `residual_form` is not `"standard"` or `"r_weighted"`, if
       `coordinates` does not have shape `(n_points, 3)` (the axisymmetric
       `(r, z, t)` convention this function implements), if `coordinates`

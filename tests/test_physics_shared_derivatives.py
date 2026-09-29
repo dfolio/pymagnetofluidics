@@ -97,7 +97,7 @@ def test_poiseuille_faxen_exact(device: torch.device) -> None:
 
 
 def test_poiseuille_continuity_and_momentum_residuals(
-    domain_config: mfp.DomainConfig, device: torch.device
+    fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     r"""Verify Poiseuille flow satisfies exact continuity $\nabla \cdot \mathbf{u} = 0$.
 
@@ -112,7 +112,7 @@ def test_poiseuille_continuity_and_momentum_residuals(
     coords = torch.tensor(
         [[0.4, 0.5], [0.8, 1.2]], dtype=torch.float32, device=device, requires_grad=True
     )
-    res = stokes_residual(poiseuille_net, coords, domain_config, residual_form="standard")
+    res = stokes_residual(poiseuille_net, coords, fluid_config, residual_form="standard")
 
     # Column 2 is continuity: \nabla \cdot u = 0
     continuity_residual = res[:, 2:3]
@@ -137,7 +137,7 @@ def test_poiseuille_continuity_and_momentum_residuals(
 
 
 def test_stokes_residual_with_mlp(
-    raw_network: torch.nn.Module, domain_config: mfp.DomainConfig, device: torch.device
+    raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     """Validate `stokes_residual` on a genuine MLP module transferred to the active device.
 
@@ -151,7 +151,7 @@ def test_stokes_residual_with_mlp(
         [[0.3, 1.0], [0.7, 2.0]], dtype=torch.float32, device=device, requires_grad=True
     )
 
-    res = stokes_residual(net, coords, domain_config, residual_form="standard")
+    res = stokes_residual(net, coords, fluid_config, residual_form="standard")
     assert res.shape == (2, 3)
     assert not torch.isnan(res).any()
     assert res.device == coords.device
@@ -248,7 +248,7 @@ def test_axisymmetric_vector_laplacian_missing_second_order(
 @pytest.mark.parametrize("residual_form", ["standard", "r_weighted"])
 def test_stokes_residual_forms_scaling(
     raw_network: torch.nn.Module,
-    domain_config: mfp.DomainConfig,
+    fluid_config: mfp.FluidConfig,
     device: torch.device,
     residual_form: str,
 ) -> None:
@@ -267,11 +267,11 @@ def test_stokes_residual_forms_scaling(
     coords = torch.tensor(
         [[0.4, 1.0], [0.9, 2.0]], dtype=torch.float32, device=device, requires_grad=True
     )
-    res = stokes_residual(net, coords, domain_config, residual_form=residual_form)  # type: ignore[arg-type]
+    res = stokes_residual(net, coords, fluid_config, residual_form=residual_form)  # type: ignore[arg-type]
     assert res.shape == (2, 3)
 
     if residual_form == "r_weighted":
-        res_std = stokes_residual(net, coords, domain_config, residual_form="standard")
+        res_std = stokes_residual(net, coords, fluid_config, residual_form="standard")
         r = coords[:, 0:1]
         torch.testing.assert_close(res[:, 0:1], res_std[:, 0:1] * r.square())
         torch.testing.assert_close(res[:, 1:2], res_std[:, 1:2] * r)
@@ -288,7 +288,7 @@ def test_stokes_residual_forms_scaling(
 )
 def test_stokes_residual_radial_boundary_rejection(
     raw_network: torch.nn.Module,
-    domain_config: mfp.DomainConfig,
+    fluid_config: mfp.FluidConfig,
     device: torch.device,
     coords_val: list[list[float]],
     form: str,
@@ -307,11 +307,11 @@ def test_stokes_residual_radial_boundary_rejection(
     net = raw_network.to(device)
     coords = torch.tensor(coords_val, dtype=torch.float32, device=device, requires_grad=True)
     with pytest.raises(ValueError, match=error_match):
-        stokes_residual(net, coords, domain_config, residual_form=form)  # type: ignore[arg-type]
+        stokes_residual(net, coords, fluid_config, residual_form=form)  # type: ignore[arg-type]
 
 
 def test_stokes_residual_accepts_axis_in_r_weighted(
-    raw_network: torch.nn.Module, domain_config: mfp.DomainConfig, device: torch.device
+    raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     """Verify r=0 is accepted as a regular point under r_weighted form.
 
@@ -322,13 +322,13 @@ def test_stokes_residual_accepts_axis_in_r_weighted(
     """
     net = raw_network.to(device)
     coords_axis = torch.tensor([[0.0, 1.5]], dtype=torch.float32, device=device, requires_grad=True)
-    res = stokes_residual(net, coords_axis, domain_config, residual_form="r_weighted")
+    res = stokes_residual(net, coords_axis, fluid_config, residual_form="r_weighted")
     assert res.shape == (1, 3)
     assert not torch.isnan(res).any()
 
 
 def test_stokes_residual_requires_grad_validation(
-    raw_network: torch.nn.Module, domain_config: mfp.DomainConfig, device: torch.device
+    raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     """Verify coordinates without requires_grad=True are rejected.
 
@@ -340,7 +340,7 @@ def test_stokes_residual_requires_grad_validation(
     net = raw_network.to(device)
     coords = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=False)
     with pytest.raises(ValueError, match="coordinates must require gradients"):
-        stokes_residual(net, coords, domain_config)
+        stokes_residual(net, coords, fluid_config)
 
 
 def test_stokes_residual_wrong_regime(
@@ -356,7 +356,7 @@ def test_stokes_residual_wrong_regime(
     net = raw_network.to(device)
     coords = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=True)
     with pytest.raises(ValueError, match="Expected a Stokes fluid configuration"):
-        stokes_residual(net, coords, navier_stokes_domain_config)
+        stokes_residual(net, coords, navier_stokes_domain_config.fluid)
 
 
 # ============================================================================

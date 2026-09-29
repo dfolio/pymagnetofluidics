@@ -25,28 +25,6 @@ penalty discouraging a negative predicted axial velocity
 (`.positivity_loss_weight`) and an explicit global flow-rate conservation
 constraint (`.conservation_loss_weight`, see `physics.conservation`)
 [@hu2025pecann; @sigalingging2026massconserving].
-
-**CHANGED (in v0.1.6)— single `train()` entry point for both the particle-free and
-two-way-coupled problems.** This module previously exposed two, largely
-parallel, public functions: `train()` for the ordinary (particle-free)
-Stokes/Navier-Stokes problem, and `train_around_particle()` for the
-two-way-coupled problem solved around an embedded
-[`SphericalParticle`][magnetofluidics_pinn.types.SphericalParticle]. The
-two entry points shared essentially everything — batch construction, loss
-weighting, the Adam/L-BFGS phase structure, history bookkeeping — and
-differed only in which collocation sampler was called and whether one
-extra (particle-surface) loss term was included, which is exactly the
-condition an optional argument is meant to express rather than a second
-function. `train()` now accepts an optional
-[`CouplingConfig`][magnetofluidics_pinn.config.CouplingConfig]: omitted (the
-default), it reproduces every previous `train()` call's behavior exactly;
-supplied, it reproduces every previous `train_around_particle()` call's
-behavior exactly, without a second, independently-maintained copy of the
-training loop. `verbose` and `log_every` move onto
-[`TrainingConfig`][magnetofluidics_pinn.config.TrainingConfig] for the same
-reason: both were previously identical, separately-repeated keyword
-arguments on both entry points, one config field instead of two now fully
-determines both what is trained and how it is reported.
 """
 
 from __future__ import annotations
@@ -524,9 +502,11 @@ def _evaluate_loss_components(
     
     if coupling_config is None:
         conservation_value = _conservation_loss(
-            network, domain, _DIMENSIONLESS_PEAK_INLET_VELOCITY,
-            training_config.n_conservation_stations, training_config.n_conservation_quadrature_points,
-            batch.interior.device,
+            network, domain,
+            peak_velocity=_DIMENSIONLESS_PEAK_INLET_VELOCITY,
+            n_stations=training_config.n_conservation_stations,
+            n_quadrature_points=training_config.n_conservation_quadrature_points,
+            device=batch.interior.device,
         )
         particle_value = None
     else:
@@ -690,24 +670,6 @@ def train(
 ) -> tuple[nn.Module, TrainingHistory]:
     """Train a network to satisfy the flow PDE and boundary conditions.
 
-    CHANGED — this function now covers what two separate entry points
-    used to (`train()` and `train_around_particle()`; see this module's
-    docstring for the rationale). Called without `particle_config`, it
-    reproduces the former `train()`'s behavior exactly: the ordinary
-    (particle-free) Stokes/Navier-Stokes problem. Called with an
-    [`ParticleConfig`][magnetofluidics_pinn.config.ParticleConfig], it
-    reproduces the former `train_around_particle()`'s behavior: the
-    two-way-coupled problem solved around a fixed, rigidly-translating
-    [`Sphericalparticle`][magnetofluidics_pinn.types.Sphericalparticle] —
-    instead of a passive tracer advected by an *undisturbed* flow field
-    (`trajectory.integrate_trajectory` with a Faxén correction), this
-    solves for the flow the particle itself perturbs, holding the particle
-    fixed at `particle_config.particle.axial_position` and translating at
-    `particle_config.particle_velocity` — a quasi-steady snapshot of the
-    two-way problem, valid because Stokes flow has no memory: at every
-    instant the flow field depends only on the particle's *current*
-    position and velocity, not its history [@wang2026twoway].
-
     "Steady state" for that quasi-steady snapshot does not mean waiting
     out a physical transient — the governing equations have no time
     derivative to relax; `stokes_residual` describes an instantaneously
@@ -728,8 +690,7 @@ def train(
       [`apply_hard_wall_constraint`][magnetofluidics_pinn.networks.constraints.apply_hard_wall_constraint]
       (recommended: see that function's docstring). That wrapper's axis
       regularity condition remains valid with an on-axis particle present
-      too — see `Sphericalparticle`'s docstring — so it needs no
-      particle-specific variant.
+      too.
     - `domain`: Vessel geometry the network is trained on. Must already be
       nondimensionalized (see
       [`scaling.nondimensionalize_domain`][magnetofluidics_pinn.scaling.nondimensionalize_domain]).

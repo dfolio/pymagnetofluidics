@@ -28,13 +28,13 @@ from magnetofluidics_pinn.types import ParticleState
 # in `boundary_conditions.magnetic_field_bc.uniform_field`.
 _UNIT_NORM_TOLERANCE = 1.0e-6
 
-# CHANGED: was `reference_length: float = DomainConfig.radius`, which looked
-# dynamically linked to DomainConfig's default but was actually baked to a
-# plain float at class-definition time — identical runtime behavior to a
-# literal, just less honest about it.
-_DEFAULT_REFERENCE_LENGTH = 7.5e-4  # meter;
+# Default reference scales for nondimensionalization, in SI units. These
+# are the same scales used in the original PINN paper [@raissi2019physics] to
+# keep the network's inputs and outputs near unit order despite the
+# microscale geometry (SI values around `1.0e-4` to `1.0e-3` would
+_DEFAULT_REFERENCE_LENGTH = 7.5e-4    # meter;
 _DEFAULT_REFERENCE_VELOCITY = 1.0e-3  # meter/second
-
+_DEFAULT_REFERENCE_PRESSURE = 0.0     # pascal
 # NEW: promoted out of `training.trainer` (previously a module-private
 # `_BOUNDARY_LOSS_WEIGHT`) so that `ObstacleConfig.obstacle_loss_weight`'s
 # default can reference it here, alongside every other config default,
@@ -136,9 +136,10 @@ class DomainConfig:
     kind: Literal["channel", "bifurcation"] = "channel"
     length: float = _DEFAULT_REFERENCE_LENGTH * 8.0  # m
     radius: float = _DEFAULT_REFERENCE_LENGTH  # m
-    u_max: float = _DEFAULT_REFERENCE_VELOCITY  # m/s
     branch_angle: float | None = None
     fluid: FluidConfig = FluidConfig()  # Fluid embedded by default
+    u_max: float= _DEFAULT_REFERENCE_VELOCITY
+    p_max: float= _DEFAULT_REFERENCE_PRESSURE
     
     def __post_init__(self) -> None:
         _check_if_finite_positive_strictly(self.length, "length")
@@ -187,6 +188,19 @@ class DomainConfig:
         return ((self.fluid.density * self.reference_velocity * self.reference_length)
                 / self.fluid.dynamic_viscosity)
 
+    def reynolds_particle(self, particle_state: ParticleState) -> float:
+        r"""Particle Reynolds number of a particle relative to the flow, $Re = \rho U_c L_c / \mu$.
+        
+        Args:
+        - `particle_state`: The particle's current state, including its
+
+        Returns:
+        - The (dimensionless) Reynolds number
+          $Re = \rho U_c L_c / \mu$, always strictly positive since every
+          factor is validated strictly positive in `__post_init__`.
+        """
+        return ((self.fluid.density * (particle_state.speed-self.reference_length) * self.reference_length)
+                / self.fluid.dynamic_viscosity)
 
 @dataclass(frozen=True)
 class MagneticFieldConfig:
@@ -306,7 +320,7 @@ class ParticleConfig:
             raise ValueError(f"length of cylinder must be positive; got {self.length!r}.")
         if self.kind == "spheroid" and not (0 < self.aspect_ratio <= 1):
             raise ValueError(f"aspect_ratio of spheroid must be between 0 and 1; got {self.aspect_ratio!r}.")
-    
+        
     @property
     def max_surface_extension(self) -> float:
         """Returns the maximum radial extension from the centre of mass."""

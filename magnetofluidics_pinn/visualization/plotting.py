@@ -233,6 +233,38 @@ def plot_training_history(
     return fig
 
 
+def plot_two_way_history(history: TrainingHistory, log_scale: bool = True)-> matplotlib.figure.Figure:
+    """Loss convergence plot for a `train()` run, including the optional particle term."""
+    has_particle_term = getattr(history.adam, "particle", None) is not None
+    component_names = LOSS_COMPONENT_NAMES + (("particle",) if has_particle_term else ())
+    n_adam = len(history.adam.step)
+    n_lbfgs = len(history.lbfgs.step)
+    adam_steps = np.asarray(history.adam.step)
+    lbfgs_steps = np.asarray(history.lbfgs.step) + n_adam
+    steps = np.concatenate([adam_steps, lbfgs_steps]) if n_lbfgs else adam_steps
+
+    # fig, ax = plt.subplots(figsize=(7.5, 4.5))
+    fig = matplotlib.figure.Figure(figsize=(7.5, 4.5))
+    ax = fig.subplots()
+    
+    for field in component_names + ("total",):
+        adam_vals = np.asarray(getattr(history.adam, field))
+        lbfgs_vals = np.asarray(getattr(history.lbfgs, field))
+        vals = np.concatenate([adam_vals, lbfgs_vals]) if n_lbfgs else adam_vals
+        style = dict(linewidth=2.0, linestyle="--", color="black") if field == "total" else dict(linewidth=1.0)
+        ax.plot(steps, vals, label=field, **style)
+    if n_adam and n_lbfgs:
+        ax.axvline(n_adam, color="tab:red", linestyle=":", linewidth=1.2, label="Adam → L-BFGS")
+    if log_scale:
+        ax.set_yscale("log")
+    ax.set_xlabel("Optimization step")
+    ax.set_ylabel("Loss magnitude")
+    ax.set_title("Two-way-coupled training convergence")
+    ax.grid(True, linestyle=":", alpha=0.5)
+    ax.legend(fontsize=7, ncol=2, loc="upper right")
+    fig.tight_layout()
+    return fig
+
 # ============================================================================
 # NEW: verification-metrics plotting functions (added alongside
 # `magnetofluidics_pinn.verification` — see that subpackage's module

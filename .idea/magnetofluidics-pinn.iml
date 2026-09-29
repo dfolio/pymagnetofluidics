@@ -2,9 +2,12 @@
 <module external.system.id="pyproject.toml" type="PYTHON_MODULE" version="4">
   <component name="NewModuleRootManager">
     <content url="file://$MODULE_DIR$">
+      <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
+      <excludeFolder url="file://$MODULE_DIR$/.idea/dictionaries" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
+      <excludeFolder url="file://$MODULE_DIR$/magnetofluidics_pinn.egg-info" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.12 (pymagnetofluidics)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~/PycharmProjects/pymagnetofluidics/.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>

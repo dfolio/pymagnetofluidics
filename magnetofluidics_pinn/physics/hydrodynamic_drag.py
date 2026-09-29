@@ -213,21 +213,24 @@ def surface_traction_force(
     theta = torch.linspace(0.0, torch.pi, n_quadrature_points, device=device)
     radial_coordinate = particle_config.radius * torch.sin(theta)
     axial_coordinate = particle_state.axial_position + particle_config.radius * torch.cos(theta)
-    coordinates = torch.stack([radial_coordinate, axial_coordinate], dim=1).requires_grad_(True)
     
-    # CHANGED: Reused compute_flow_derivatives with compute_second_order=False.
-    derivs = compute_flow_derivatives(flow_network, coordinates, compute_second_order=False)
-    
-    # Cauchy stress tensor components in axisymmetric coordinates:
-    # sigma_zz = -p + 2 * du_z/dz
-    # sigma_zr = du_z/dr + du_r/dz
-    sigma_zz = -derivs.pressure + 2.0 * derivs.d_velocity_z_dz
-    sigma_zr = derivs.d_velocity_z_dr + derivs.d_velocity_r_dz
-    
-    normal_r = torch.sin(theta).unsqueeze(1)
-    normal_z = torch.cos(theta).unsqueeze(1)
-    traction_z = (sigma_zz * normal_z + sigma_zr * normal_r).squeeze(1)
-    
-    # Integrand over theta: dA = 2 * pi * r * a * dtheta
-    integrand = traction_z.detach() * 2.0 * torch.pi * radial_coordinate.detach() * particle_config.radius
-    return torch.trapezoid(integrand, theta)
+    # Enable autograd explicitly for input coordinate field differentiation
+    with torch.enable_grad():
+        coordinates = torch.stack([radial_coordinate, axial_coordinate], dim=1).requires_grad_(True)
+        
+        # CHANGED: Reused compute_flow_derivatives with compute_second_order=False.
+        derivs = compute_flow_derivatives(flow_network, coordinates, compute_second_order=False)
+        
+        # Cauchy stress tensor components in axisymmetric coordinates:
+        # sigma_zz = -p + 2 * du_z/dz
+        # sigma_zr = du_z/dr + du_r/dz
+        sigma_zz = -derivs.pressure + 2.0 * derivs.d_velocity_z_dz
+        sigma_zr = derivs.d_velocity_z_dr + derivs.d_velocity_r_dz
+        
+        normal_r = torch.sin(theta).unsqueeze(1)
+        normal_z = torch.cos(theta).unsqueeze(1)
+        traction_z = (sigma_zz * normal_z + sigma_zr * normal_r).squeeze(1)
+        
+        # Integrand over theta: dA = 2 * pi * r * a * dtheta
+        integrand = traction_z.detach() * 2.0 * torch.pi * radial_coordinate.detach() * particle_config.radius
+        return torch.trapezoid(integrand, theta)

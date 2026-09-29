@@ -122,12 +122,12 @@ class TestCheckpointWithParticleConfig:
         return mfp.apply_hard_wall_constraint(raw, domain)
 
     def test_round_trip_preserves_particle_config(
-            self, domain: mfp.Domain, domain_config: mfp.FluidConfig, field_config: mfp.MagneticFieldConfig,
+            self, domain: mfp.Domain, fluid_config: mfp.FluidConfig, field_config: mfp.MagneticFieldConfig,
             particle_config: mfp.ParticleConfig,
     ) -> None:
         training_config = mfp.TrainingConfig(device="cpu")
         network = self._build(domain, training_config)
-        domain_config = mfp.DomainConfig(kind="channel", length=domain.length, radius=domain.radius, fluid=domain_config)
+        domain_config = mfp.DomainConfig(kind="channel", length=domain.length, radius=domain.radius, fluid=fluid_config)
         architecture = io_utils.NetworkArchitecture(
             n_inputs=2, n_outputs=3, hidden_layers=(4, 4), hard_wall_constraint_radius=domain.radius,
         )
@@ -147,7 +147,7 @@ class TestCheckpointWithParticleConfig:
             assert torch.equal(value, loaded_network.state_dict()[key])
 
     def test_missing_particle_config_key_raises_runtime_error(
-            self, domain: mfp.Domain, domain_config: mfp.FluidConfig, field_config: mfp.MagneticFieldConfig,
+            self, domain_config: mfp.DomainConfig, fluid_config: mfp.FluidConfig, field_config: mfp.MagneticFieldConfig,
             particle_config: mfp.ParticleConfig,
     ) -> None:
         """A checkpoint written without `particle_config` must fail loudly and early
@@ -155,16 +155,17 @@ class TestCheckpointWithParticleConfig:
         inside `load_checkpoint`'s return statement.
         """
         training_config = mfp.TrainingConfig(device="cpu")
+        domain = mfp.build_channel_domain(domain_config)
         network = self._build(domain, training_config)
-        domain_config = mfp.DomainConfig(kind="channel", length=domain.length, radius=domain.radius, fluid=domain_config)
+        fluid_config = mfp.DomainConfig(kind="channel", length=domain_config.length, radius=domain_config.radius, fluid=fluid_config)
         architecture = io_utils.NetworkArchitecture(
-            n_inputs=2, n_outputs=3, hidden_layers=(4, 4), hard_wall_constraint_radius=domain.radius,
+            n_inputs=2, n_outputs=3, hidden_layers=(4, 4), hard_wall_constraint_radius=domain_config.radius,
         )
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             checkpoint_path = Path(tmp_dir) / "checkpoint.pt"
             io_utils.save_checkpoint(
-                network, checkpoint_path, architecture, domain_config, domain_config, field_config,
+                network, checkpoint_path, architecture, domain_config, fluid_config, field_config,
                 particle_config, training_config,
             )
             # Simulate a checkpoint written before `particle_config` existed in the

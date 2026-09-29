@@ -10,7 +10,7 @@ from magnetofluidics_pinn.config import DomainConfig
 from magnetofluidics_pinn.types import Domain
 
 
-def build_channel_domain(config: DomainConfig) -> Domain:
+def build_channel_domain(domain_config: DomainConfig) -> Domain:
     """Build a straight-channel domain from a domain configuration.
 
     The returned `Domain` holds physical (SI, meter) values, matching
@@ -31,20 +31,22 @@ def build_channel_domain(config: DomainConfig) -> Domain:
       or `config.radius` is not strictly positive (a degenerate geometry has
       no valid interior to solve on).
     """
-    if config.kind != "channel":
+    if domain_config.kind != "channel":
         raise ValueError(
-            f"Expected a channel domain configuration, got kind={config.kind!r}."
+            f"Expected a channel domain configuration, got kind={domain_config.kind!r}."
         )
-    if config.length <= 0.0:
-        raise ValueError(f"config.length must be strictly positive; got {config.length!r}.")
-    if config.radius <= 0.0:
-        raise ValueError(f"config.radius must be strictly positive; got {config.radius!r}.")
+    if domain_config.length <= 0.0:
+        raise ValueError(f"config.length must be strictly positive; got {domain_config.length!r}.")
+    if domain_config.radius <= 0.0:
+        raise ValueError(f"config.radius must be strictly positive; got {domain_config.radius!r}.")
 
     # A straight channel is fully described by its axial extent and radius;
     # it carries no branch angle, unlike a bifurcated vessel.
     return Domain(
         kind="channel",
-        length=config.length,
-        radius=config.radius,
+        length=domain_config.length,
+        radius=domain_config.radius,
+        u_max=domain_config.u_max,
+        p_max=domain_config.p_max,
         branch_angle=None,
     )
