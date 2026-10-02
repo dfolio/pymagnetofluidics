@@ -17,6 +17,9 @@ format:
     code-tools: true
     embed-resources: true
     fig-cap-location: bottom
+    fig-format: "svg"
+    fig-responsive: true
+    lightbox: true
     number-sections: true
     html-math-method:
       method: mathjax
@@ -46,11 +49,16 @@ format:
 #        </script>
   pdf:
     pdf-engine: xelatex
+    classoption: ['openright','twoside', 'chapterprefix','headings=normal','headsepline','footsepline']
+    geometry: [a4paper,bindingoffset=0.25cm, marginparwidth=0in,marginparsep=0in,headsep=1ex,footskip=0.75cm,margin=2.cm,centering,]
     toc: false
     # toc-depth: 3
     code-fold: show
     code-tools: true
     embed-resources: true
+    svg: true
+    fig-format: svg
+    graphics: true
     fig-cap-location: bottom
     number-sections: true
     include-in-header:
@@ -58,7 +66,8 @@ format:
         \usepackage{physics}
         \usepackage{siunitx}
 execute:
-  freeze: auto
+  # freeze: auto
+  freeze: false
   warning: false
 
 jupyter: python3
