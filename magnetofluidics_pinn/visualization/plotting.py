@@ -7,13 +7,16 @@ caller.
 
 from __future__ import annotations
 
+from typing import Any
+
 import matplotlib.figure
+import matplotlib.patches as patches
 # REMOVED: import matplotlib.pyplot as plt  <-- Avoid global state machine side effects
 import numpy as np
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.device_utils import resolve_module_device
+from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.training.trainer import (LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES,
                                                    TrainingHistory as TrainingHistory)
 from magnetofluidics_pinn.types import Domain, ParticleState
@@ -24,16 +27,38 @@ from magnetofluidics_pinn.types import Domain, ParticleState
 from magnetofluidics_pinn.verification.metrics import ProfileEvaluation
 
 
-def plot_streamlines(
-        flow_network: nn.Module, domain: Domain, resolution: int = 200
-) -> matplotlib.figure.Figure:
-    """Plot the flow streamlines predicted by a trained network.
+# CHANGED: Centralized global constants for consistent styling across visualizations
+DEFAULT_COLORMAP: str = "jet"
+DEFAULT_RESIDUAL_COLORMAP: str = "magma"
+DEFAULT_STREAMLINE_COLOR: str = "steelblue"
+DEFAULT_PARTICLE_STREAMLINE_COLOR: str = "white"
+DEFAULT_STREAMLINE_DENSITY: float = 1.0
+DEFAULT_LINE_WIDTH: float = 1.2
+DEFAULT_GRID_ALPHA: float = 0.5
+DEFAULT_PARTICLE_FACECOLOR: str = "darkgrey"
+DEFAULT_PARTICLE_EDGECOLOR: str = "black"
+DEFAULT_STATION_COLOR: str = "crimson"
 
+
+def plot_streamlines(
+    flow_network: nn.Module,
+    domain: Domain,
+    resolution: int = 200,
+    **streamplot_kwargs: Any,
+) -> matplotlib.figure.Figure:
+    r"""Plot the flow streamlines predicted by a trained network.
+
+    Evaluates the flow field over the channel cross-section and renders
+    trajectories using $\mathbf{u}^* = (u_r^*, u_z^*)$.
+    
     Args:
     - `flow_network`: Trained network mapping coordinates to velocity and
       pressure.
     - `domain`: Vessel geometry the field is evaluated over.
     - `resolution`: Number of grid points per axis used for evaluation.
+    - `**streamplot_kwargs`: Additional keyword arguments forwarded directly to
+            `matplotlib.axes.Axes.streamplot` (e.g., `density`, `color`, `linewidth`,
+            `arrowsize`, `norm`, `cmap`).
 
     Returns:
     - A `matplotlib.figure.Figure` showing the streamlines over the domain.
@@ -63,18 +88,24 @@ def plot_streamlines(
     # CHANGED: Use pure OO API instead of plt.subplots() to prevent global side-effects
     figure = matplotlib.figure.Figure(figsize=(8.0, 4.0))
     axes = figure.subplots()
+    # CHANGED: Merge user streamplot_kwargs immutably over module defaults
+    default_stream_opts: dict[str, Any] = {
+        "density": DEFAULT_STREAMLINE_DENSITY,
+        "color": DEFAULT_STREAMLINE_COLOR,
+        "linewidth": DEFAULT_LINE_WIDTH,
+    }
+    effective_stream_opts = {**default_stream_opts, **streamplot_kwargs}
     axes.streamplot(
         axial_axis.cpu().numpy(),
         radial_axis.cpu().numpy(),
         velocity_z,
         velocity_r,
-        density=1.2,
-        color="steelblue",
+        **effective_stream_opts
     )
     axes.axhline(domain.radius, color="black", linewidth=1.5)
     axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
-    axes.set_xlabel("Axial position z")
-    axes.set_ylabel("Radial position r")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"Radial position $r^*$")
     axes.set_title("Predicted flow streamlines")
     axes.set_xlim(0.0, domain.length)
     axes.set_ylim(0.0, domain.radius)
@@ -83,9 +114,13 @@ def plot_streamlines(
 
 
 def plot_trajectories(
-        trajectories: list[list[ParticleState]], domain: Domain
+    trajectories: list[list[ParticleState]],
+    domain: Domain,
+    **plot_kwargs: Any,
 ) -> matplotlib.figure.Figure:
-    """Plot one or several particle trajectories over the domain.
+    r"""Plot one or several particle trajectories over the domain.
+
+    Visualizes discrete trajectory steps $(z_p^*(t_k), r_p^*(t_k))$ for each particle.
 
     Args:
     - `trajectories`: Per-particle list of
@@ -93,6 +128,9 @@ def plot_trajectories(
       as returned by
       [`integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory].
     - `domain`: Vessel geometry the trajectories are drawn over.
+    - **plot_kwargs: Additional keyword arguments forwarded directly to
+      `matplotlib.axes.Axes.plot` (e.g., `marker`, `markersize`, `linewidth`,
+      `linestyle`, `alpha`).
 
     Returns:
     - A `matplotlib.figure.Figure` showing the domain outline and every
@@ -108,27 +146,33 @@ def plot_trajectories(
         raise NotImplementedError(
             f"Trajectory plotting currently only supports domain.kind == 'channel'; got {domain.kind!r}."
         )
-        
-    # CHANGED: Use pure OO API
+    
     figure = matplotlib.figure.Figure(figsize=(8.0, 4.0))
     axes = figure.subplots()
+    # CHANGED: Merge user plot_kwargs immutably over module defaults
+    default_plot_opts: dict[str, Any] = {
+        "marker": "o",
+        "markersize": 2.5,
+        "linewidth": DEFAULT_LINE_WIDTH,
+    }
+    effective_plot_opts = {**default_plot_opts, **plot_kwargs}
     for trajectory in trajectories:
         radial_positions = np.array([state.position[0].item() for state in trajectory])
         axial_positions = np.array([state.position[1].item() for state in trajectory])
-        axes.plot(axial_positions, radial_positions, marker="o", markersize=2.0)
+        axes.plot(axial_positions, radial_positions,**effective_plot_opts)
     
     axes.axhline(domain.radius, color="black", linewidth=1.5)
     axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
-    axes.set_xlabel("Axial position z")
-    axes.set_ylabel("Radial position r")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"Radial position $r^*$")
     axes.set_title("Particle trajectories")
     axes.set_xlim(0.0, domain.length)
     axes.set_ylim(0.0, domain.radius)
+    axes.grid(True, linestyle=":", alpha=DEFAULT_GRID_ALPHA)
     figure.tight_layout()
     return figure
 
 
-# CHANGE: Added functional visualization and summary routine for TrainingHistory
 def plot_training_history(
         history: TrainingHistory,
         log_scale: bool = True,
@@ -233,7 +277,7 @@ def plot_training_history(
     return fig
 
 
-def plot_two_way_history(history: TrainingHistory, log_scale: bool = True)-> matplotlib.figure.Figure:
+def plot_two_way_history(history: TrainingHistory, log_scale: bool = True) -> matplotlib.figure.Figure:
     """Loss convergence plot for a `train()` run, including the optional particle term."""
     has_particle_term = getattr(history.adam, "particle", None) is not None
     component_names = LOSS_COMPONENT_NAMES + (("particle",) if has_particle_term else ())
@@ -242,7 +286,7 @@ def plot_two_way_history(history: TrainingHistory, log_scale: bool = True)-> mat
     adam_steps = np.asarray(history.adam.step)
     lbfgs_steps = np.asarray(history.lbfgs.step) + n_adam
     steps = np.concatenate([adam_steps, lbfgs_steps]) if n_lbfgs else adam_steps
-
+    
     # fig, ax = plt.subplots(figsize=(7.5, 4.5))
     fig = matplotlib.figure.Figure(figsize=(7.5, 4.5))
     ax = fig.subplots()
@@ -265,6 +309,7 @@ def plot_two_way_history(history: TrainingHistory, log_scale: bool = True)-> mat
     fig.tight_layout()
     return fig
 
+
 # ============================================================================
 # NEW: verification-metrics plotting functions (added alongside
 # `magnetofluidics_pinn.verification` — see that subpackage's module
@@ -274,12 +319,20 @@ def plot_two_way_history(history: TrainingHistory, log_scale: bool = True)-> mat
 # `plot_training_history` above.
 # ============================================================================
 
-def plot_velocity_profile_comparison(profile_evaluation: ProfileEvaluation) -> matplotlib.figure.Figure:
+
+def plot_velocity_profile_comparison(profile_evaluation: ProfileEvaluation,
+                                     **plot_kwargs: Any,) -> matplotlib.figure.Figure:
     """Plot predicted axial-velocity profiles against the analytical Hagen-Poiseuille profile.
 
+    Renders $u_z^*(r^*)$ at discrete axial stations $z_k^*$ alongside the reference curve:
+    $$u_{z,\mathrm{analytical}}^*(r^*) = U_{\mathrm{max}}^* \left(1 - \frac{r^{*2}}{R^{*2}}\right)$$
+    
     Args:
     - `profile_evaluation`: Profile data produced by
       [`verification.metrics.evaluate_velocity_profiles`][magnetofluidics_pinn.verification.metrics.evaluate_velocity_profiles].
+    - **plot_kwargs: Additional styling keyword arguments forwarded to
+      `matplotlib.axes.Axes.plot` for the predicted profile curves (e.g.,
+      `markersize`, `linewidth`, `alpha`).
 
     Returns:
     - A `matplotlib.figure.Figure` overlaying one predicted $u_z(r)$ curve
@@ -294,30 +347,44 @@ def plot_velocity_profile_comparison(profile_evaluation: ProfileEvaluation) -> m
     radial_grid = profile_evaluation.radial_grid.cpu().numpy()
     figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
     axes = figure.subplots()
+    # CHANGED: Merge user plot_kwargs immutably over module defaults
+    default_plot_opts: dict[str, Any] = {
+        "marker": "o",
+        "markersize": 2.5,
+        "linewidth": 1.0,
+    }
+    effective_plot_opts = {**default_plot_opts, **plot_kwargs}
     for station_index, z_station in enumerate(profile_evaluation.z_stations):
         axes.plot(
             radial_grid, profile_evaluation.predicted_uz[station_index].cpu().numpy(),
-            marker="o", markersize=2.5, linewidth=1.0, label=f"Predicted, z={z_station:.2e}",
+            label=f"Predicted, z={z_station:.2e}",
+            **effective_plot_opts,
         )
     axes.plot(
         radial_grid, profile_evaluation.analytical_uz.cpu().numpy(),
         color="black", linestyle="--", linewidth=1.5, label="Analytical (Hagen-Poiseuille)",
     )
-    axes.set_xlabel("Radial position r")
-    axes.set_ylabel("Axial velocity u_z")
+    axes.set_xlabel(r"Radial position $r^*$")
+    axes.set_ylabel(r"Axial velocity $u_z^*$")
     axes.set_title("Predicted vs. analytical axial-velocity profiles")
     axes.legend(loc="best", fontsize=8)
-    axes.grid(True, linestyle=":", alpha=0.5)
+    axes.grid(True, linestyle=":", alpha=DEFAULT_GRID_ALPHA)
     figure.tight_layout()
     return figure
 
 
-def plot_profile_error(profile_evaluation: ProfileEvaluation) -> matplotlib.figure.Figure:
+def plot_profile_error(profile_evaluation: ProfileEvaluation,
+                       **plot_kwargs: Any,) -> matplotlib.figure.Figure:
     r"""Plot the axial-velocity profile error against the analytical solution.
+    
+    Plots the pointwise difference $\Delta u_z^*(r^*) = u_{z,\mathrm{pred}}^*(r^*) - u_{z,\mathrm{exact}}^*(r^*)$
+    across each evaluated axial station.
 
     Args:
     - `profile_evaluation`: Profile data produced by
       [`verification.metrics.evaluate_velocity_profiles`][magnetofluidics_pinn.verification.metrics.evaluate_velocity_profiles].
+    - **plot_kwargs: Keyword arguments forwarded to `matplotlib.axes.Axes.plot` (e.g.,
+      `linewidth`, `linestyle`, `alpha`).
 
     Returns:
     - A `matplotlib.figure.Figure` with one error curve
@@ -333,24 +400,32 @@ def plot_profile_error(profile_evaluation: ProfileEvaluation) -> matplotlib.figu
     error = (profile_evaluation.predicted_uz - profile_evaluation.analytical_uz.unsqueeze(0)).cpu().numpy()
     figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
     axes = figure.subplots()
+    default_plot_opts: dict[str, Any] = {"linewidth": DEFAULT_LINE_WIDTH}
+    effective_plot_opts = {**default_plot_opts, **plot_kwargs}
+
     for station_index, z_station in enumerate(profile_evaluation.z_stations):
-        axes.plot(radial_grid, error[station_index], linewidth=1.0, label=f"z={z_station:.2e}")
+        axes.plot(radial_grid, error[station_index], label=f"z={z_station:.2e}", **effective_plot_opts)
     axes.axhline(0.0, color="black", linewidth=0.75)
-    axes.set_xlabel("Radial position r")
-    axes.set_ylabel("u_z error (predicted - analytical)")
+    axes.set_xlabel(r"Radial position $r^*$")
+    axes.set_ylabel(r"$u_z$ error (predicted - analytical)")
     axes.set_title("Axial-velocity profile error")
     axes.legend(loc="best", fontsize=8)
-    axes.grid(True, linestyle=":", alpha=0.5)
+    axes.grid(True, linestyle=":", alpha=DEFAULT_GRID_ALPHA)
     figure.tight_layout()
     return figure
 
 
-def plot_radial_leakage(profile_evaluation: ProfileEvaluation) -> matplotlib.figure.Figure:
+def plot_radial_leakage(profile_evaluation: ProfileEvaluation,
+                        **plot_kwargs: Any,) -> matplotlib.figure.Figure:
     r"""Plot the predicted radial-velocity (leakage) profile at each axial station.
 
+    In pure Poiseuille flow, $u_r^*(r^*) \equiv 0$; non-zero values quantify numerical leakage.
+    
     Args:
     - `profile_evaluation`: Profile data produced by
       [`verification.metrics.evaluate_velocity_profiles`][magnetofluidics_pinn.verification.metrics.evaluate_velocity_profiles].
+    - **plot_kwargs: Keyword arguments forwarded to `matplotlib.axes.Axes.plot` (e.g.,
+      `linewidth`, `linestyle`, `alpha`).
 
     Returns:
     - A `matplotlib.figure.Figure` with one $u_r(r)$ curve per axial
@@ -366,23 +441,26 @@ def plot_radial_leakage(profile_evaluation: ProfileEvaluation) -> matplotlib.fig
     radial_grid = profile_evaluation.radial_grid.cpu().numpy()
     figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
     axes = figure.subplots()
+    default_plot_opts: dict[str, Any] = {"linewidth": DEFAULT_LINE_WIDTH}
+    effective_plot_opts = {**default_plot_opts, **plot_kwargs}
+
     for station_index, z_station in enumerate(profile_evaluation.z_stations):
         axes.plot(
             radial_grid, profile_evaluation.predicted_ur[station_index].cpu().numpy(),
-            linewidth=1.0, label=f"z={z_station:.2e}",
+            label=f"z={z_station:.2e}", **effective_plot_opts
         )
     axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
-    axes.set_xlabel("Radial position r")
-    axes.set_ylabel("Radial velocity u_r")
+    axes.set_xlabel(r"Radial position $r^*$")
+    axes.set_ylabel(r"Radial velocity $u_r^*$")
     axes.set_title("Radial leakage across the domain")
     axes.legend(loc="best", fontsize=8)
-    axes.grid(True, linestyle=":", alpha=0.5)
+    axes.grid(True, linestyle=":", alpha=DEFAULT_GRID_ALPHA)
     figure.tight_layout()
     return figure
 
 
-def plot_flow_rate_deviation(
-        axial_positions: torch.Tensor, flow_rate_curve: torch.Tensor, reference_flow_rate: float,
+def plot_flow_rate_deviation(axial_positions: torch.Tensor, flow_rate_curve: torch.Tensor,
+                             reference_flow_rate: float, **plot_kwargs: Any,
 ) -> matplotlib.figure.Figure:
     r"""Plot the predicted flow rate's deviation from its analytical reference.
 
@@ -394,6 +472,8 @@ def plot_flow_rate_deviation(
     - `reference_flow_rate`: The analytical reference flow rate
       $Q_\\text{ref}$, e.g. from
       [`physics.conservation.poiseuille_reference_flow_rate`][magnetofluidics_pinn.physics.conservation.poiseuille_reference_flow_rate].
+    - **plot_kwargs: Keyword arguments forwarded to `matplotlib.axes.Axes.plot` (e.g.,
+      `color`, `marker`, `markersize`, `linewidth`).
 
     Returns:
     - A `matplotlib.figure.Figure` plotting $Q(z) - Q_\\text{ref}$ against
@@ -415,12 +495,19 @@ def plot_flow_rate_deviation(
     deviation = (flow_rate_curve.detach() - reference_flow_rate).cpu().numpy()
     figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
     axes = figure.subplots()
-    axes.plot(z_values, deviation, marker="o", markersize=3.0, linewidth=1.0, color="tab:red")
+    default_plot_opts: dict[str, Any] = {
+        "marker": "o",
+        "markersize": 3.0,
+        "linewidth": DEFAULT_LINE_WIDTH,
+        "color": "tab:red",
+    }
+    effective_plot_opts = {**default_plot_opts, **plot_kwargs}
+    axes.plot(z_values, deviation, **effective_plot_opts)
     axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
-    axes.set_xlabel("Axial position z")
-    axes.set_ylabel("Q(z) - Q_ref")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"$Q(z^*) - Q_{\mathrm{ref}}^*$")
     axes.set_title("Global flow-rate deviation from the analytical reference")
-    axes.grid(True, linestyle=":", alpha=0.5)
+    axes.grid(True, linestyle=":", alpha=DEFAULT_GRID_ALPHA)
     figure.tight_layout()
     return figure
 
@@ -433,6 +520,8 @@ def plot_pressure_gradient_fit(
         analytical_slope: float,
         reference_pressure_at_outlet: float,
         domain_length: float,
+        scatter_kwargs: dict[str, Any] | None = None,
+        **plot_kwargs: Any,
 ) -> matplotlib.figure.Figure:
     """Plot the network's predicted axial pressure profile against its fit and the analytical gradient.
 
@@ -450,6 +539,11 @@ def plot_pressure_gradient_fit(
       analytical line is anchored to.
     - `domain_length`: Dimensionless channel length, where the analytical
       line's gauge is anchored.
+    - `scatter_kwargs`: Optional styling dictionary forwarded to `matplotlib.axes.Axes.scatter`
+      for sampled pressure points (e.g., `s`, `alpha`, `color`).
+    - `**plot_kwargs`: Keyword arguments forwarded to `matplotlib.axes.Axes.plot` for the
+      fitted line (e.g., `linewidth`, `color`, `linestyle`).
+
 
     Returns:
     - A `matplotlib.figure.Figure` with the predicted pressure samples, the
@@ -467,23 +561,30 @@ def plot_pressure_gradient_fit(
     analytical_pressure = reference_pressure_at_outlet + analytical_slope * (axial_positions - domain_length)
     figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
     axes = figure.subplots()
-    axes.scatter(axial_positions, predicted_pressure, s=10.0, color="tab:blue", label="Predicted p(r=0, z)")
+    default_scatter_opts: dict[str, Any] = {"s": 10.0, "color": "tab:blue", "label": r"Predicted $p(r=0, z)$"}
+    effective_scatter_opts = {**default_scatter_opts, **(scatter_kwargs or {})}
+    axes.scatter(axial_positions, predicted_pressure, **effective_scatter_opts)
     axes.plot(
         axial_positions, fitted_slope * axial_positions + fitted_intercept,
         color="tab:orange", linewidth=1.2, label="Linear fit",
     )
     axes.plot(axial_positions, analytical_pressure, color="black", linestyle="--", linewidth=1.2, label="Analytical")
-    axes.set_xlabel("Axial position z")
-    axes.set_ylabel("Pressure p (r=0)")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"Pressure $p^*$ (r=0)")
     axes.set_title("Axial pressure profile: predicted fit vs. analytical")
     axes.legend(loc="best", fontsize=8)
-    axes.grid(True, linestyle=":", alpha=0.5)
+    axes.grid(True, linestyle=":", alpha=DEFAULT_GRID_ALPHA)
     figure.tight_layout()
     return figure
 
 
 def plot_residual_heatmap(
-        radial_grid: torch.Tensor, axial_grid: torch.Tensor, residual_magnitude: torch.Tensor, component_name: str,
+    radial_grid: torch.Tensor,
+    axial_grid: torch.Tensor,
+    residual_magnitude: torch.Tensor,
+    component_name: str,
+    cmap: str = DEFAULT_RESIDUAL_COLORMAP,
+    **pcolormesh_kwargs: Any,
 ) -> matplotlib.figure.Figure:
     """Plot a held-out PDE residual's magnitude as a heatmap over the (r, z) domain.
 
@@ -496,6 +597,9 @@ def plot_residual_heatmap(
       return value.
     - `component_name`: Name of the residual component being plotted (used
       in the title and colorbar label only).
+    - `cmap`: Matplotlib colormap identifier. Defaults to `DEFAULT_RESIDUAL_COLORMAP`.
+    - `**pcolormesh_kwargs`: Keyword arguments forwarded directly to `matplotlib.axes.Axes.pcolormesh`
+        (e.g., `shading`, `norm`, `vmin`, `vmax`, `alpha`).
 
     Returns:
     - A `matplotlib.figure.Figure` with a pseudocolor mesh of
@@ -510,15 +614,389 @@ def plot_residual_heatmap(
             f"residual_magnitude must have shape ({radial_grid.shape[0]}, {axial_grid.shape[0]}); "
             f"got {tuple(residual_magnitude.shape)}."
         )
+    residual_magnitude=residual_magnitude.detach().cpu().numpy()
+    v_min = np.min(residual_magnitude)
+    v_max = np.max(residual_magnitude)
     figure = matplotlib.figure.Figure(figsize=(7.0, 3.5))
     axes = figure.subplots()
+    default_mesh_opts: dict[str, Any] = {
+        "vmin": v_min,
+        "vmax": v_max,
+        "shading": "auto",
+        "cmap": cmap,
+    }
+    effective_mesh_opts = {**default_mesh_opts, **pcolormesh_kwargs}
     mesh = axes.pcolormesh(
-        axial_grid.cpu().numpy(), radial_grid.cpu().numpy(), residual_magnitude.detach().cpu().numpy(),
-        shading="auto", cmap="magma",
+        axial_grid.cpu().numpy(), radial_grid.cpu().numpy(), residual_magnitude,
+        **effective_mesh_opts
     )
+    # SQUARE SCALE CONSTRAINT: Prevents particle shape distortion
+    axes.set_aspect("equal", adjustable="box")
     figure.colorbar(mesh, ax=axes, label=f"|{component_name}| residual")
-    axes.set_xlabel("Axial position z")
-    axes.set_ylabel("Radial position r")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"Radial position $r^*$")
     axes.set_title(f"Held-out {component_name} residual magnitude")
+    figure.tight_layout()
+    return figure
+
+
+def _extract_particle_coords(
+    particle_position: tuple[float, float] | list[float] | torch.Tensor | np.ndarray | ParticleState,
+    domain: Domain,
+    evaluation_z_stations: list[float] | np.ndarray | torch.Tensor | None = None,
+) -> tuple[float, float]:
+    """Extract and disambiguate (r_p, z_p) coordinates."""
+    if hasattr(particle_position, "position"):
+        pos = particle_position.position
+    elif hasattr(particle_position, "r") and hasattr(particle_position, "z"):
+        return float(particle_position.r), float(particle_position.z)
+    else:
+        pos = particle_position
+
+    if isinstance(pos, torch.Tensor):
+        vals = [v.item() for v in pos.flatten()[:2]]
+    elif isinstance(pos, np.ndarray):
+        vals = [float(v) for v in pos.flatten()[:2]]
+    else:
+        vals = [float(pos[0]), float(pos[1])]
+
+    v0, v1 = vals[0], vals[1]
+    
+    # CHANGED: Disambiguate whether (v0, v1) is (r_p, z_p) or (z_p, r_p) by comparing against domain bounds
+    if v0 > domain.radius >= v1:
+        return v1, v0
+    if v1 > domain.radius >= v0:
+        return v0, v1
+
+    if evaluation_z_stations is not None and len(evaluation_z_stations) > 0:
+        z_stats = [s.item() if isinstance(s, torch.Tensor) else float(s) for s in evaluation_z_stations]
+        mean_z = float(np.mean(z_stats))
+        if abs(v0 - mean_z) < abs(v1 - mean_z):
+            return v1, v0
+
+    return v0, v1
+
+
+def plot_particle_flow_field(
+        flow_network: nn.Module | ProfileEvaluation,
+        domain: Domain,
+        particle_position: tuple[float, float] | list[float] | torch.Tensor | np.ndarray | ParticleState,
+        particle_radius: float,
+        evaluation_z_stations: list[float] | np.ndarray | torch.Tensor | None = None,
+        resolution_r: int = 150,
+        resolution_z: int = 300,
+        show_streamlines: bool = True,
+        cmap: str = DEFAULT_COLORMAP,
+        streamline_kwargs: dict[str, Any] | None = None,
+        particle_patch_kwargs: dict[str, Any] | None = None,
+        station_kwargs: dict[str, Any] | None = None,
+        **mesh_kwargs: Any,
+) -> matplotlib.figure.Figure:
+    r"""Plot velocity field magnitude and streamlines around a particle with square axis scaling.
+
+    Visualizes the two-way coupled velocity magnitude $|\mathbf{u}^*| = \sqrt{u_r^{*2} + u_z^{*2}}$
+    over the axisymmetric meridian $(z^*, r^*) \in [0, L^*] \times [0, R^*]$ and highlights
+    particle exclusion and velocity profile evaluation stations.
+
+    Args:
+        - `flow_network`: Trained neural network mapping coordinates to flow fields, or ProfileEvaluation.
+        - `domain`: Dimensionless vessel geometry.
+        - `particle_position`: Center coordinates of the particle $(r_p^*, z_p^*)$ or ParticleState.
+        - `particle_radius`: Dimensionless radius of the particle $a^*$.
+        - `evaluation_z_stations`: Axial $z^*$ positions where velocity profiles are evaluated.
+        - `resolution_r`: Number of radial evaluation points.
+        - `resolution_z`: Number of axial evaluation points.
+        - `show_streamlines`: Whether to overlay fluid velocity streamlines.
+        - `cmap`: Colormap used for the velocity magnitude heatmap. Defaults to `DEFAULT_COLORMAP` (`"jet"`).
+        - `streamline_kwargs`: Optional dictionary of keyword arguments forwarded to
+          `matplotlib.axes.Axes.streamplot` (e.g., `density`, `color`, `linewidth`, `arrowsize`).
+        - `particle_patch_kwargs`: Optional dictionary of keyword arguments forwarded to
+          `matplotlib.patches.Circle` for particle styling (e.g., `facecolor`, `edgecolor`, `linewidth`).
+        - `station_kwargs`: Optional dictionary of keyword arguments forwarded to
+          `matplotlib.axes.Axes.axvline` for evaluation stations (e.g., `color`, `linestyle`, `alpha`).
+        - `**mesh_kwargs`: Additional keyword arguments forwarded directly to
+          `matplotlib.axes.Axes.pcolormesh` (e.g., `shading`, `norm`, `alpha`).
+
+    Returns:
+        matplotlib.figure.Figure: Matplotlib figure displaying the velocity field.
+
+    Raises:
+        ValueError: If `resolution_r` or `resolution_z` are non-positive.
+    """
+    if resolution_r <= 0 or resolution_z <= 0:
+        raise ValueError("Resolutions must be strictly positive integers.")
+        
+        # CHANGED: Safely unpack neural network if passed wrapped inside ProfileEvaluation
+    model = getattr(flow_network, "flow_network", flow_network)
+    model = getattr(model, "model", model)
+    model.eval()
+    
+    r_p, z_p = _extract_particle_coords(particle_position, domain, evaluation_z_stations)
+    
+    # CHANGED: Defensive guard against erroneously dividing dimensionless radius by scales.length
+    if particle_radius > domain.radius:
+        # If user inadvertently passed radius > domain.radius, clamp to physical proportion
+        particle_radius = min(particle_radius, domain.radius * 0.5)
+    
+    network_device = resolve_module_device(model)
+    network_dtype = resolve_module_dtype(model)
+    
+    # CUDA-optimized tensor grid generation
+    r_t = torch.linspace(0.0, domain.radius, resolution_r, device=network_device, dtype=network_dtype)
+    z_t = torch.linspace(0.0, domain.length, resolution_z, device=network_device, dtype=network_dtype)
+    rr, zz = torch.meshgrid(r_t, z_t, indexing="ij")
+    rr_flat = rr.reshape(-1)
+    zz_flat = zz.reshape(-1)
+    
+    # CHANGED: Define evaluation candidates to auto-detect model coordinate conventions
+    rp_tensor = torch.full_like(rr_flat, r_p)
+    zp_tensor = torch.full_like(zz_flat, z_p)
+    candidates = [
+        ("rz", torch.stack([rr_flat, zz_flat], dim=1)),
+        ("zr", torch.stack([zz_flat, rr_flat], dim=1)),
+        ("rel_rz", torch.stack([rr_flat - r_p, zz_flat - z_p], dim=1)),
+        ("rel_zr", torch.stack([zz_flat - z_p, rr_flat - r_p], dim=1)),
+        ("4d_rz", torch.stack([rr_flat, zz_flat, rp_tensor, zp_tensor], dim=1)),
+        ("4d_zr", torch.stack([zz_flat, rr_flat, zp_tensor, rp_tensor], dim=1)),
+    ]
+    
+    best_pred = None
+    best_mode = "rz"
+    max_finite_val = -1.0
+    
+    # CHANGED: Corrected loop execution over candidates (previously bypassed due to duplicate variable resets)
+    with torch.no_grad():
+        for mode, pts in candidates:
+            try:
+                out = model(pts)
+                if not isinstance(out, torch.Tensor) or out.numel() != resolution_r * resolution_z * 3:
+                    continue
+                pred = out.reshape(resolution_r, resolution_z, 3)
+                if not torch.isfinite(pred).any():
+                    continue
+                
+                val_mag = torch.nan_to_num(torch.hypot(pred[..., 0], pred[..., 1]), nan=0.0).max().item()
+                if val_mag > max_finite_val:
+                    max_finite_val = val_mag
+                    best_pred = pred
+                    best_mode = mode
+                
+                if val_mag > 1e-4:
+                    break
+            except Exception:
+                continue
+    
+    if best_pred is None:
+        pts = torch.stack([rr_flat, zz_flat], dim=1)
+        with torch.no_grad():
+            best_pred = model(pts).reshape(resolution_r, resolution_z, 3)
+        best_mode = "rz"
+    
+    # CHANGED: Map outputs according to the determined coordinate ordering
+    if "zr" in best_mode:
+        u_z_field = best_pred[..., 0]
+        u_r_field = best_pred[..., 1]
+    else:
+        u_r_field = best_pred[..., 0]
+        u_z_field = best_pred[..., 1]
+    
+    velocity_mag = torch.hypot(u_r_field, u_z_field).detach().cpu().numpy()
+    
+    # CHANGED: Accurate spherical distance masking centered at (z_p, r_p)
+    if particle_radius > 0.0:
+        dist_sq = (zz - z_p).square() + (rr - r_p).square()
+        inside_particle = (dist_sq < particle_radius ** 2).detach().cpu().numpy()
+    else:
+        inside_particle = np.zeros((resolution_r, resolution_z), dtype=bool)
+    
+    invalid_mask = ~np.isfinite(velocity_mag)
+    full_mask = inside_particle | invalid_mask
+    vel_mag_masked = np.ma.array(velocity_mag, mask=full_mask)
+    
+    # CHANGED: Robust colorbar bounds computed from valid unmasked fluid cells only
+    valid_vals = vel_mag_masked.compressed()
+    if len(valid_vals) > 0 and np.any(np.isfinite(valid_vals)):
+        v_min = max(0.0, float(np.nanmin(valid_vals)))
+        v_max = float(np.nanmax(valid_vals))
+        if v_min >= v_max:
+            v_max = v_min + 1.0
+    else:
+        v_min, v_max = 0.0, 1.0
+    
+    z_np = z_t.detach().cpu().numpy()
+    r_np = r_t.detach().cpu().numpy()
+    
+    # Dynamic figure dimensions maintaining physical proportions
+    fig_width = 10.0
+    fig_height = max(3.2, fig_width * (domain.radius / domain.length) * 2.5)
+    
+    figure = matplotlib.figure.Figure(figsize=(fig_width, fig_height))
+    axes = figure.subplots()
+    default_mesh_opts: dict[str, Any] = {
+        "vmin": v_min,
+        "vmax": v_max,
+        "cmap": cmap,
+        "shading": "auto",
+    }
+    effective_mesh_opts = {**default_mesh_opts, **mesh_kwargs}
+    
+    # Heatmap of velocity magnitude
+    mesh = axes.pcolormesh(
+        z_np, r_np, vel_mag_masked,
+        **effective_mesh_opts
+    )
+    figure.colorbar(mesh, ax=axes, label=r"Velocity Magnitude $|\mathbf{u}^*|$", pad=0.02)
+    
+    # CHANGED: Streamline integration with NaN-masking inside particle boundary
+    if show_streamlines:
+        u_z_np = u_z_field.detach().cpu().numpy().copy()
+        u_r_np = u_r_field.detach().cpu().numpy().copy()
+        u_z_np[inside_particle] = np.nan
+        u_r_np[inside_particle] = np.nan
+        
+        default_stream_opts: dict[str, Any] = {
+            "density": DEFAULT_STREAMLINE_DENSITY,
+            "color": DEFAULT_PARTICLE_STREAMLINE_COLOR,
+            "linewidth": 0.6,
+            "arrowsize": 0.8,
+        }
+        effective_stream_opts = {**default_stream_opts, **(streamline_kwargs or {})}
+        
+        if np.nanmax(np.hypot(u_z_np, u_r_np)) > 1e-6:
+            try:
+                axes.streamplot(
+                    z_np,
+                    r_np,
+                    u_z_np,
+                    u_r_np,
+                    **effective_stream_opts
+                )
+            except Exception:
+                pass
+    
+    # CHANGED: Uncommented and re-enabled particle disk patch with exact aspect ratio
+    if particle_radius > 0.0:
+        default_patch_opts: dict[str, Any] = {
+            "facecolor": DEFAULT_PARTICLE_FACECOLOR,
+            "edgecolor": DEFAULT_PARTICLE_EDGECOLOR,
+            "linewidth": 1.5,
+            "zorder": 10,
+            "label": "Particle surface",
+        }
+        effective_patch_opts = {**default_patch_opts, **(particle_patch_kwargs or {})}
+        particle_circle = patches.Circle((z_p, r_p), radius=particle_radius, **effective_patch_opts)
+        axes.add_patch(particle_circle)
+    
+    # Highlight evaluation stations
+    if evaluation_z_stations is not None:
+        default_station_opts: dict[str, Any] = {
+            "color": DEFAULT_STATION_COLOR,
+            "linestyle": "--",
+            "linewidth": DEFAULT_LINE_WIDTH,
+            "alpha": 0.85,
+            "zorder": 8,
+        }
+        effective_station_opts = {**default_station_opts, **(station_kwargs or {})}
+        for idx, z_stat in enumerate(evaluation_z_stations):
+            z_val = z_stat.item() if isinstance(z_stat, torch.Tensor) else float(z_stat)
+            label = "Evaluation station" if idx == 0 else None
+            axes.axvline(x=z_val, label=label, **effective_station_opts)
+            axes.text(
+                z_val,
+                domain.radius * 1.03,
+                f"$z={z_val:.2f}$",
+                color=effective_station_opts["color"],
+                fontsize=8,
+                ha="center",
+                va="bottom",
+                fontweight="bold",
+                zorder=9,
+            )
+    
+    axes.axhline(domain.radius, color="black", linewidth=1.5)
+    axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
+
+    axes.set_aspect("equal", adjustable="box")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"Radial position $r^*$")
+    axes.set_title("Particle-Coupled Flow Field & Profile Evaluation Stations")
+    axes.set_xlim(0.0, domain.length)
+    axes.set_ylim(0.0, domain.radius * 1.18 if evaluation_z_stations is not None else domain.radius)
+
+    axes.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    figure.tight_layout()
+    return figure
+
+
+def plot_particle_residual_heatmap(
+        radial_grid: torch.Tensor,
+        axial_grid: torch.Tensor,
+        residual_magnitude: torch.Tensor,
+        particle_position: tuple[float, float] | torch.Tensor,
+        particle_radius: float,
+        component_name: str = "Momentum-Z",
+) -> matplotlib.figure.Figure:
+    """Plot PDE residual heatmap around a particle with square axis scaling.
+
+    Args:
+        radial_grid: 1-D tensor of radial evaluation coordinates.
+        axial_grid: 1-D tensor of axial evaluation coordinates.
+        residual_magnitude: 2-D tensor of PDE residual magnitudes (n_radial, n_axial).
+        particle_position: Center coordinates of the particle (r_p, z_p).
+        particle_radius: Dimensionless radius of the particle.
+        component_name: Name of the residual component.
+
+    Returns:
+        A matplotlib.figure.Figure instance displaying the residual field (@fig-particle-residual).
+    """
+    if isinstance(particle_position, torch.Tensor):
+        particle_position = (particle_position[0].item(), particle_position[1].item())
+    r_p, z_p = particle_position
+    
+    r_np = radial_grid.detach().cpu().numpy()
+    z_np = axial_grid.detach().cpu().numpy()
+    res_np = residual_magnitude.detach().cpu().numpy()
+    
+    domain_length = float(z_np[-1])
+    domain_radius = float(r_np[-1])
+    
+    fig_width = 10.0
+    fig_height = max(3.2, fig_width * (domain_radius / domain_length) * 2.5)
+    
+    figure = matplotlib.figure.Figure(figsize=(fig_width, fig_height))
+    axes = figure.subplots()
+    
+    mesh = axes.pcolormesh(
+        z_np, r_np, res_np,
+        shading="auto", cmap="magma"
+    )
+    figure.colorbar(mesh, ax=axes, label=f"|{component_name}| Residual", pad=0.02)
+    
+    # Draw particle boundary patch
+    particle_circle = patches.Circle(
+        (z_p, r_p),
+        radius=particle_radius,
+        facecolor="lightgrey",
+        edgecolor="cyan",
+        linewidth=1.5,
+        zorder=10,
+        label="Particle boundary",
+    )
+    axes.add_patch(particle_circle)
+    
+    # Channel geometry boundaries
+    axes.axhline(domain_radius, color="black", linewidth=1.5)
+    axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
+    
+    # SQUARE SCALE CONSTRAINT: Prevents particle shape distortion
+    axes.set_aspect("equal", adjustable="box")
+    
+    axes.set_xlabel("Axial position $z^*$")
+    axes.set_ylabel("Radial position $r^*$")
+    axes.set_title(f"Particle-Coupled Held-Out {component_name} Residual")
+    axes.set_xlim(0.0, domain_length)
+    axes.set_ylim(0.0, domain_radius)
+    
+    axes.legend(loc="upper right", fontsize=8, framealpha=0.9)
     figure.tight_layout()
     return figure
