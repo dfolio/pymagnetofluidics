@@ -28,6 +28,82 @@ from typing import Callable
 import torch
 
 
+def annular_flow_rate(
+    network: Callable[[torch.Tensor], torch.Tensor],
+    channel_radius: float,
+    particle_radius: float,
+    particle_axial_position: float,
+    particle_velocity: float,
+    axial_positions: torch.Tensor,
+    n_radial_quadrature_points: int = 64,
+) -> torch.Tensor:
+    r"""Evaluate volumetric flow rate $Q(z)$ across cross-sections cutting through an obstacle.
+
+    For cross-sections intersecting a sphere ($|z - z_p| \le a$), the fluid occupies
+    the annular clearance $r \in [r_{\mathrm{core}}(z), R]$, where:
+    $$
+    r_{\mathrm{core}}(z) = \sqrt{\max\left(0, a^2 - (z - z_p)^2\right)}.
+    $$
+    The total volumetric transport combines fluid flux through the annulus and
+    rigid-body convective transport of the obstacle core [@happel1983low]:
+    $$
+    Q(z) = \int_{r_{\mathrm{core}}(z)}^R u_z(r, z) \, 2\pi r \, dr + \pi r_{\mathrm{core}}(z)^2 U_p.
+    $$
+    For cross-sections completely outside the obstacle ($|z - z_p| > a$),
+    $r_{\mathrm{core}}(z) = 0$, recovering the full-bore pipe flow rate.
+
+    Args:
+    - `network`: Flow field callable mapping `(n, 2)` coordinates to `(n, 3)`.
+    - `channel_radius`: Dimensionless channel radius $R$.
+    - `particle_radius`: Dimensionless sphere radius $a$.
+    - `particle_axial_position`: Dimensionless sphere center $z_p$.
+    - `particle_velocity`: Dimensionless translational axial velocity $U_p$.
+    - `axial_positions`: 1-D tensor of shape `(n_stations,)` with $z$ coordinates.
+    - `n_radial_quadrature_points`: Trapezoidal integration nodes across the radial span.
+
+    Returns:
+    - Tensor of shape `(n_stations,)` containing total volumetric flow rate $Q(z)$.
+
+    Raises:
+    - `ValueError`: If dimensions or radii are non-positive or invalid.
+    """
+    if channel_radius <= 0.0 or particle_radius <= 0.0:
+        raise ValueError("channel_radius and particle_radius must be strictly positive.")
+    if axial_positions.ndim != 1:
+        raise ValueError(f"axial_positions must be 1-D; got shape {tuple(axial_positions.shape)}.")
+    if n_radial_quadrature_points < 2:
+        raise ValueError("n_radial_quadrature_points must be at least 2.")
+
+    n_stations = axial_positions.shape[0]
+    device = axial_positions.device
+    dtype = axial_positions.dtype
+
+    # Axial distance to particle center and radial extent of the solid sphere at each station
+    z_diff = axial_positions - particle_axial_position
+    r_core_sq = torch.clamp(particle_radius**2 - z_diff.square(), min=0.0)
+    r_core = torch.sqrt(r_core_sq)
+
+    # Parametrized radial grid mapping [0, 1] linearly to [r_core(z), R]
+    s_grid = torch.linspace(0.0, 1.0, n_radial_quadrature_points, device=device, dtype=dtype)
+    r_span = channel_radius - r_core  # Shape: (n_stations,)
+    radial_mesh = r_core.unsqueeze(1) + s_grid.unsqueeze(0) * r_span.unsqueeze(1)  # (n_stations, n_nodes)
+    axial_mesh = axial_positions.unsqueeze(1).expand(-1, n_radial_quadrature_points)
+
+    coordinates = torch.stack([radial_mesh.reshape(-1), axial_mesh.reshape(-1)], dim=1)
+    axial_velocity = network(coordinates)[:, 1:2].reshape(n_stations, n_radial_quadrature_points)
+
+    # Integrand 2 * pi * r * u_z(r, z)
+    integrand = axial_velocity * radial_mesh * (2.0 * math.pi)
+
+    # Step size per station for composite trapezoidal rule: dr = (R - r_core) / (n_nodes - 1)
+    dr = r_span / (n_radial_quadrature_points - 1)
+    fluid_flux = torch.trapezoid(integrand, dx=1.0, dim=1) * dr
+
+    # Add convective flux carried by the rigid obstacle core
+    core_flux = math.pi * r_core_sq * particle_velocity
+    return fluid_flux + core_flux
+
+
 def axial_flow_rate(
     network: Callable[[torch.Tensor], torch.Tensor],
     radius: float,

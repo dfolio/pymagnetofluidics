@@ -53,13 +53,13 @@ def _check_if_finite_positive_strictly(value: float, name: str = "") -> None:
 
 
 def _check_if_finite_positive(value: float, name: str = "") -> None:
-    """Raise ValueError if `value` is not finite and strictly positive."""
+    """Raise ValueError if `value` is not finite and positive."""
     if not math.isfinite(value) or value < 0.0:
         raise ValueError(f"{name} must be finite and non-negative; got {value!r}.")
 
 
 def _check_if_positive(value: float, name: str = "") -> None:
-    """Raise ValueError if `value` is not finite and strictly positive."""
+    """Raise ValueError if `value` is not finite and non-negative."""
     if value < 0.0:
         raise ValueError(f"{name} must be positive; got {value!r}.")
 
@@ -188,18 +188,25 @@ class DomainConfig:
         return ((self.fluid.density * self.reference_velocity * self.reference_length)
                 / self.fluid.dynamic_viscosity)
 
-    def reynolds_particle(self, particle_state: ParticleState) -> float:
-        r"""Particle Reynolds number of a particle relative to the flow, $Re = \rho U_c L_c / \mu$.
+    def reynolds_particle(self, particle_config: ParticleConfig, particle_state: ParticleState) -> float:
+        r"""Particle Reynolds number of a particle relative to the flow, $Re_p = \rho \abs{U_p - U_\infty} a / \mu$.
         
         Args:
-        - `particle_state`: The particle's current state, including its
+        - `particle_config`: The particle configuration.
+        - `particle_state`: The particle's current state, including its velocity.
 
         Returns:
         - The (dimensionless) Reynolds number
           $Re = \rho U_c L_c / \mu$, always strictly positive since every
           factor is validated strictly positive in `__post_init__`.
         """
-        return ((self.fluid.density * (particle_state.speed-self.reference_length) * self.reference_length)
+        if particle_config.radius >= self.radius:
+            raise ValueError(
+                f"particle_config.radius ({particle_config.radius:.3e} m) must be strictly smaller "
+                f"than domain.radius ({self.radius:.3e} m). Did you accidentally pass a dimensionless "
+                "ParticleConfig instead of particle_config_physical?"
+            )
+        return ((self.fluid.density * abs(particle_state.speed-self.reference_velocity) * particle_config.radius)
                 / self.fluid.dynamic_viscosity)
 
 @dataclass(frozen=True)
@@ -362,7 +369,7 @@ class ParticleConfig:
 class TwoWayCouplingConfig:
     r"""Two-way-coupling parameters for training the flow around a fixed (spherical) particle.
 
-    NEW. Passing an `TwoWayCouplingConfig` to
+    Passing an `TwoWayCouplingConfig` to
     [`training.trainer.train`][magnetofluidics_pinn.training.trainer.train]
     switches it from the ordinary (particle-free) Stokes/Navier-Stokes
     training problem to the two-way-coupled problem solved around an
@@ -414,11 +421,19 @@ class TwoWayCouplingConfig:
       the same weight every other Dirichlet velocity boundary (wall,
       inlet) already uses — physically, the particle surface is just
       another such boundary.
+    - `positivity_loss_weight_override`: `None` (the default) leaves
+      `training.trainer.train`'s use of `TrainingConfig.positivity_loss_weight`
+      unchanged. A confined, translating particle can plausibly admit local
+      flow reversal even at zero Reynolds number, which the (steady,
+      particle-free) rationale for the positivity penalty does not consider;
+      set this to `0.0` to disable the penalty for a two-way-coupled run
+      without touching `training_config`, or to any other non-negative
+      weight to use in its place.
 
     Raises:
     - `ValueError`: If either component of `particle_velocity` is not
       finite, if `n_surface_points` is not strictly positive, or if
-+     `particle_loss_weight` is not finite and non-negative.
+      `particle_loss_weight` is not finite and non-negative.
     """
     
     particle_config: ParticleConfig
@@ -427,6 +442,7 @@ class TwoWayCouplingConfig:
     time: float = 0.0  # Current time
     n_surface_points: int = 200
     particle_loss_weight: float = DEFAULT_BOUNDARY_LOSS_WEIGHT
+    positivity_loss_weight_override: float | None = None  # NEW
     
     def __post_init__(self) -> None:
         if not all(math.isfinite(component) for component in self.particle_velocity):
@@ -439,6 +455,13 @@ class TwoWayCouplingConfig:
             )
         _check_if_finite_positive_strictly(self.particle_loss_weight,
                                            "particle_loss_weight")
+        if self.positivity_loss_weight_override is not None:  # NEW
+            if (not math.isfinite(self.positivity_loss_weight_override)
+                    or self.positivity_loss_weight_override < 0.0):
+                raise ValueError(
+                    "positivity_loss_weight_override must be None, or finite and non-negative; "
+                    f"got {self.positivity_loss_weight_override!r}."
+                )
     
     @property
     def particle_velocity_magnitude(self) -> float:
@@ -456,7 +479,7 @@ class TwoWayCouplingConfig:
         return self.particle_velocity[0]
     
     @property
-    def particle_state(self):
+    def particle_state(self)->ParticleState:
         """Returns a ParticleState particle representing the particle's current state."""
         return ParticleState(
             position=torch.tensor(self.particle_position),

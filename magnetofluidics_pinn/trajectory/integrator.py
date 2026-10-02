@@ -63,6 +63,60 @@ An earlier version of this module re-derived these normalizations from
 `DomainConfig.radius` directly; that is only equivalent to using
 `scales.length` when `fluid_config.reference_length == domain_config.radius`
 happens to hold, which no other part of this package's API guarantees.
+
+
+---
+
+**NEW — batched, GPU-resident integration (all particles advanced together).**
+Every particle used to be integrated by its own, independent call to
+`scipy.integrate.solve_ivp`, in a plain Python loop. `solve_ivp`'s adaptive
+stepper lives on the CPU and calls back into this module's right-hand side
+several times per accepted step; with one particle per call, every one of
+those callbacks evaluated `flow_network` and `dipole_force` on a batch of
+size one, which starves the GPU (the work per dispatch is tiny, and every
+dispatch pays a full host-device synchronization) and, critically, does not
+get any faster as `initial_states` grows - exactly the opposite of what a
+particle swarm (the Phase 2 roadmap item) needs.
+
+This module now flattens every particle's position into a single state
+vector
+$$\mathbf{y}(t) = \big(r_1(t), z_1(t), \ldots, r_n(t), z_n(t)\big) \in \mathbb{R}^{2n},
+\qquad
+\frac{d\mathbf{y}}{dt} = F(t, \mathbf{y}),$$
+and drives **one** adaptive integration of $F$ for the whole batch: $F$
+evaluates `flow_network`, the optional Faxén correction, and `dipole_force`
+once per callback, for every particle at once, as a single batched forward
+(and, when `particle_radius > 0`, second-order backward) pass. Wall-collision
+events are still resolved exactly, by the same root-finding `solve_ivp`
+already performs, through a *restart loop*: a terminal event stops the
+whole batched system, so every time one fires, the colliding particle(s)
+are identified (from `sol.t_events`), permanently masked out of the
+right-hand side (their velocity is forced to exactly zero, freezing their
+recorded position at the collision state), and integration resumes for the
+remaining active particles from where it stopped. The state vector's size
+never changes across restarts - only the mask does - which keeps the batch
+shape stable across the whole call.
+
+This is a drop-in replacement: `integrate_trajectory`'s signature, return
+type, and per-particle semantics (one `ParticleState` history per particle,
+ending at its own collision time if it collides, at `time_span[1]`
+otherwise) are unchanged. Two consequences of batching are worth knowing
+about, rather than discovering by surprise:
+
+- The adaptive stepper's error control is now driven by the *worst-case*
+  particle in the active batch at each step, so the exact set of recorded
+  time points for a given particle can differ slightly from what a
+  single-particle call would have produced. Final states still agree to
+  within `r_tol` / `a_tol`, since both satisfy the same error criterion
+  over the same physics.
+- Under `particle_radius > 0.0`, a single invalid row (e.g. one particle's
+  radial coordinate crossing the symmetry axis mid-trajectory, which
+  [`physics.hydrodynamic_drag.faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity]
+  has never tolerated, single-particle or batched) now aborts the whole
+  batch's integration rather than only that one particle's, since the
+  Faxén correction's second-order autodiff is evaluated across the full
+  batch in one call. This was already a hard failure in the single-particle
+  code; batching only changes its blast radius.
 """
 
 from __future__ import annotations
@@ -85,6 +139,12 @@ from magnetofluidics_pinn.scaling import Scales, nondimensionalize_particle
 # spatially uniform; see `_assert_uniform_field`. Small enough to stay a
 # local probe, large enough not to be lost to floating-point noise.
 _UNIFORMITY_PROBE_OFFSET = 0.1234
+
+# Number of scalar state components (r, z) each particle occupies in the
+# flattened state vector `y` that `scipy.integrate.solve_ivp` advances.
+# Hard-coded to the axisymmetric (r, z) convention this whole package uses;
+# a future 3-D extension would thread this through as a parameter instead.
+_N_DIMS_PER_PARTICLE = 2
 
 
 def _assert_uniform_field(
@@ -130,126 +190,200 @@ def _assert_uniform_field(
         )
 
 
-# def _select_moment(
-#     magnetic_moment: torch.Tensor, particle_index: int, n_dims: int
-# ) -> torch.Tensor:
-#     """Select the magnetic moment of shape `(1, n_dims)` for one particle.
-#
-#     Args:
-#     - `magnetic_moment`: Tensor of shape `(n_dims,)`, shared by every
-#       particle, or `(n_particles, n_dims)`, one row per particle.
-#     - `particle_index`: Index of the particle whose moment is requested.
-#     - `n_dims`: Expected number of spatial dimensions.
-#
-#     Returns:
-#     - Tensor of shape `(1, n_dims)`.
-#
-#     Raises:
-#     - `ValueError`: If `magnetic_moment` has neither 1 nor 2 dimensions, or
-#       if its last dimension does not equal `n_dims`.
-#     """
-#     if magnetic_moment.ndim not in (1, 2) or magnetic_moment.shape[-1] != n_dims:
-#         raise ValueError(
-#             "magnetic_moment must have shape (n_dims,) or (n_particles, n_dims) "
-#             f"with n_dims={n_dims}; got shape {tuple(magnetic_moment.shape)}."
-#         )
-#     if magnetic_moment.ndim == 1:
-#         return magnetic_moment.unsqueeze(0)
-#     return magnetic_moment[particle_index : particle_index + 1]
-#
-#
-# def _drift_velocity(
-#     flow_network: nn.Module,
-#     field_fn: Callable[[torch.Tensor], FieldSample],
-#     position: torch.Tensor,
-#     moment: torch.Tensor,
-#     particle_radius: float,
-#     mobility_tensor: torch.Tensor,
-# ) -> torch.Tensor:
-#     """Evaluate the instantaneous drift velocity of a tracer particle.
-#
-#     The particle is transported by the (optionally Faxén-corrected) local
-#     flow velocity together with a magnetic drift term obtained under a
-#     unit-mobility, overdamped (Stokes) approximation: `v = u(x) + F(x)`,
-#     with `F = grad(m . B)` the point-dipole force [@abbott2020magnetic]. A
-#     proper translational mobility coefficient - set by
-#     the particle radius and the fluid viscosity - is expected to enter the
-#     magnetic term once particle-scale properties join the configuration
-#     model more broadly; until then, this unit-mobility choice is exact
-#     whenever the field is uniform (Phase 1), since the dipole force then
-#     vanishes identically and only the flow term survives.
-#
-#     Args:
-#     - `flow_network`: Trained network mapping coordinates to velocity and
-#       pressure.
-#     - `field_fn`: Callable returning the magnetic field at given
-#       coordinates.
-#     - `position`: Tensor of shape `(1, n_dims)`, the particle's current
-#       position, already on `flow_network`'s device and dtype (see
-#       `integrate_trajectory`, which resolves both once for the whole
-#       trajectory rather than on every step).
-#     - `moment`: Tensor of shape `(1, n_dims)`, the particle's magnetic
-#       moment, already on the same device and dtype as `position`.
-#     - `particle_radius`: Radius used for the Faxén correction to the flow
-#       term; `0.0` skips the correction (plain point-particle velocity).
-#
-#     Returns:
-#     - Tensor of shape `(1, n_dims)` with the drift velocity, on the same
-#       device as `position`.
-#     """
-#     if particle_radius > 0.0:
-#         position_for_flow = position.clone().requires_grad_(True)
-#         flow_velocity = faxen_corrected_velocity(
-#             flow_network, position_for_flow, particle_radius
-#         ).detach()
-#     else:
-#         n_dims = position.shape[1]
-#         with torch.no_grad():
-#             flow_output = flow_network(position)
-#         flow_velocity = flow_output[:, :n_dims]
-#
-#     position_for_force = position.clone().requires_grad_(True)
-#     magnetic_force  = dipole_force(field_fn, position_for_force, moment).detach()
-#     magnetic_drift = torch.matmul(magnetic_force, mobility_tensor.T)
-#
-#     return flow_velocity + magnetic_drift
-#
-#
-# def _enforce_surface_boundary_constraint(
-#         position: torch.Tensor,
-#         particle_radius: float,
-#         channel_radius: float
-# ) -> tuple[torch.Tensor, bool]:
-#     """Structurally confines the centre of the particle within the domain.
-#
-#     Prevents the surface of the particle from penetrating the outer wall (`r = R`).
-#     """
-#     r_coord = position[0]
-#     z_coord = position[1]
-#
-#     # Limite physique pour le centre d'une forme sphérique : R_eff = R - a
-#     effective_radius = channel_radius - particle_radius
-#
-#     if r_coord >= effective_radius:
-#         # Collision de surface détectée : projection sur la limite de contact
-#         constrained_position = torch.tensor([effective_radius, z_coord], device=position.device, dtype=position.dtype)
-#         return constrained_position, True
-#
-#     return position, False
+def _flatten_particle_positions(positions: torch.Tensor) -> np.ndarray:
+    """Flatten a `(n_particles, n_dims)` position tensor into `solve_ivp`'s 1-D state layout.
 
+    Uses row-major (C) order, so particle `i`'s coordinates occupy
+    `y[i * n_dims : (i + 1) * n_dims]` - the same layout
+    [`_unflatten_particle_positions`][magnetofluidics_pinn.trajectory.integrator._unflatten_particle_positions]
+    and every wall-collision event function assume.
 
-def _format_trajectory_line(
-    step: int, n_steps: int, current_time: float, positions: torch.Tensor
-) -> str:
-    """Formatte une ligne de progression textuelle pour le suivi de l'intégration.
-    
     Args:
-        step: Indice du pas actuel.
-        n_steps: Nombre total de pas.
-        current_time: Temps physique adimensionnel actuel.
-        positions: Tensor contenant les positions de toutes les particules au pas actuel.
+    - `positions`: Tensor of shape `(n_particles, n_dims)`.
+
+    Returns:
+    - A 1-D `float64` NumPy array of shape `(n_particles * n_dims,)`, the
+      dtype `scipy.integrate.solve_ivp` requires for its internal error
+      control regardless of the flow network's own (typically `float32`)
+      dtype.
     """
-    return f"{step}/{n_steps} : t={current_time} at pos {positions}"
+    return positions.detach().cpu().numpy().astype(np.float64).reshape(-1)
+
+
+def _unflatten_particle_positions(
+        y: np.ndarray, n_particles: int, device: torch.device, dtype: torch.dtype,
+) -> torch.Tensor:
+    """Inverse of [`_flatten_particle_positions`][magnetofluidics_pinn.trajectory.integrator._flatten_particle_positions].
+
+    Args:
+    - `y`: 1-D state vector of shape `(n_particles * n_dims,)`, as produced
+      by `solve_ivp` (always `float64`, regardless of the network's dtype).
+    - `n_particles`: Number of particles encoded in `y`.
+    - `device`: Device the returned tensor is placed on.
+    - `dtype`: Dtype the returned tensor is cast to (typically the flow
+      network's own dtype, so it can be fed straight back into it).
+
+    Returns:
+    - Tensor of shape `(n_particles, n_dims)` on `device`/`dtype`.
+    """
+    return torch.as_tensor(y, dtype=torch.float64).reshape(n_particles, _N_DIMS_PER_PARTICLE).to(
+        device=device, dtype=dtype, non_blocking=True
+    )
+
+
+def _build_batched_ode_system(
+        flow_network: nn.Module,
+        field_fn: Callable[[torch.Tensor], MagneticFieldSample],
+        magnetic_moment: torch.Tensor,
+        mobility_tensor: torch.Tensor,
+        particle_radius_nd: float,
+        active_mask: torch.Tensor,
+        n_particles: int,
+        device: torch.device,
+        dtype: torch.dtype,
+) -> Callable[[float, np.ndarray], np.ndarray]:
+    r"""Build one right-hand side evaluating every active particle in a single batched pass.
+
+    Replaces the previous per-particle closure: instead of being called
+    once per particle with a batch of size one, the returned callable is
+    called once per `solve_ivp` step with every particle's coordinates at
+    once, so `flow_network` and `dipole_force` each see a real batch
+    dimension - the whole point of this rewrite (see the module docstring).
+
+    Args:
+    - `flow_network`: Trained network mapping coordinates of shape
+      `(n_particles, 2)` to `(n_particles, 3)`, the `(u_r, u_z, p)` flow
+      field.
+    - `field_fn`: Callable returning a
+      [`MagneticFieldSample`][magnetofluidics_pinn.types.MagneticFieldSample]
+      for a batch of coordinates.
+    - `magnetic_moment`: Tensor of shape `(n_dims,)`, the (shared) magnetic
+      moment every particle carries. Left genuinely 1-D, rather than
+      pre-expanded to `(1, n_dims)`, so that
+      [`dipole_force`][magnetofluidics_pinn.physics.magnetic_forcing.dipole_force]'s
+      own broadcasting (`moment.unsqueeze(0).expand(n_particles, -1)`)
+      expands it to match the batch - pre-expanding to `(1, n_dims)`
+      would only ever broadcast correctly against a batch of exactly one
+      particle.
+    - `mobility_tensor`: Tensor of shape `(n_particles, n_dims, n_dims)`,
+      already resolved to `device`/`dtype`.
+    - `particle_radius_nd`: Dimensionless particle radius; `0.0` skips the
+      Faxén correction entirely (plain point-particle velocity).
+    - `active_mask`: Tensor of shape `(n_particles, 1)`, `1.0` for a
+      particle still being integrated and `0.0` for one that has already
+      collided with the wall. Multiplying the right-hand side by this mask
+      is what freezes a collided particle's position for the remainder of
+      the current restart segment, without changing the state vector's
+      shape.
+    - `n_particles`: Number of particles encoded in each call's state
+      vector.
+    - `device`: Device every tensor this closure creates is placed on.
+    - `dtype`: Dtype every tensor this closure creates is cast to.
+
+    Returns:
+    - A callable `(t, y) -> dy/dt` with the exact signature
+      `scipy.integrate.solve_ivp` expects for its `fun` argument, operating
+      on the whole batch at once.
+    """
+    
+    def ode_system(t: float, y: np.ndarray) -> np.ndarray:
+        del t  # The flow field and the dipole force are both steady (time-independent).
+        positions = _unflatten_particle_positions(y, n_particles, device, dtype)
+        
+        if particle_radius_nd > 0.0:
+            positions_for_flow = positions.clone().requires_grad_(True)
+            flow_velocity = faxen_corrected_velocity(
+                flow_network, positions_for_flow, particle_radius_nd
+            ).detach()
+        else:
+            with torch.inference_mode():
+                flow_velocity = flow_network(positions)[:, :_N_DIMS_PER_PARTICLE]
+        
+        positions_for_force = positions.clone().requires_grad_(True)
+        magnetic_force = dipole_force(field_fn, positions_for_force, magnetic_moment).detach()
+        # Batched equivalent of the single-particle `f_mag @ mobility.T`:
+        # result[n, j] = sum_k magnetic_force[n, k] * mobility_tensor[n, j, k].
+        magnetic_drift = torch.bmm(
+            magnetic_force.unsqueeze(1), mobility_tensor.transpose(1, 2)
+        ).squeeze(1)
+        
+        velocity = (flow_velocity + magnetic_drift) * active_mask
+        return velocity.reshape(-1).to(dtype=torch.float64).cpu().numpy()
+    
+    return ode_system
+
+
+def _make_wall_collision_event(
+        particle_index: int, effective_wall_limit: float,
+) -> Callable[[float, np.ndarray], float]:
+    """Build one terminal, root-findable wall-collision event for a single particle.
+
+    Args:
+    - `particle_index`: The particle's index; its radial coordinate lives
+      at `y[particle_index * n_dims]` in the shared, flattened state vector
+      (see
+      [`_flatten_particle_positions`][magnetofluidics_pinn.trajectory.integrator._flatten_particle_positions]).
+    - `effective_wall_limit`: Radial threshold at which the particle's
+      surface (not just its center) first reaches the channel wall.
+
+    Returns:
+    - A callable suitable for `scipy.integrate.solve_ivp`'s `events`
+      argument, with `.terminal = True` and `.direction = -1` already set:
+      zero when the particle's surface first reaches the wall, detected
+      only while approaching it (not while receding, which would be a
+      stale root left over from the particle's own starting side).
+    """
+    radial_index = particle_index * _N_DIMS_PER_PARTICLE
+    
+    def event(t: float, y: np.ndarray) -> float:
+        del t
+        return effective_wall_limit - y[radial_index]
+    
+    event.terminal = True
+    event.direction = -1
+    return event
+
+
+def _format_batch_progress_line(
+        segment_index: int, t_current: float, n_active: int, n_particles: int,
+) -> str:
+    """Format one verbose line announcing the start of a new restart segment.
+
+    Args:
+    - `segment_index`: 0-based index of the restart segment about to run.
+    - `t_current`: Time this segment starts integrating from.
+    - `n_active`: Number of particles still being integrated in this segment.
+    - `n_particles`: Total number of particles in the batch.
+
+    Returns:
+    - A single formatted line, e.g. `"Segment 2: t=0.0125, 2/3 particle(s) active."`.
+    """
+    return f"Segment {segment_index}: t={t_current:.6g}, {n_active}/{n_particles} particle(s) active."
+
+
+def _recompute_velocities(
+        ode_system: Callable[[float, np.ndarray], np.ndarray], t: float, y: np.ndarray,
+) -> np.ndarray:
+    """Evaluate the right-hand side once more at an already-known state, to recover velocity.
+
+    `solve_ivp` returns positions at every accepted step but not the
+    corresponding derivative, so recovering velocity for the recorded
+    [`ParticleState`][magnetofluidics_pinn.types.ParticleState] history
+    means calling the same right-hand side again - exactly what the
+    previous, per-particle implementation already did. Doing it once per
+    recorded step for the *whole active batch*, rather than once per
+    particle, is what keeps this a batched operation end to end.
+
+    Args:
+    - `ode_system`: The batched right-hand side built by
+      [`_build_batched_ode_system`][magnetofluidics_pinn.trajectory.integrator._build_batched_ode_system].
+    - `t`: Time at which `y` was recorded.
+    - `y`: The flattened state vector at `t`.
+
+    Returns:
+    - The flattened velocity vector at `(t, y)`, same layout as `y`.
+    """
+    return ode_system(t, y)
 
 
 def integrate_trajectory(
@@ -297,16 +431,19 @@ def integrate_trajectory(
     - `log_every`: Log progress every `log_every` steps.
 
     Returns:
-    - A list of per-particle trajectories, each containing a sequence of ParticleState instances
-      ordered by increasing time and residing on the flow network's operational device.
+    - A list of per-particle trajectories, each containing a sequence of
+      `ParticleState` instances ordered by increasing time and residing on
+      the flow network's operational device. A particle that collides with
+      the wall has its history end exactly at the (root-found) collision
+      state; a particle that does not reach `time_span[1]` unresolved.
 
     Raises:
     - `ValueError`: If `initial_states` is empty, if `time_span` bounds are invalid, if any
       `ParticleState.position` shape is inconsistent across `initial_states`, or if
       `mobility_tensor` does not have shape `(n_particles, n_dims, n_dims)`.
     - `NotImplementedError`: If `field_fn` is not spatially uniform (see `_assert_uniform_field`).
-    - `RuntimeError`: If the underlying adaptive solver fails to integrate a particle's
-      trajectory (`solve_ivp` reports `success=False`). Reaching the terminal wall-collision
+    - `RuntimeError`: If the underlying adaptive solver fails to integrate the batch
+      (`solve_ivp` reports `success=False`). Reaching the terminal wall-collision
       event below is a *successful*, expected termination, and does not raise.
     """
     if not initial_states:
@@ -314,130 +451,117 @@ def integrate_trajectory(
     time_start, time_end = time_span
     if time_end <= time_start:
         raise ValueError(f"time_span must satisfy t_end > t_start; got {time_span!r}.")
-
+    
+    n_particles = len(initial_states)
     n_dims = initial_states[0].position.shape[-1]
-    if any(state.position.shape != (n_dims,) for state in initial_states):
+    if n_dims != _N_DIMS_PER_PARTICLE:
         raise ValueError(
-            f"Every ParticleState.position must have shape ({n_dims},), matching the "
-            "first particle's position; got a mismatched shape among initial_states."
+            f"integrate_trajectory supports {n_dims} coordinates; expected {_N_DIMS_PER_PARTICLE}."
         )
-    if mobility_tensor.shape != (len(initial_states), n_dims, n_dims):
-        raise ValueError(
-            f"mobility_tensor must have shape ({len(initial_states)}, {n_dims}, {n_dims}) "
-            f"(n_particles, n_dims, n_dims); got {tuple(mobility_tensor.shape)}."
-        )
-    if particle_config.radius > 0.0:
-        on_axis_particles = [
-            index for index, state in enumerate(initial_states) if state.position[0].item() <= 0.0
-        ]
-        if on_axis_particles:
-            raise ValueError(
-                "integrate_trajectory received a non-zero particle_config.radius "
-                f"(Faxén correction active) together with particle(s) at index "
-                f"{on_axis_particles} starting on or across the symmetry axis "
-                "(r <= 0), where the Faxén-corrected Laplacian is singular. Use a "
-                "strictly positive initial radial position, or set "
-                "particle_config.radius = 0.0 for the point-particle limit."
-            )
-    # Resolve execution context properties once up-front to eliminate device shifting overhead
+    if mobility_tensor.shape != (n_particles, n_dims, n_dims):
+        raise ValueError(f"mobility_tensor shape mismatch: got {tuple(mobility_tensor.shape)}.")
+    
+    # CHANGED: Removed the invalid exception banning on-axis particles (r <= 0)
+    
     network_device = resolve_module_device(flow_network)
     network_dtype = resolve_module_dtype(flow_network)
-    
-    # Set flow network to evaluation mode to suppress autograd overhead on weights
     flow_network.eval()
-
+    
     r_max_particle = particle_config.max_surface_extension / scales.length
     effective_wall_limit = domain.radius - r_max_particle
-    a_nd = nondimensionalize_particle(particle_config, scales)
-
-    moment_tensor = torch.as_tensor(
+    particle_radius_nd = nondimensionalize_particle(particle_config, scales)
+    
+    magnetic_moment = torch.as_tensor(
         particle_config.magnetic_moment, device=network_device, dtype=network_dtype
-    ).unsqueeze(0)
+    )
+    mobility_tensor = mobility_tensor.to(device=network_device, dtype=network_dtype, non_blocking=True)
     
     if enforce_uniform_field:
-        # Enforce field uniformity checks prior to launching structural solvers
         _assert_uniform_field(
             field_fn, initial_states[0].position.to(device=network_device, dtype=network_dtype).unsqueeze(0)
         )
-
-    def make_ode_system(p_index: int) -> Callable[[float, np.ndarray], np.ndarray]:
-        """Closure factory tracking the structural parameters of an individual particle index."""
-        # Isolate the specific particle's mobility tensor slice and move it onto the active device
-        current_mobility = mobility_tensor[p_index].to(device=network_device, dtype=network_dtype)
-
-        def ode_system(t: float, y: np.ndarray) -> np.ndarray:
-            # Pinned, non-blocking transfer for scalar state vector
-            pos_tensor = torch.as_tensor(y, device=network_device, dtype=network_dtype).unsqueeze(0)
-
-            # 1. Hydrodynamic flow advection contribution (with optional Faxen Laplacian correction)
-            if a_nd > 0.0:
-                pos_flow = pos_tensor.clone().requires_grad_(True)
-                u_flow = faxen_corrected_velocity(flow_network, pos_flow, a_nd).detach()
-            else:
-                with torch.no_grad():
-                    u_flow = flow_network(pos_tensor)[:, :2]
-
-            # 2. Magnetic forcing contribution mapped through the adimensionless mobility tensor
-            pos_force = pos_tensor.clone().requires_grad_(True)
-            f_mag = dipole_force(field_fn, pos_force, moment_tensor).detach()
-            u_mag = torch.matmul(f_mag, current_mobility.T)
-
-            # Reduce contributions and unpack vector into standard NumPy format
-            # Squeeze and return as NumPy float64 for SciPy host solver
-            return (u_flow + u_mag).squeeze(0).cpu().numpy().astype(np.float64)
-
-        return ode_system
-
-    def wall_collision_event(t: float, y: np.ndarray) -> float:
-        """Zero when the particle's surface first reaches the channel wall."""
-        # Returns 0 once the particle's outer surface contacts the wall.
-        return effective_wall_limit - y[0]
-
-    wall_collision_event.terminal = True  # Stop the integration immediately upon impact
-    wall_collision_event.direction = -1  # Detection only when approaching the wall
-
-    trajectories: list[list[ParticleState]] = []
-    for particle_index, particle_state in enumerate(initial_states):
-        y0 = particle_state.position.detach().cpu().numpy().astype(np.float64)
-        active_ode = make_ode_system(particle_index)
+    
+    initial_positions = torch.stack([state.position for state in initial_states], dim=0)
+    y_current = _flatten_particle_positions(
+        initial_positions.to(device=network_device, dtype=network_dtype)
+    )
+    t_current = time_start
+    
+    trajectory_records: list[list[ParticleState]] = [[] for _ in range(n_particles)]
+    active_mask_bool = np.ones(n_particles, dtype=bool)
+    global_step_counter = 0
+    segment_index = 0
+    
+    while t_current < time_end and active_mask_bool.any():
+        active_indices = np.flatnonzero(active_mask_bool)
+        active_mask_tensor = torch.as_tensor(
+            active_mask_bool, device=network_device, dtype=network_dtype
+        ).unsqueeze(1)
+        
+        ode_system = _build_batched_ode_system(
+            flow_network=flow_network,
+            field_fn=field_fn,
+            magnetic_moment=magnetic_moment,
+            mobility_tensor=mobility_tensor,
+            particle_radius_nd=particle_radius_nd,
+            active_mask=active_mask_tensor,
+            n_particles=n_particles,
+            device=network_device,
+            dtype=network_dtype,
+        )
+        
+        segment_events = [
+            _make_wall_collision_event(int(index), effective_wall_limit) for index in active_indices
+        ]
         
         if verbose:
-            print(f"Start to track particle {particle_index}.")
-            
-        # Execute SciPy's adaptive Runge-Kutta method (RK45): the embedded
-        # Dormand-Prince pair [@dormand1980family], not Cash-Karp.
+            print(_format_batch_progress_line(segment_index, t_current, active_indices.size, n_particles))
+        
         sol = solve_ivp(
-            fun=active_ode,
-            t_span=time_span,
-            y0=y0,
+            fun=ode_system,
+            t_span=(t_current, time_end),
+            y0=y_current,
             method="RK45",
-            events=wall_collision_event,
+            events=segment_events,
             rtol=r_tol,
             atol=a_tol,
         )
-
+        
         if not sol.success:
-            raise RuntimeError(
-                f"solve_ivp failed to integrate particle {particle_index}: {sol.message}"
-            )
-
-        history: list[ParticleState] = []
+            raise RuntimeError(f"solve_ivp failed (segment {segment_index}): {sol.message}")
+        
         n_steps = len(sol.t)
         for step in range(n_steps):
-            pos_np = sol.y[:, step]
             t_val = sol.t[step]
-            v_np = active_ode(t_val, pos_np)
-
-            state = ParticleState(
-                position=torch.tensor(pos_np, device=network_device, dtype=network_dtype),
-                velocity=torch.tensor(v_np, device=network_device, dtype=network_dtype),
-                time=t_val,
-            )
-            history.append(state)
-            if verbose and (step % log_every == 0):
-                print(_format_trajectory_line(step,n_steps, t_val, pos_np))
-            
-        trajectories.append(history)
-
-    return trajectories
+            y_val = sol.y[:, step]
+            v_val = _recompute_velocities(ode_system, t_val, y_val)
+            for particle_index in active_indices:
+                radial_slice = slice(
+                    particle_index * _N_DIMS_PER_PARTICLE, (particle_index + 1) * _N_DIMS_PER_PARTICLE
+                )
+                trajectory_records[particle_index].append(
+                    ParticleState(
+                        position=torch.tensor(y_val[radial_slice], device=network_device, dtype=network_dtype),
+                        velocity=torch.tensor(v_val[radial_slice], device=network_device, dtype=network_dtype),
+                        time=float(t_val),
+                    )
+                )
+            global_step_counter += 1
+            if verbose and global_step_counter % log_every == 0:
+                print(f"  step {global_step_counter}: t={t_val:.6g}")
+        
+        y_current = sol.y[:, -1]
+        t_current = float(sol.t[-1])
+        
+        if sol.status == 1:
+            newly_collided = [
+                int(active_indices[event_index])
+                for event_index, event_times in enumerate(sol.t_events)
+                if event_times.size > 0
+            ]
+            active_mask_bool[newly_collided] = False
+        
+        segment_index += 1
+    
+    return trajectory_records
 

@@ -6,7 +6,8 @@ magnetic dipole force computed from a prescribed field.
 """
 
 # NOTE: explicit `as <same_name>` re-export (PEP 484); see package __init__.py.
-from magnetofluidics_pinn.physics.conservation import (axial_flow_rate as axial_flow_rate,
+from magnetofluidics_pinn.physics.conservation import (annular_flow_rate as annular_flow_rate,
+                                                       axial_flow_rate as axial_flow_rate,
                                                        poiseuille_reference_flow_rate as poiseuille_reference_flow_rate)
 from magnetofluidics_pinn.physics.fluid_residuals import (
     axisymmetric_vector_laplacian as axisymmetric_vector_laplacian,
@@ -15,12 +16,14 @@ from magnetofluidics_pinn.physics.fluid_residuals import (
     stokes_residual as stokes_residual,
 )
 from magnetofluidics_pinn.physics.hydrodynamic_drag import (
+    brenner_poiseuille_wall_factor as brenner_poiseuille_wall_factor,
     faxen_corrected_velocity as faxen_corrected_velocity,
     surface_traction_force as surface_traction_force,
 )
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force as dipole_force
 
 __all__ = [
+    "annular_flow_rate",
     "axisymmetric_vector_laplacian",
     "compute_flow_derivatives",
     "stokes_residual",
@@ -29,5 +32,5 @@ __all__ = [
     "faxen_corrected_velocity",
     "surface_traction_force",
     "axial_flow_rate",
-    "poiseuille_reference_flow_rate"
+    "poiseuille_reference_flow_rate",
 ]

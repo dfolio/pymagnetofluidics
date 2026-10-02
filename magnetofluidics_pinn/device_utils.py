@@ -108,6 +108,7 @@ def resolve_module_device(module: nn.Module) -> torch.device:
             "module has no parameters; its device cannot be inferred."
         ) from error
 
+
 def resolve_module_dtype(module: nn.Module) -> torch.dtype:
     """Infer the floating-point dtype a module's parameters currently use.
 
@@ -135,3 +136,42 @@ def resolve_module_dtype(module: nn.Module) -> torch.dtype:
         raise ValueError(
             "module has no parameters; its dtype cannot be inferred."
         ) from error
+
+
+# NEW: one-time, process-wide matmul-precision configuration.
+def configure_cuda_matmul_precision(precision: str = "high") -> None:
+    """Enable reduced-precision (TF32-class) matmul kernels on Ampere+ GPUs.
+
+    `torch.set_float32_matmul_precision` lets CUDA's matmul kernels trade a
+    small amount of `float32` precision for access to Tensor Cores, which
+    is where most of this package's wall-clock time goes: every flow- and
+    pressure-network forward and backward pass is dominated by `nn.Linear`
+    matrix multiplications. This has no counterpart on `"cpu"`-only runs or
+    on a device older than Ampere, where the call is accepted but has no
+    effect, so it is always safe to call once, regardless of which device
+    the rest of the pipeline ultimately resolves to (see
+    [`resolve_device`][magnetofluidics_pinn.device_utils.resolve_device]).
+
+    Intended to be called once, near the start of a script or notebook,
+    before building any network - not per-call inside a training or
+    trajectory-integration loop, since it mutates global PyTorch state
+    rather than anything tied to a specific module or tensor.
+
+    Args:
+    - `precision`: One of `"highest"` (full `float32`, the PyTorch
+      default), `"high"` (TF32-class reduced precision for matmuls; the
+      recommended default for this package's training and inference
+      workloads), or `"medium"` (a further relaxation). See
+      `torch.set_float32_matmul_precision`'s own documentation for the
+      exact numerical trade-off of each level.
+
+    Raises:
+    - `ValueError`: If `precision` is not one of `"highest"`, `"high"`, or
+      `"medium"`.
+    """
+    valid_precisions = ("highest", "high", "medium")
+    if precision not in valid_precisions:
+        raise ValueError(
+            f"precision must be one of {valid_precisions!r}; got {precision!r}."
+        )
+    torch.set_float32_matmul_precision(precision)

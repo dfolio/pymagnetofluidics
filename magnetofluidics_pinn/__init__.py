@@ -40,6 +40,7 @@ from magnetofluidics_pinn.device_utils import (
     resolve_device as resolve_device,
     resolve_module_device as resolve_module_device,
     resolve_module_dtype as resolve_module_dtype,
+    configure_cuda_matmul_precision as configure_cuda_matmul_precision,
 )
 from magnetofluidics_pinn.geometry import (
     build_bifurcation_domain as build_bifurcation_domain,
@@ -47,11 +48,14 @@ from magnetofluidics_pinn.geometry import (
 )
 from magnetofluidics_pinn.networks import (
     apply_hard_wall_constraint as apply_hard_wall_constraint,
+    apply_hard_particle_constraint as apply_hard_particle_constraint,
     build_mlp as build_mlp,
 )
-from magnetofluidics_pinn.physics import (axisymmetric_vector_laplacian as axisymmetric_vector_laplacian,
+from magnetofluidics_pinn.physics import (annular_flow_rate as annular_flow_rate,
+                                          axisymmetric_vector_laplacian as axisymmetric_vector_laplacian,
                                           compute_flow_derivatives as compute_flow_derivatives,
                                           axial_flow_rate as axial_flow_rate, dipole_force as dipole_force,
+                                          brenner_poiseuille_wall_factor as brenner_poiseuille_wall_factor,
                                           faxen_corrected_velocity as faxen_corrected_velocity,
                                           navier_stokes_residual as navier_stokes_residual,
                                           poiseuille_reference_flow_rate as poiseuille_reference_flow_rate,
@@ -75,6 +79,7 @@ from magnetofluidics_pinn.trajectory import (
     integrate_trajectory as integrate_trajectory,
     solve_force_balanced_velocity as solve_force_balanced_velocity,
     advance_particle_two_way as advance_particle_two_way,
+    make_dipole_applied_force_fn as make_dipole_applied_force_fn,
 )
 from magnetofluidics_pinn.types import (
     CollocationPoints as CollocationPoints,
@@ -103,6 +108,7 @@ from magnetofluidics_pinn.verification import (analytical_pressure_gradient as a
                                                evaluate_residual_grid as evaluate_residual_grid,
                                                evaluate_structural_constraints as evaluate_structural_constraints,
                                                evaluate_velocity_profiles as evaluate_velocity_profiles,
+                                               evaluate_particle_noslip_error as evaluate_particle_noslip_error,
                                                faxen_offset_velocity as faxen_offset_velocity,
                                                hagen_poiseuille_pressure as hagen_poiseuille_pressure,
                                                hagen_poiseuille_velocity_field as hagen_poiseuille_velocity_field,
@@ -120,7 +126,10 @@ from magnetofluidics_pinn.visualization import (plot_flow_rate_deviation as plot
                                                 plot_training_history as plot_training_history,
                                                 plot_two_way_history as plot_two_way_history,
                                                 plot_trajectories as plot_trajectories,
-                                                plot_velocity_profile_comparison as plot_velocity_profile_comparison)
+                                                plot_velocity_profile_comparison as plot_velocity_profile_comparison,
+                                                plot_particle_flow_field as plot_particle_flow_field,
+                                                plot_particle_residual_heatmap as plot_particle_residual_heatmap,
+                                                )
 
 __version__ = "0.1.7"  # CHANGED: was "0.1.6" - bumped for the train()/train_around_obstacle() merge and the new ObstacleConfig.
 
@@ -153,6 +162,7 @@ __all__ = [
     "gradient_field",
     "biot_savart_field",
     # Physics
+    "annular_flow_rate",
     "axisymmetric_vector_laplacian",
     "compute_flow_derivatives",
     "axial_flow_rate",
@@ -160,6 +170,7 @@ __all__ = [
     "stokes_residual",
     "navier_stokes_residual",
     "dipole_force",
+    "brenner_poiseuille_wall_factor",
     "faxen_corrected_velocity",
     "surface_traction_force",
     # Sampling
@@ -168,6 +179,7 @@ __all__ = [
     # Networks
     "build_mlp",
     "apply_hard_wall_constraint",
+    "apply_hard_particle_constraint",
     # Training
     "compose_loss",
     "train",
@@ -178,6 +190,7 @@ __all__ = [
     "integrate_trajectory",
     "solve_force_balanced_velocity",
     "advance_particle_two_way",
+    "make_dipole_applied_force_fn",
     # Visualization
     "plot_streamlines",
     "plot_trajectories",
@@ -189,6 +202,8 @@ __all__ = [
     "plot_flow_rate_deviation",  # NEW
     "plot_pressure_gradient_fit",  # NEW
     "plot_residual_heatmap",  # NEW
+    "plot_particle_flow_field",
+    "plot_particle_residual_heatmap",
     # Scaling
     "Scales",
     "compute_scales",
@@ -200,6 +215,7 @@ __all__ = [
     "resolve_device",
     "resolve_module_device",
     "resolve_module_dtype",
+    "configure_cuda_matmul_precision",
     # NEW: Verification
     "ProfileEvaluation",
     "summarize_residual",
@@ -215,6 +231,7 @@ __all__ = [
     "compute_pressure_gradient_error",
     "evaluate_held_out_residual",
     "evaluate_residual_grid",
+    "evaluate_particle_noslip_error",
     "compare_trajectory_to_analytical",
     "hagen_poiseuille_velocity_field",
     "hagen_poiseuille_pressure",

@@ -39,8 +39,9 @@ import torch
 from torch import nn
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
-from magnetofluidics_pinn.config import DomainConfig
+from magnetofluidics_pinn.config import FluidConfig, DomainConfig, ParticleConfig
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
+from magnetofluidics_pinn.boundary_conditions import rigid_body_velocity_condition
 from magnetofluidics_pinn.physics.conservation import axial_flow_rate
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.collocation import sample_collocation_points
@@ -269,6 +270,98 @@ def evaluate_velocity_profiles(
         predicted_ur=predicted_ur.detach(),
         analytical_uz=analytical_uz.detach(),
     )
+
+
+def evaluate_particle_noslip_error(  # NEW
+        network: nn.Module,
+        particle_config: ParticleConfig,
+        particle_state: ParticleState,
+        reference_velocity: float,
+        n_probe_points: int = 181,
+) -> dict[str, float]:
+    r"""Quantify how well a trained two-way-coupled network satisfies the particle no-slip condition.
+
+    `training.trainer.train`'s two-way-coupling path enforces $\mathbf u =
+    \mathbf u_p$ on the particle surface only as a soft loss term (see
+    [`networks.constraints.apply_hard_particle_constraint`][magnetofluidics_pinn.networks.constraints.apply_hard_particle_constraint]'s
+    docstring for why it is not yet a hard constraint); this function
+    measures how well that soft constraint actually holds, complementing
+    [`evaluate_structural_constraints`][magnetofluidics_pinn.verification.metrics.evaluate_structural_constraints]'s
+    axis/wall probe with the analogous check for the particle surface.
+
+    Reports both an $L^\infty$ and an $L^2(S)$ error, using the same
+    $\dd A = 2\pi r a\, \dd\theta$ surface-element weighting
+    [`physics.hydrodynamic_drag.surface_traction_force`][magnetofluidics_pinn.physics.hydrodynamic_drag.surface_traction_force]
+    already uses, since a maximum alone cannot distinguish a localized
+    defect (e.g. near the poles) from a systematic one spread over the
+    whole surface:
+
+    $$ \epsilon_\mathrm{noslip}^{L^\infty} = \max_\theta \norm{\mathbf
+    u(\theta) - \mathbf u_p}, \qquad \epsilon_\mathrm{noslip}^{L^2} =
+    \frac{1}{U_\mathrm{ref}} \left( \frac{1}{\abs{S}} \oint_S \norm{\mathbf
+    u - \mathbf u_p}^2 \dd A \right)^{1/2}, \quad \abs{S} = 4\pi a^2. $$
+
+    `particle_config.radius` and `particle_state.position` must be in
+    whatever units the `network` was actually trained with — currently the
+    package's two-way-coupling path consumes them without an explicit
+    nondimensionalization step (see the corresponding audit note), so this
+    function makes no unit conversion of its own and simply matches
+    whatever `network` expects.
+
+    Args:
+    - `network`: Trained (two-way-coupled) flow network mapping `(r, z)` to
+      `(u_r, u_z, p)`.
+    - `particle_config`: The embedded particle's intrinsic properties;
+      only `radius` is used.
+    - `particle_state`: The particle's instantaneous position and
+      prescribed rigid-body velocity — the same state used to build the
+      `TwoWayCouplingConfig` this `network` was trained under.
+    - `reference_velocity`: Velocity scale normalizing `"l2_relative_error"`
+      (e.g. the dimensionless inlet centerline velocity, or `peak_velocity`
+      as used elsewhere in this module).
+    - `n_probe_points`: Number of polar-angle quadrature nodes spanning
+      $\theta \in [0, \pi]$; matches `surface_traction_force`'s own
+      `n_quadrature_points` convention.
+
+    Returns:
+    - A dict with keys `"max_abs_error"`, `"rms_error"`, and
+      `"l2_relative_error"` (the dimensionless, area-averaged quantity
+      defined above).
+
+    Raises:
+    - `ValueError`: If `n_probe_points` is smaller than 2, or if
+      `reference_velocity` is not finite and strictly positive.
+    """
+    if n_probe_points < 2:
+        raise ValueError(f"n_probe_points must be at least 2 for trapezoidal quadrature; got {n_probe_points!r}.")
+    if not (np.isfinite(reference_velocity) and reference_velocity > 0.0):
+        raise ValueError(f"reference_velocity must be finite and strictly positive; got {reference_velocity!r}.")
+
+    resolved_device = resolve_module_device(network)
+    resolved_dtype = resolve_module_dtype(network)
+
+    theta = torch.linspace(0.0, torch.pi, n_probe_points, device=resolved_device, dtype=resolved_dtype)
+    radial_coordinate = particle_config.radius * torch.sin(theta)
+    axial_coordinate = particle_state.axial_position + particle_config.radius * torch.cos(theta)
+    coordinates = torch.stack([radial_coordinate, axial_coordinate], dim=1)
+
+    with torch.no_grad():
+        predicted_velocity = network(coordinates)[:, :2]
+
+    target_velocity = rigid_body_velocity_condition(
+        coordinates, (particle_state.velocity[0].item(), particle_state.velocity[1].item())
+    )
+    pointwise_error = torch.linalg.norm(predicted_velocity - target_velocity, dim=1)
+
+    surface_element = 2.0 * torch.pi * particle_config.radius * radial_coordinate
+    surface_area = 4.0 * torch.pi * particle_config.radius ** 2
+    l2_surface_norm_sq = torch.trapezoid(pointwise_error.square() * surface_element, theta) / surface_area
+
+    return {
+        "max_abs_error"     : pointwise_error.max().item(),
+        "rms_error"         : torch.sqrt(torch.mean(pointwise_error.square())).item(),
+        "l2_relative_error" : (torch.sqrt(l2_surface_norm_sq) / reference_velocity).item(),
+    }
 
 
 def _cartesian_grid(radial_grid: torch.Tensor, axial_grid: torch.Tensor) -> torch.Tensor:
@@ -609,7 +702,7 @@ def compute_pressure_gradient_error(
 def evaluate_held_out_residual(
         network: nn.Module,
         domain: Domain,
-        domain_config: DomainConfig,
+        config: FluidConfig | DomainConfig,
         random_seed: int,
         n_points: int,
         residual_form: Literal["standard", "r_weighted"] = "standard",
@@ -626,7 +719,7 @@ def evaluate_held_out_residual(
     Args:
     - `network`: Trained flow network mapping `(r, z)` to `(u_r, u_z, p)`.
     - `domain`: Already-nondimensionalized vessel geometry.
-    - `domain_config`: Domain configuration selecting the flow regime.
+    - `config`: Domain configuration selecting the flow regime.
     - `random_seed`: Seed for the held-out collocation batch; should differ
       from every seed used during training.
     - `n_points`: Number of interior points to draw.
@@ -645,6 +738,13 @@ def evaluate_held_out_residual(
     """
     if n_points <= 0:
         raise ValueError(f"n_points must be strictly positive; got {n_points!r}.")
+    # CHANGED: Extract embedded FluidConfig if DomainConfig was passed
+    fluid_config = (
+        config.fluid
+        if isinstance(config, DomainConfig)
+        else config
+    )
+
     resolved_device = resolve_module_device(network)
     # `sample_collocation_points` also draws a small boundary batch; it is
     # requested here (minimum size 3) purely to satisfy that function's own
@@ -656,14 +756,13 @@ def evaluate_held_out_residual(
         axis_clearance_fraction=axis_clearance_fraction, device=resolved_device,
     )
     interior = collocation.interior.clone().requires_grad_(True)
-    residual = stokes_residual(network, interior, domain_config, residual_form=residual_form)
+    residual = stokes_residual(network, interior, fluid_config, residual_form=residual_form)
     return summarize_residual(residual, _RESIDUAL_COMPONENT_NAMES)
 
 
 def evaluate_residual_grid(
         network: nn.Module,
-        domain: Domain,
-        domain_config: DomainConfig,
+        config: FluidConfig | DomainConfig,
         radial_grid: torch.Tensor,
         axial_grid: torch.Tensor,
         residual_form: Literal["standard", "r_weighted"] = "standard",
@@ -678,8 +777,7 @@ def evaluate_residual_grid(
 
     Args:
     - `network`: Trained flow network mapping `(r, z)` to `(u_r, u_z, p)`.
-    - `domain`: Already-nondimensionalized vessel geometry.
-    - `domain_config`: Domain configuration selecting the flow regime.
+    - `config`: Fluid configuration selecting the flow regime.
     - `radial_grid`, `axial_grid`: 1-D tensors spanning the evaluation grid.
       Under `residual_form="standard"`, `radial_grid` must not touch or
       cross the symmetry axis (see
@@ -701,12 +799,17 @@ def evaluate_residual_grid(
             "axis (r <= 0) under residual_form='standard'; exclude r=0 from radial_grid, or use "
             "residual_form='r_weighted'."
         )
+    fluid_config = (
+        config.fluid
+        if isinstance(config, DomainConfig)
+        else config
+    )
     resolved_device = resolve_module_device(network)
     resolved_dtype = resolve_module_dtype(network)
     radial_grid = radial_grid.to(device=resolved_device, dtype=resolved_dtype)
     axial_grid = axial_grid.to(device=resolved_device, dtype=resolved_dtype)
     coordinates = _cartesian_grid(radial_grid, axial_grid).requires_grad_(True)
-    residual = stokes_residual(network, coordinates, domain_config, residual_form=residual_form)
+    residual = stokes_residual(network, coordinates, fluid_config=fluid_config, residual_form=residual_form)
     n_radial, n_axial = radial_grid.shape[0], axial_grid.shape[0]
     return {
         name: residual[:, index].detach().abs().reshape(n_radial, n_axial)

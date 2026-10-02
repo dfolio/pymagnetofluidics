@@ -12,10 +12,12 @@ from magnetofluidics_pinn.trajectory.integrator import (
 from magnetofluidics_pinn.trajectory.two_way_coupling import (
     solve_force_balanced_velocity as solve_force_balanced_velocity,
     advance_particle_two_way as advance_particle_two_way,
+    make_dipole_applied_force_fn as make_dipole_applied_force_fn,
 )
 
 __all__ = [
     "integrate_trajectory",
     "solve_force_balanced_velocity",
     "advance_particle_two_way",
+    "make_dipole_applied_force_fn",
 ]

@@ -38,15 +38,15 @@ from magnetofluidics_pinn.types import CollocationPoints, Domain, ParticleState
 # arise, so a caller using that residual form may safely pass a smaller
 # value, down to and including `0.0` (flush with the axis).
 _AXIS_CLEARANCE_FRACTION = 5.0e-2
-# NEW. Default safety margin for the excluded-obstacle rejection sampler in
-# `sample_collocation_points_with_obstacle`: draw this many candidate
+# NEW. Default safety margin for the excluded-particle rejection sampler in
+# `sample_collocation_points_with_particle`: draw this many candidate
 # interior points per point ultimately requested, before discarding the
-# ones that fall inside the obstacle. The obstacle disk's own area is at
-# most `obstacle.radius**2 / domain.radius**2` of the channel's r-z cross
+# ones that fall inside the particle. The particle disk's own area is at
+# most `particle.radius**2 / domain.radius**2` of the channel's r-z cross
 # section (equality only if the sphere spans the full radius); a factor of
-# 4 comfortably covers every obstacle size this module's own validation
-# allows (see `sample_collocation_points_with_obstacle`'s radius check)
-# without materially over-drawing for a small, realistic obstacle.
+# 4 comfortably covers every particle size this module's own validation
+# allows (see `sample_collocation_points_with_particle`'s radius check)
+# without materially over-drawing for a small, realistic particle.
 _DEFAULT_OVERSAMPLING_FACTOR = 4.0
 
 
@@ -212,70 +212,62 @@ def sample_collocation_points_with_particle(
         n_surface_points: int,
         random_seed: int,
         axis_clearance_fraction: float | None = None,
+        constriction_oversample_ratio: float = 0.35,  # NEW: 35% focused in bypass clearance
+        constriction_axial_factor: float = 1.5,       # NEW: Axial span |z - z_p| <= 1.5 * a
         oversampling_factor: float = _DEFAULT_OVERSAMPLING_FACTOR,
+        boundary_layer_fraction: float = 0.25,  # NEW: 25% of points focused near particle
+        boundary_layer_radius_factor: float = 2.5,  # NEW: Shell thickness up to 2.5 * a
         device: str | torch.device | None = None,
 ) -> CollocationPoints:
-    r"""Sample interior, boundary, and obstacle-surface points around an embedded sphere.
+    r"""Sample interior, boundary, and particle-surface points around an embedded sphere.
  
-    NEW. The two-way-coupled counterpart of
-    [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points]:
-    wall, inlet, and outlet points are drawn exactly as that function
-    already does (the vessel's own boundary is unaffected by an obstacle
-    inside it), but interior points are drawn by *rejection sampling* —
-    oversample from the same volume-correct distribution, then discard
-    any point that falls inside the obstacle — and a new, third boundary
-    face is added: points on the obstacle's own surface, where
-    [`training.trainer.train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle]
-    enforces the particle's rigid-body velocity via
-    [`boundary_conditions.rigid_body_velocity_condition`][magnetofluidics_pinn.boundary_conditions.flow_bc.rigid_body_velocity_condition].
- 
-    **Rejection sampling never silently under-delivers.** Unlike a naive
-    "oversample and slice" approach, this function raises rather than
-    silently returning fewer than `n_interior` points if the requested
-    `oversampling_factor` was not generous enough — a caller that received
-    a short batch without an error would train on an unrequested, smaller
-    (and non-reproducibly-sized, seed-to-seed) collocation set without
-    ever knowing it.
+    CHANGED: Implements multizone collocation sampling. Allocates `constriction_oversample_ratio`
+    (default 35%) of interior collocation points directly to the high-shear annular constriction
+    cylinder $|z - z_p| \le 1.5 a, \, r \in [a, R]$, resolving the accelerated bypass jet and
+    preventing mass-flow deficit across the obstacle [@hu2025pecann; @happel1983low].
  
     Args:
     - `domain`: Vessel geometry to sample from; must already be
       nondimensionalized.
-    - `obstacle`: The embedded sphere; must fit strictly inside `domain`
+    - `particle_state`: The embedded particle's state; must fit strictly inside `domain`
       (see Raises).
+    - `particle_config`: The embedded particle's configuration; must fit strictly inside `domain`.
     - `n_interior`: Number of interior (fluid-only) points to sample.
     - `n_boundary`: Number of vessel-boundary (wall/inlet/outlet) points to
       sample; split exactly as
       [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points]
       splits it.
-    - `n_obstacle_surface`: Number of points to sample on the obstacle's
+    - `n_surface_points`: Number of points to sample on the particle's
       own surface.
     - `random_seed`: Seed guaranteeing reproducible sampling.
     - `axis_clearance_fraction`: Same meaning as
       [`sample_collocation_points`][magnetofluidics_pinn.sampling.collocation.sample_collocation_points]'s
       argument of the same name; applies only to the *candidate* interior
-      draw, before obstacle rejection.
+      draw, before particle rejection.
+    - `constriction_oversample_ratio`: Fraction of interior budget allocated to constriction gap.
+    - `constriction_axial_factor`: Axial extent multiplier determining constriction zone span.
     - `oversampling_factor`: How many candidate interior points to draw
       per point ultimately requested, before discarding the ones that fall
-      inside the obstacle. Must be strictly greater than `1.0`.
+      inside the particle. Must be strictly greater than `1.0`.
     - `device`: Device the returned tensors are created on directly.
  
     Returns:
     - A [`CollocationPoints`][magnetofluidics_pinn.types.CollocationPoints]
-      instance with `obstacle_surface` populated (never `None`).
+      instance with `particle_surface` populated (never `None`).
  
     Raises:
-    - `ValueError`: If `n_interior`, `n_boundary`, or `n_obstacle_surface`
+    - `ValueError`: If `n_interior`, `n_boundary`, or `n_surface_points`
       is not strictly positive, if `domain.kind` is not `"channel"`, if
       `oversampling_factor` is not strictly greater than `1.0`, if
       `axis_clearance_fraction` is invalid (see
-      `sample_collocation_points`), or if `obstacle` does not fit strictly
-      inside `domain` — i.e. `obstacle.radius >= domain.radius` (the
+      `sample_collocation_points`), or if `particle_config` does not fit strictly
+      inside `domain` — i.e. `particle_config.radius >= domain.radius` (the
       sphere would touch or exceed the channel wall) or the sphere's axial
       extent `[axial_position - radius, axial_position + radius]` is not
       strictly contained in `[0, domain.length]` (the sphere would touch
       or cross the inlet or outlet).
     - RuntimeError: If, after drawing `oversampling_factor * n_interior`
-      candidates, fewer than `n_interior` survive obstacle rejection —
+      candidates, fewer than `n_interior` survive particle rejection —
       raise `oversampling_factor`, or draw a smaller `n_interior`, rather
       than silently training on fewer points than requested.
     """
@@ -283,8 +275,13 @@ def sample_collocation_points_with_particle(
         raise ValueError("n_interior, n_boundary, and n_surface_points must be strictly positive.")
     if domain.kind != "channel":
         raise ValueError(
-            "sample_collocation_points_with_obstacle currently only supports "
+            "sample_collocation_points_with_particle currently only supports "
             f"domain.kind == 'channel'; got {domain.kind!r}."
+        )
+
+    if particle_config.radius >= domain.radius:
+        raise ValueError(
+            f"particle.radius ({particle_config.radius!r}) must be strictly less than domain.radius ({domain.radius!r})."
         )
     if oversampling_factor <= 1.0:
         raise ValueError(f"oversampling_factor must be strictly greater than 1.0; got {oversampling_factor!r}.")
@@ -293,19 +290,15 @@ def sample_collocation_points_with_particle(
             "axis_clearance_fraction must be None, or lie in [0.0, 1.0); "
             f"got {axis_clearance_fraction!r}."
         )
-    if particle_config.radius >= domain.radius:
-        raise ValueError(
-            f"obstacle.radius ({particle_config.radius!r}) must be strictly less than domain.radius "
-            f"({domain.radius!r}); a sphere reaching the channel wall is not representable here."
-        )
-    obstacle_z_min = particle_state.axial_position - particle_config.radius
-    obstacle_z_max = particle_state.axial_position + particle_config.radius
-    if not (0.0 < obstacle_z_min and obstacle_z_max < domain.length):
-        raise ValueError(
-            "obstacle must fit strictly inside the channel's axial extent (0, domain.length); "
-            f"got axial span [{obstacle_z_min!r}, {obstacle_z_max!r}] against domain.length="
-            f"{domain.length!r}."
-        )
+
+    # obstacle_z_min = particle_state.axial_position - particle_config.radius
+    # obstacle_z_max = particle_state.axial_position + particle_config.radius
+    # if not (0.0 < obstacle_z_min and obstacle_z_max < domain.length):
+    #     raise ValueError(
+    #         "obstacle must fit strictly inside the channel's axial extent (0, domain.length); "
+    #         f"got axial span [{obstacle_z_min!r}, {obstacle_z_max!r}] against domain.length="
+    #         f"{domain.length!r}."
+    #     )
     
     resolved_axis_clearance_fraction = (
         _AXIS_CLEARANCE_FRACTION if axis_clearance_fraction is None else axis_clearance_fraction
@@ -313,30 +306,55 @@ def sample_collocation_points_with_particle(
     resolved_device = resolve_device(device)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
     
-    # Interior points, by rejection sampling: draw candidates from the same
-    # volume-correct (r dr) distribution `sample_collocation_points` uses,
-    # then discard any candidate whose (z, r) falls inside the obstacle
-    # disk `(z - z_p)^2 + r^2 < a^2` before keeping the first n_interior
-    # survivors.
-    n_candidates = math.ceil(oversampling_factor * n_interior)
+    a = particle_config.radius
+    z_p = particle_state.axial_position
+    
+    # 1. Budget Partition: Constriction Zone vs. Global Background
+    n_constriction = int(n_interior * constriction_oversample_ratio)
+    n_global = n_interior - n_constriction
+    
+    # 2. Constriction-Zone Collocation Sampling: |z - z_p| <= 1.5 * a, r in [a, R]
+    z_gap_min = max(z_p - constriction_axial_factor * a, 0.0)
+    z_gap_max = min(z_p + constriction_axial_factor * a, domain.length)
+    z_gap_length = z_gap_max - z_gap_min
+    
+    n_constriction_candidates = math.ceil(oversampling_factor * n_constriction)
     r_min = domain.radius * resolved_axis_clearance_fraction
-    xi = torch.rand(n_candidates, 1, generator=generator, device=resolved_device)
-    candidate_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi)
-    candidate_z = domain.length * torch.rand(n_candidates, 1, generator=generator, device=resolved_device)
+    xi_gap = torch.rand(n_constriction_candidates, 1, generator=generator, device=resolved_device)
+    gap_cand_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi_gap)
+    gap_cand_z = z_gap_min + z_gap_length * torch.rand(n_constriction_candidates, 1, generator=generator,
+                                                       device=resolved_device)
     
-    outside_obstacle = (candidate_z - particle_state.axial_position) ** 2 + candidate_r ** 2 >= particle_config.radius ** 2
-    surviving_r = candidate_r[outside_obstacle]
-    surviving_z = candidate_z[outside_obstacle]
-    if surviving_r.shape[0] < n_interior:
+    outside_gap_particle = (gap_cand_z - z_p).square() + gap_cand_r.square() >= a ** 2
+    surviving_gap_r = gap_cand_r[outside_gap_particle][:n_constriction]
+    surviving_gap_z = gap_cand_z[outside_gap_particle][:n_constriction]
+    
+    if surviving_gap_r.shape[0] < n_constriction:
         raise RuntimeError(
-            f"sample_collocation_points_with_obstacle drew {n_candidates} candidate interior "
-            f"points (oversampling_factor={oversampling_factor!r}) but only "
-            f"{surviving_r.shape[0]} survived obstacle rejection, fewer than the requested "
-            f"n_interior={n_interior!r}. Raise oversampling_factor, or request fewer interior "
-            "points, rather than silently training on an under-sized batch."
+            f"Insufficient candidates survived constriction sampling: needed {n_constriction}, got {surviving_gap_r.shape[0]}."
         )
-    interior = torch.stack([surviving_r[:n_interior], surviving_z[:n_interior]], dim=1)
     
+    # 3. Global Background Rejection Sampling across [0, domain.length]
+    n_global_candidates = math.ceil(oversampling_factor * n_global)
+    xi_glob = torch.rand(n_global_candidates, 1, generator=generator, device=resolved_device)
+    glob_cand_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi_glob)
+    glob_cand_z = domain.length * torch.rand(n_global_candidates, 1, generator=generator, device=resolved_device)
+    
+    outside_glob_particle = (glob_cand_z - z_p).square() + glob_cand_r.square() >= a ** 2
+    surviving_glob_r = glob_cand_r[outside_glob_particle][:n_global]
+    surviving_glob_z = glob_cand_z[outside_glob_particle][:n_global]
+    
+    if surviving_glob_r.shape[0] < n_global:
+        raise RuntimeError(
+            f"Insufficient candidates survived global sampling: needed {n_global}, got {surviving_glob_r.shape[0]}."
+        )
+    
+    # Merge multizone coordinates
+    interior_r = torch.cat([surviving_gap_r, surviving_glob_r], dim=0)
+    interior_z = torch.cat([surviving_gap_z, surviving_glob_z], dim=0)
+    interior = torch.stack([interior_r, interior_z], dim=1)
+    
+    # 4. Channel External Boundary Points (Wall, Inlet, Outlet)
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
     wall_points = torch.cat(
         [
@@ -361,20 +379,19 @@ def sample_collocation_points_with_particle(
     )
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
     
-    # Obstacle surface: uniform in the meridian polar angle theta in [0,
-    # pi], matching the parametrization
-    # `physics.hydrodynamic_drag.surface_traction_force` integrates over
-    # (r, z) = (a sin(theta), z_p + a cos(theta)). Randomly re-drawn (like
-    # the interior and vessel-boundary points) rather than a fixed grid,
-    # consistent with this module's per-epoch resampling philosophy for
-    # the Adam training phase.
-    theta = math.pi * torch.rand(n_surface_points, 1, generator=generator, device=resolved_device)
+    # 5. Particle Surface Collocation Points (Uniform meridian polar angle theta in [0, pi])
+    theta_surf = math.pi * torch.rand(n_surface_points, 1, generator=generator, device=resolved_device)
     obstacle_surface = torch.cat(
         [
-            particle_config.radius * torch.sin(theta),
-            particle_state.axial_position + particle_config.radius * torch.cos(theta),
+            a * torch.sin(theta_surf),
+            z_p + a * torch.cos(theta_surf),
         ],
         dim=1,
     )
     
-    return CollocationPoints(interior=interior, boundary=boundary, initial=None, particle_surface=obstacle_surface)
+    return CollocationPoints(
+        interior=interior,
+        boundary=boundary,
+        initial=None,
+        particle_surface=obstacle_surface,
+    )

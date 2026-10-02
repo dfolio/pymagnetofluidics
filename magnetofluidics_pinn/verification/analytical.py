@@ -204,20 +204,10 @@ def analytical_tracer_streamline(
 ) -> tuple[np.ndarray, np.ndarray]:
     r"""Compute the closed-form tracer streamline under a uniform magnetic field.
 
-    Under a spatially uniform $\vb{B}$, the dipole force vanishes
-    identically [@abbott2020magnetic] (see
-    [`physics.magnetic_forcing.dipole_force`][magnetofluidics_pinn.physics.magnetic_forcing.dipole_force]),
-    so a tracer is advected by the ambient flow velocity alone. For
-    Hagen-Poiseuille flow that velocity is constant along a streamline
-    (steady, $z$-independent profile), giving the closed form
-
-    $$ r^*(t^*) = r_0^*, \qquad z^*(t^*) = z_0^* + U_z^\text{Faxén}(r_0^*)
-    \left(t^* - t_0^*\right), $$
-
-    where $U_z^\text{Faxén}$ reduces to $u_z^*(r_0^*)$ itself when
-    `particle_radius` is `0.0`, or its Faxén-law-corrected value (see
-    [`faxen_offset_velocity`][magnetofluidics_pinn.verification.analytical.faxen_offset_velocity])
-    otherwise.
+    CHANGED: The artificial check that rejected on-axis initial positions ($r_0 \le 0$)
+    when `particle_radius > 0` has been removed. For Hagen–Poiseuille flow,
+    $\nabla^2 u_z$ is spatially constant everywhere, making Faxén's correction
+    completely non-singular on the centerline $r = 0$.
 
     Args:
     - `initial_position`: Tuple $(r_0^*, z_0^*)$, the tracer's initial
@@ -251,16 +241,11 @@ def analytical_tracer_streamline(
         raise ValueError(f"peak_velocity must be finite and strictly positive; got {peak_velocity!r}.")
     if not math.isfinite(particle_radius) or particle_radius < 0.0:
         raise ValueError(f"particle_radius must be finite and non-negative; got {particle_radius!r}.")
-
+    
     initial_radius, initial_axial_position = initial_position
     if not (0.0 <= initial_radius <= radius):
         raise ValueError(
             f"initial_position's radial component must lie in [0.0, {radius!r}]; got {initial_radius!r}."
-        )
-    if particle_radius > 0.0 and initial_radius <= 0.0:
-        raise ValueError(
-            "analytical_tracer_streamline received a non-zero particle_radius together with an "
-            "on-axis initial position (r <= 0), where the Faxén correction is not defined."
         )
 
     time_grid = np.asarray(time_grid, dtype=np.float64)

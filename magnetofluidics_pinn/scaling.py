@@ -113,6 +113,7 @@ def nondimensionalize_domain(domain: Domain, scales: Scales) -> Domain:
         length=domain.length / scales.length,
         radius=domain.radius / scales.length,
         u_max=domain.u_max / scales.velocity,
+        p_max=domain.p_max / scales.pressure if domain.p_max != 0.0 else 0.0,
         branch_angle=domain.branch_angle,
     )
 
@@ -134,6 +135,7 @@ def redimensionalize_domain(domain: Domain, scales: Scales) -> Domain:
         length=domain.length * scales.length,
         radius=domain.radius * scales.length,
         u_max=domain.u_max * scales.velocity,
+        p_max=domain.p_max * scales.pressure if domain.p_max != 0.0 else 0.0,
         branch_angle=domain.branch_angle,
     )
 
@@ -288,18 +290,40 @@ def compute_mobility_scale(domain_config: DomainConfig) -> float:
 
 
 def nondimensionalize_mobility(particle_config: ParticleConfig, fluid_config: DomainConfig,
-                               scales: Scales) -> torch.Tensor:
-    """Generates the dimensionless mobility tensor based on the particle’s shape.
+                               scales: Scales,
+                                device: torch.device | str = "cpu",
+                                dtype: torch.dtype = torch.float32,
+                               ) -> torch.Tensor:
+    r"""Generate the exact dimensionless Stokes mobility tensor $\mathbf{M}^*$.
 
-    Takes the surface configuration/shape into account to construct M*.
-    For a sphere:  $M^* = diag(1/a^*, 1/a^*)$
+    For an unconfined rigid sphere of radius $a$, the physical Stokes mobility is
+    $\mathcal{M}_{\mathrm{phys}} = \frac{1}{6\pi \mu a}$. With force scale $F_c = \mu U_c L_c$,
+    the dimensionless isotropic mobility tensor is [@happel1983low; @kim2005microhydrodynamics]:
+    $$\mathbf{M}^* = \frac{1}{6\pi a^*} \mathbf{I}, \quad \text{where } a^* = \frac{a}{L_c}.$$
+    CHANGED: Restored the factor of $6\pi$ and enabled explicit device and dtype placement.
+
+    Args:
+    - `particle_config`: Particle configuration containing physical radius $a$.
+    - `scales`: Characteristic scales providing $L_c = \text{scales.length}$.
+    - `device`: Computation device (CUDA/CPU) for the returned tensor.
+    - `dtype`: Floating-point dtype for the returned tensor.
+
+    Returns:
+    - Tensor of shape `(2, 2)` representing the dimensionless mobility tensor.
+
+    Raises:
+    - `ValueError`: If particle radius is non-positive or kind is unsupported.
     """
+    if particle_config.radius <= 0.0:
+        raise ValueError(
+            f"particle_config.radius must be strictly positive; got {particle_config.radius!r}."
+        )
     a_nd = particle_config.radius / scales.length
     kind = getattr(particle_config, "kind", "spherical")
     
     if kind in ["sphere", "spherical"]:
         # Adimensional isotropic Stroke mobility
-        mobility_scalar = 1.0 / a_nd
+        mobility_scalar = 1.0 / (6.0*torch.pi*a_nd)
         return torch.diag(torch.tensor([mobility_scalar, mobility_scalar]))
     
     # elif kind == "spheroid":

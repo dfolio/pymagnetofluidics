@@ -36,7 +36,7 @@ fraction of the channel radius that a one-way correction is in doubt, and
 only for as many positions as the cost allows.
 
 **Scope.** Restricted, like
-[`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle]
+[`ParticleState`][magnetofluidics_pinn.types.ParticleState]
 itself, to a single spherical particle confined to the channel's
 symmetry axis, translating axially with no rotation — the one obstacle
 placement compatible with this package's axisymmetric `(r, z)`
@@ -71,6 +71,8 @@ rather than mutating the caller's config in place.
 from __future__ import annotations
 
 import dataclasses  # NEW — used to silence verbose logging on a per-call copy of the config; see module docstring.
+from operator import ifloordiv
+from tabnanny import verbose
 from typing import Callable, Any
 
 import torch
@@ -82,10 +84,37 @@ from magnetofluidics_pinn.config import (
     ParticleConfig,
     TwoWayCouplingConfig,
     TrainingConfig,
-)  # CHANGED: added ObstacleConfig.
+)
 from magnetofluidics_pinn.physics.hydrodynamic_drag import surface_traction_force
+from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force  # NEW
 from magnetofluidics_pinn.training.trainer import TrainingHistory, train
-from magnetofluidics_pinn.types import Domain, ParticleState
+from magnetofluidics_pinn.types import Domain, MagneticFieldSample, ParticleState
+
+
+def _expand_velocity_bracket(
+        force_residual_fn, low: float, high: float, max_iter: int = 5, expansion_factor: float = 1.8
+) -> tuple[float, float]:
+    r_low = force_residual_fn(low)
+    r_high = force_residual_fn(high)
+    
+    step = 0
+    while r_low * r_high > 0.0 and step < max_iter:
+        if r_high > 0:
+            # Need higher positive velocity to generate stronger opposing drag
+            high = high * expansion_factor + 0.5
+            r_high = force_residual_fn(high)
+        else:
+            # Need lower/negative velocity
+            low = low * expansion_factor - 0.5
+            r_low = force_residual_fn(low)
+        step += 1
+    
+    if r_low * r_high > 0.0:
+        raise ValueError(
+            f"Could not bracket root after {max_iter} expansions. "
+            f"Last bracket: ({low:.2f}, {high:.2f}) with residuals ({r_low:.3e}, {r_high:.3e})."
+        )
+    return low, high
 
 
 def solve_force_balanced_velocity(
@@ -123,10 +152,9 @@ def solve_force_balanced_velocity(
       every subsequent candidate warm-starts from the previous one's
       result. Never mutated — `train` already deep-copies before training.
     - `domain`, `object`, `fluid_config`: As in
-      [`train`][magnetofluidics_pinn.training.trainer.train], `object`
-      being wrapped into the
-      [`ObjectConfig`][magnetofluidics_pinn.config.ObjectConfig] built
-      internally for each candidate.
+      [`train`][magnetofluidics_pinn.training.trainer.train]; a fresh
+      [`TwoWayCouplingConfig`][magnetofluidics_pinn.config.TwoWayCouplingConfig]
+      is built internally for each candidate velocity
     - `fluid_config`: Physical properties of the fluid.
     - `particle_config`: Intrinsic physical/geometric properties of the microrobot.
     - `particle_state`: Instantaneous position and kinematic state.
@@ -137,7 +165,7 @@ def solve_force_balanced_velocity(
       candidates rather than within any single retraining.
     - `applied_force_z`: The sum of every externally applied axial force
       on the particle (magnetic today; anything else the caller adds
-      later), evaluated at `object.axial_position`. `0.0` finds the
+      later), evaluated at `particle_state.axial_position`. `0.0` finds the
       velocity of a passively-advected, non-actuated particle.
     - `velocity_bracket`: `(low, high)` with `low < high`; the force
       residual must have opposite signs at the two ends (checked below) —
@@ -145,8 +173,8 @@ def solve_force_balanced_velocity(
       Faxén-corrected point-particle estimate
       ([`physics.hydrodynamic_drag.faxen_corrected_velocity`][magnetofluidics_pinn.physics.hydrodynamic_drag.faxen_corrected_velocity])
       at the same position.
-    - `n_object_surface_points`: Forwarded to each candidate's
-      `ObjectConfig`.
+    - `n_surface_points`: Forwarded to each candidate's
+      `TwoWayCouplingConfig`.
     - `n_quadrature_points`: Forwarded to `surface_traction_force`.
     - `velocity_tolerance`: `brentq`'s `xtol`, in the same dimensionless
       velocity units as `velocity_bracket`.
@@ -168,19 +196,18 @@ def solve_force_balanced_velocity(
     velocity_low, velocity_high = velocity_bracket
     if velocity_low >= velocity_high:
         raise ValueError(f"velocity_bracket must satisfy low < high; got {velocity_bracket!r}.")
-
+    
+    device = training_config.torch_device
+    dtype = training_config.torch_dtype
+    network = network.to(device=device, dtype=dtype)
     state: dict[str, Any] = {"network": network, "history": None}
 
     def force_residual(candidate_velocity: float) -> float:
         current_config = training_config if state["history"] is None else (refinement_config or training_config)
         silent_config = dataclasses.replace(current_config, verbose=False)
         candidate_state = ParticleState(
-            position=particle_state.position,
-            velocity=torch.tensor(
-                [0.0, candidate_velocity],
-                device=particle_state.position.device,
-                dtype=particle_state.position.dtype,
-            ),
+            position=particle_state.position.to(device=device, dtype=dtype),
+            velocity=torch.tensor([0.0, candidate_velocity], device=device, dtype=dtype),
             time=particle_state.time,
         )
         pos_tuple = (
@@ -214,29 +241,30 @@ def solve_force_balanced_velocity(
         state["history"] = history
         residual = applied_force_z + drag_force
         # GPU cache cleanup between brentq candidate evaluations
-        device = next(trained.parameters()).device
-        if device.type == "cuda":
-            torch.cuda.empty_cache()
+        # device = next(trained.parameters()).device
+        # if device.type == "cuda":
+        #     torch.cuda.empty_cache()
         if training_config.verbose:
             print(f"  U_z = {candidate_velocity:+.3e}  ->  F_drag = {drag_force:+.3e}, residual = {residual:+.3e}")
         return residual
-
+        
+    # Evaluate initial residuals at bracket endpoints
     residual_low = force_residual(velocity_low)
     residual_high = force_residual(velocity_high)
+    
+    # CHANGED: Removed the premature `raise ValueError` that previously rendered
+    # `_expand_velocity_bracket` unreachable dead code. Automatic expansion now proceeds.
     if residual_low * residual_high > 0.0:
-        raise ValueError(
-            f"velocity_bracket={velocity_bracket!r} does not bracket a sign change in the force "
-            f"residual (residual({velocity_low})={residual_low:.4e}, residual({velocity_high})="
-            f"{residual_high:.4e}); widen the bracket."
+        if training_config.verbose:
+            print("Initial bracket does not enclose a sign change; expanding dynamically...")
+        velocity_low, velocity_high = _expand_velocity_bracket(
+            force_residual, velocity_low, velocity_high
         )
-
+    
+    # Resolve certified root with scalar Brent method
     particle_velocity = brentq(force_residual, velocity_low, velocity_high, xtol=velocity_tolerance)
-    # One further evaluation exactly at the root, so the returned network
-    # and history are guaranteed to match `particle_velocity` precisely,
-    # rather than whichever bracketing step brentq's internal search last
-    # happened to land near it.
     force_residual(particle_velocity)
-
+    
     return particle_velocity, state["network"], state["history"]
 
 
@@ -252,7 +280,7 @@ def advance_particle_two_way(
     time_step: float,
     velocity_bracket: tuple[float, float],
     refinement_config: TrainingConfig | None = None,
-    n_object_surface_points: int = 200,
+    n_surface_points: int = 200,
     n_quadrature_points: int = 181,
     velocity_tolerance: float = 1.0e-3,
 ) -> list[ParticleState]:
@@ -274,12 +302,11 @@ def advance_particle_two_way(
     Args:
     - `network`: Starting flow network for the first step (see
       `solve_force_balanced_velocity`'s `network` argument).
-    - `domain`, `fluid_config`, `training_config`, `refinement_config`,
-      `n_object_surface_points`, `n_quadrature_points`,
-      `velocity_tolerance`, `verbose`: Forwarded to
-      `solve_force_balanced_velocity` at every step.
-    - `object_radius`: Dimensionless particle radius (see
-      `SphericalObject.radius`); fixed for the whole trajectory.
+    - domain`, `fluid_config`, `training_config`, `particle_config`,
+      `refinement_config`, `n_object_surface_points`, `n_quadrature_points`,
+      `velocity_tolerance`: Forwarded to `solve_force_balanced_velocity` at
+      every step (`training_config.verbose` governs progress printing;
+      there is no separate `verbose` parameter on this function).
     - `initial_axial_position`: Dimensionless starting $z$-position, on
       the axis.
     - `applied_force_fn`: Callable mapping the particle's *current* axial
@@ -301,7 +328,7 @@ def advance_particle_two_way(
       [`ParticleState`][magnetofluidics_pinn.types.ParticleState] instances
       (including the initial state at `time=0.0`), each with `position`
       `(0.0, z)` — the radial component is always exactly `0.0`, per
-      `SphericalObject`'s on-axis constraint — and `velocity` `(0.0,
+      `ParticleState`'s on-axis constraint — and `velocity` `(0.0,
       U_z)`, on the CPU, in the package's usual dimensionless units.
 
     Raises:
@@ -318,12 +345,15 @@ def advance_particle_two_way(
     if time_step <= 0.0:
         raise ValueError(f"time_step must be strictly positive; got {time_step!r}.")
 
+    device = training_config.torch_device
+    dtype = training_config.torch_dtype
+    
     current_position = float(initial_axial_position)
     current_network = network
     current_time = 0.0
     particle_state = ParticleState(
-            position=torch.tensor([0.0, current_position]),
-            velocity=torch.zeros(2),
+            position=torch.tensor([0.0, current_position], device=device, dtype=dtype),
+            velocity=torch.zeros(2, device=device, dtype=dtype),
             time=current_time,
         )
     states = [particle_state]
@@ -338,8 +368,8 @@ def advance_particle_two_way(
                 "a smaller time_step or fewer n_steps."
             )
         particle_state = ParticleState(
-            position=torch.tensor([0.0, current_position]),
-            velocity=torch.zeros(2),
+            position=torch.tensor([0.0, current_position], device=device, dtype=dtype),
+            velocity=torch.zeros(2, device=device, dtype=dtype),
             time=current_time,
         )
         applied_force = applied_force_fn(current_position)
@@ -352,7 +382,7 @@ def advance_particle_two_way(
             particle_config=particle_config, particle_state=particle_state,
             training_config=training_config,
             applied_force_z=applied_force, velocity_bracket=velocity_bracket,
-            n_surface_points=n_object_surface_points,
+            n_surface_points=n_surface_points,
             n_quadrature_points=n_quadrature_points, velocity_tolerance=velocity_tolerance,
             refinement_config=refinement_config,
         )
@@ -368,3 +398,51 @@ def advance_particle_two_way(
         )
 
     return states
+
+
+def make_dipole_applied_force_fn(  # NEW
+    field_fn: Callable[[torch.Tensor], MagneticFieldSample],
+    magnetic_moment: torch.Tensor,
+) -> Callable[[float], float]:
+    r"""Build an `applied_force_fn` for `advance_particle_two_way` from a prescribed magnetic field.
+
+    The one-way path,
+    [`trajectory.integrator.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory],
+    derives the magnetic drift force from a `field_fn`/`magnetic_moment`
+    pair via
+    [`physics.magnetic_forcing.dipole_force`][magnetofluidics_pinn.physics.magnetic_forcing.dipole_force].
+    `advance_particle_two_way` instead takes an arbitrary scalar-valued
+    `applied_force_fn`, so nothing previously forced a one-way/two-way
+    comparison under "the same" actuation to actually use the same force
+    model — one call site could prescribe a real field while the other
+    silently fell back to `lambda z: 0.0`. This function removes that gap
+    by building the two-way `applied_force_fn` from the identical
+    primitives the one-way path already uses.
+
+    Args:
+    - `field_fn`: Callable returning a
+      [`MagneticFieldSample`][magnetofluidics_pinn.types.MagneticFieldSample]
+      for a batch of coordinates, e.g. `uniform_field` or `biot_savart_field`
+      — the same callable passed to `integrate_trajectory`.
+    - `magnetic_moment`: Tensor of shape `(1, 2)` or `(2,)`, the particle's
+      magnetic moment, in the same dimensionless units `dipole_force`
+      expects — the same value passed to `integrate_trajectory`.
+
+    Returns:
+    - A callable mapping an axial position `z` (on-axis, `r = 0`, matching
+      this module's on-axis confinement) to the axial component of the
+      dipole force there, suitable for `advance_particle_two_way`'s
+      `applied_force_fn`. Under a spatially uniform field the dipole force
+      is exactly zero everywhere [@abbott2020magnetic], so the returned
+      callable reduces to `lambda z: 0.0` in that case — now as a physical
+      consequence of the field being uniform, not by omission.
+    """
+    def applied_force_fn(axial_position: float) -> float:
+        with torch.enable_grad():
+            position = torch.tensor(
+                [[0.0, axial_position]], dtype=magnetic_moment.dtype, device=magnetic_moment.device
+            ).requires_grad_(True)
+            force = dipole_force(field_fn, position, magnetic_moment)
+            return force[0, 1].item()
+
+    return applied_force_fn

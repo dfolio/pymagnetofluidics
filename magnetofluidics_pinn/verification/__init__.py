@@ -34,6 +34,7 @@ from magnetofluidics_pinn.verification.metrics import (
     evaluate_residual_grid as evaluate_residual_grid,
     evaluate_structural_constraints as evaluate_structural_constraints,
     evaluate_velocity_profiles as evaluate_velocity_profiles,
+    evaluate_particle_noslip_error as evaluate_particle_noslip_error,
     summarize_residual as summarize_residual,
 )
 from magnetofluidics_pinn.verification.reporting import (
@@ -67,6 +68,7 @@ __all__ = [
     "compute_pressure_gradient_error",
     "evaluate_held_out_residual",
     "evaluate_residual_grid",
+    "evaluate_particle_noslip_error",
     "compare_trajectory_to_analytical",
     # Reporting
     "VerificationCheck",

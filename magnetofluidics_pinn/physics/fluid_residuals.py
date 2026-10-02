@@ -127,7 +127,11 @@ def _validate_inputs(
         residual_form: str,
         function_name: str,
 ) -> torch.Tensor:
-    """Validate coordinates and residual form, returning the radial coordinates tensor.
+    """Validate coordinates and return the radial coordinate column.
+
+    CHANGED: Coordinates with $r = 0$ are now fully admissible under both
+    `residual_form="standard"` and `residual_form="r_weighted"` due to analytical
+    L'Hôpital axis limits.
 
     Args:
     - `coordinates`: Coordinate tensor requiring gradients.
@@ -142,26 +146,17 @@ def _validate_inputs(
     if coordinates.ndim != 2 or coordinates.shape[1] != expected_dim:
         dim_str = "(r, z)" if expected_dim == 2 else "(r, z, t)"
         raise ValueError(
-            f"coordinates must have shape (n_points, {expected_dim}) for the axisymmetric "
-            f"{dim_str} formulation; got {tuple(coordinates.shape)}."
+            f"{function_name} requires shape (n_points, {expected_dim}) for "
+            f"{dim_str}; got {tuple(coordinates.shape)}."
         )
     if not coordinates.requires_grad:
         raise ValueError(
-            "coordinates must require gradients (call `.requires_grad_(True)`) "
-            "so that the residual can be evaluated through automatic differentiation."
+            f"{function_name} coordinates must require gradients (`requires_grad_(True)`)."
         )
     radius = coordinates[:, 0:1]
-    if residual_form == "standard":
-        if torch.any(radius <= 0.0):
-            raise ValueError(
-                f"{function_name} received coordinates on or across the symmetry "
-                "axis (r <= 0) under residual_form='standard'; exclude the axis "
-                "when sampling interior points, or use residual_form='r_weighted'."
-            )
-    elif torch.any(radius < 0.0):
+    if torch.any(radius < 0.0):
         raise ValueError(
-            f"{function_name} received a negative radial coordinate under "
-            f"residual_form={residual_form!r}; r must be non-negative."
+            f"{function_name} received negative radial coordinates; $r$ must be non-negative."
         )
     return radius
 
@@ -253,6 +248,7 @@ def axisymmetric_vector_laplacian(
         derivs: FlowDerivatives,
         radius: torch.Tensor,
         residual_form: Literal["standard", "r_weighted"] = "standard",
+        axis_regularization_eps: float = 1.0e-7,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""Evaluate the axisymmetric vector Laplacian $\nabla^2 \mathbf{u} = (\nabla_r^2 \mathbf{u}, \nabla_z^2 \mathbf{u})$.
 
@@ -261,17 +257,19 @@ def axisymmetric_vector_laplacian(
       - \frac{u_r}{r^2} + \frac{\partial^2 u_r}{\partial z^2}, \qquad
     \nabla_z^2 \mathbf{u} = \frac{\partial^2 u_z}{\partial r^2} + \frac{1}{r}\frac{\partial u_z}{\partial r}
       + \frac{\partial^2 u_z}{\partial z^2}.$$
-    Under `"r_weighted"`, equations are multiplied analytically by $r^2$ (radial) and $r$ (axial)
-    to eliminate coordinate singularities at $r = 0$:
-    $$r^2 \nabla_r^2 \mathbf{u} = r^2\left(\frac{\partial^2 u_r}{\partial r^2} + \frac{\partial^2 u_r}{\partial z^2}\right)
-      + r \frac{\partial u_r}{\partial r} - u_r, \qquad
-    r \nabla_z^2 \mathbf{u} = r\left(\frac{\partial^2 u_z}{\partial r^2} + \frac{\partial^2 u_z}{\partial z^2}\right)
-      + \frac{\partial u_z}{\partial r}.$$
+    On the symmetry axis ($r \to 0$), symmetry requires $u_r(0, z) = 0$ and $\partial u_z / \partial r |_{r=0} = 0$.
+    Applying L'Hôpital's rule yields the non-singular physical limits [@happel1983low]:
+    $$\lim_{r \to 0} \left(\frac{1}{r}\frac{\partial u_z}{\partial r}\right) = \frac{\partial^2 u_z}{\partial r^2}, \qquad
+    \lim_{r \to 0} \left(\frac{1}{r}\frac{\partial u_r}{\partial r} - \frac{u_r}{r^2}\right) = 0.$$
+    Consequently, on $r = 0$:
+    $$\left.\nabla_r^2 \mathbf{u}\right|_{r=0} = 0, \qquad
+    \left.\nabla_z^2 \mathbf{u}\right|_{r=0} = 2 \frac{\partial^2 u_z}{\partial r^2} + \frac{\partial^2 u_z}{\partial z^2}.$$
 
     Args:
-    - `derivs`: Flow derivatives containing first and second spatial derivatives.
-    - `radius`: Radial coordinates $r$ of shape `(n_points, 1)`.
-    - `residual_form`: `"standard"` or `"r_weighted"`.
+    - `derivs`: Container with first and second spatial derivatives evaluated via autodiff.
+    - `radius`: Radial coordinates $r$, tensor of shape `(n_points, 1)`.
+    - `residual_form`: Singularity strategy, either `"standard"` or `"r_weighted"`.
+    - `axis_regularization_eps`: Threshold below which the analytical axis limit is applied.
 
     Returns:
     - Tuple `(laplacian_r, laplacian_z)` of tensors shaped `(n_points, 1)`.
@@ -291,17 +289,29 @@ def axisymmetric_vector_laplacian(
         )
     
     if residual_form == "standard":
-        laplacian_r = (
+        is_axis = radius < axis_regularization_eps
+        # Regularize divisor to avoid NaN in backward computation graph
+        safe_radius = torch.where(is_axis, torch.full_like(radius, axis_regularization_eps), radius)
+        
+        # Standard off-axis computation
+        lap_r_standard = (
                 derivs.d2_velocity_r_dr2
-                + derivs.d_velocity_r_dr / radius
-                - derivs.velocity_r / radius.square()
+                + derivs.d_velocity_r_dr / safe_radius
+                - derivs.velocity_r / safe_radius.square()
                 + derivs.d2_velocity_r_dz2
         )
-        laplacian_z = (
+        lap_z_standard = (
                 derivs.d2_velocity_z_dr2
-                + derivs.d_velocity_z_dr / radius
+                + derivs.d_velocity_z_dr / safe_radius
                 + derivs.d2_velocity_z_dz2
         )
+        
+        # CHANGED: Exact L'Hôpital limits smoothly applied on the symmetry axis (r -> 0)
+        lap_r_axis = torch.zeros_like(lap_r_standard)
+        lap_z_axis = 2.0 * derivs.d2_velocity_z_dr2 + derivs.d2_velocity_z_dz2
+        
+        laplacian_r = torch.where(is_axis, lap_r_axis, lap_r_standard)
+        laplacian_z = torch.where(is_axis, lap_z_axis, lap_z_standard)
     else:
         r_2 = radius.square()
         laplacian_r = (
@@ -322,10 +332,34 @@ def _continuity_residual(
         d_velocity_z_dz: torch.Tensor,
         radius: torch.Tensor,
         residual_form: Literal["standard", "r_weighted"] = "standard",
+        axis_regularization_eps: float = 1.0e-7,
 ) -> torch.Tensor:
-    """Evaluate axisymmetric continuity residual under standard or r-weighted form."""
+    """Evaluate axisymmetric continuity residual $\nabla \cdot \mathbf{u} = 0$.
+
+    For $r > 0$:
+    $$\nabla \cdot \mathbf{u} = \frac{\partial u_r}{\partial r} + \frac{u_r}{r} + \frac{\partial u_z}{\partial z} = 0.$$
+    As $r \to 0$, applying L'Hôpital's rule gives $\lim_{r \to 0} \frac{u_r}{r} = \frac{\partial u_r}{\partial r}$, yielding:
+    $$\left.\nabla \cdot \mathbf{u}\right|_{r=0} = 2 \frac{\partial u_r}{\partial r} + \frac{\partial u_z}{\partial z} = 0.$$
+       
+       
+    Args:
+    - `velocity_r`: Radial velocity $u_r$, shape `(n_points, 1)`.
+    - `d_velocity_r_dr`: $\partial u_r / \partial r$, shape `(n_points, 1)`.
+    - `d_velocity_z_dz`: $\partial u_z / \partial z$, shape `(n_points, 1)`.
+    - `radius`: Radial coordinates $r$, shape `(n_points, 1)`.
+    - `residual_form`: `"standard"` or `"r_weighted"`.
+    - `axis_regularization_eps`: Proximity tolerance for applying L'Hôpital axis limits.
+    
+    Returns:
+    - Residual tensor of shape `(n_points, 1)`.
+    """
     if residual_form == "standard":
-        return d_velocity_r_dr + velocity_r / radius + d_velocity_z_dz
+        is_axis = radius < axis_regularization_eps
+        safe_radius = torch.where(is_axis, torch.full_like(radius, axis_regularization_eps), radius)
+        standard_div = d_velocity_r_dr + velocity_r / safe_radius + d_velocity_z_dz
+        axis_div = 2.0 * d_velocity_r_dr + d_velocity_z_dz
+        return torch.where(is_axis, axis_div, standard_div)
+
     return radius * (d_velocity_r_dr + d_velocity_z_dz) + velocity_r
 
 

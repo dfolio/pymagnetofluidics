@@ -16,8 +16,10 @@ from magnetofluidics_pinn.visualization.plotting import (
     plot_streamlines as plot_streamlines,
     plot_trajectories as plot_trajectories,
     plot_training_history as plot_training_history,
-plot_two_way_history as plot_two_way_history,  # NEW
+    plot_two_way_history as plot_two_way_history,  # NEW
     plot_velocity_profile_comparison as plot_velocity_profile_comparison,  # NEW
+    plot_particle_flow_field as plot_particle_flow_field,
+    plot_particle_residual_heatmap as plot_particle_residual_heatmap,
 )
 
 __all__ = [
@@ -32,4 +34,6 @@ __all__ = [
     "plot_flow_rate_deviation",
     "plot_pressure_gradient_fit",
     "plot_residual_heatmap",
+    "plot_particle_flow_field",
+    "plot_particle_residual_heatmap",
 ]

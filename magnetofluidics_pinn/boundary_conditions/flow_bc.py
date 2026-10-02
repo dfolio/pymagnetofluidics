@@ -85,22 +85,16 @@ def rigid_body_velocity_condition(
         coordinates: torch.Tensor, translational_velocity: tuple[float, float]
 ) -> torch.Tensor:
     """Compute the no-slip target velocity on a rigidly translating surface.
- 
-    NEW. Generalizes
-    [`no_slip_condition`][magnetofluidics_pinn.boundary_conditions.flow_bc.no_slip_condition]
-    (which is the special case `translational_velocity = (0.0, 0.0)`) to a
-    solid body that is itself moving: every point on the surface of a
-    rigid body undergoing pure translation (no rotation) carries the same
-    velocity vector, namely the body's own — the defining kinematic
-    relation for a rigid translation, independent of the surface's shape.
-    Used for the surface of a
-    [`SphericalObstacle`][magnetofluidics_pinn.types.SphericalObstacle] in
-    [`training.trainer.train_around_obstacle`][magnetofluidics_pinn.training.trainer.train_around_obstacle]:
+    
+    Used for the surface of the embedded particle described by
+    [`ParticleConfig`][magnetofluidics_pinn.config.ParticleConfig] and
+    [`TwoWayCouplingConfig`][magnetofluidics_pinn.config.TwoWayCouplingConfig]
+    in [`training.trainer.train`][magnetofluidics_pinn.training.trainer.train]:
     a sphere translating along the axis at `(0.0, particle_velocity)` has
     no reason to spin (no applied torque, no asymmetry to induce one under
     axisymmetric conditions), so `translational_velocity` alone specifies
     its complete surface kinematics.
- 
+    
     Args:
     - `coordinates`: Tensor of shape `(n_points, n_dims)` of surface
       points. Only its shape, dtype, and device are used — the target is
