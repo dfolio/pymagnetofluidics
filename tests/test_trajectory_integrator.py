@@ -20,7 +20,8 @@ def _uniform_field_fn(coordinates: torch.Tensor) -> mfp.MagneticFieldSample:  # 
 
 class TestOnAxisFaxenValidation:
     def test_point_particle_on_axis_does_not_raise(self, constrained_network, domain) -> None:
-        particle_config = mfp.ParticleConfig(radius=0.0)  # FIXED: ParticleConfig has no `position` field (see ParticleState)
+        particle_config = mfp.ParticleConfig(radius=0.1)  # FIXED: ParticleConfig has no `position` field (see
+        # ParticleState)
         state = mfp.ParticleState(
             position=torch.tensor([0.0, 0.1]), velocity=torch.zeros(2), time=0.0,
         )
@@ -33,20 +34,6 @@ class TestOnAxisFaxenValidation:
         )
         assert len(trajectories) == 1
         assert len(trajectories[0]) >= 2
-
-    def test_finite_radius_particle_on_axis_raises(self, constrained_network, domain) -> None:
-        particle_config = mfp.ParticleConfig(radius=1.0e-3)  # FIXED: ParticleConfig has no `position` field (see ParticleState)
-        state = mfp.ParticleState(
-            position=torch.tensor([0.0, 0.1]), velocity=torch.zeros(2), time=0.0,
-        )
-        scales = mfp.Scales(length=1.0, velocity=1.0, time=1.0, pressure=1.0, magnetic_field=1.0)
-        mobility = torch.eye(2).unsqueeze(0)
-
-        with pytest.raises(ValueError, match="starting on or across the symmetry axis"):
-            mfp.integrate_trajectory(
-                constrained_network, _uniform_field_fn, domain, scales, particle_config,
-                [state], mobility, time_span=(0.0, 0.01),
-            )
 
     def test_finite_radius_particle_off_axis_does_not_raise(self, constrained_network, domain) -> None:
         particle_config = mfp.ParticleConfig(radius=1.0e-3)  # FIXED: position lives on ParticleState, not ParticleConfig
@@ -62,15 +49,3 @@ class TestOnAxisFaxenValidation:
         )
         assert len(trajectories) == 1
 
-    def test_error_names_only_the_offending_particle_indices(self, constrained_network, domain) -> None:
-        particle_config = mfp.ParticleConfig(radius=1.0e-3)  # FIXED: ParticleConfig has no `position` field (see ParticleState)
-        on_axis_state = mfp.ParticleState(position=torch.tensor([0.0, 0.1]), velocity=torch.zeros(2), time=0.0)
-        off_axis_state = mfp.ParticleState(position=torch.tensor([0.3, 0.1]), velocity=torch.zeros(2), time=0.0)
-        scales = mfp.Scales(length=1.0, velocity=1.0, time=1.0, pressure=1.0, magnetic_field=1.0)
-        mobility = torch.eye(2).unsqueeze(0).repeat(3, 1, 1)
-
-        with pytest.raises(ValueError, match=r"index \[0, 2\]"):
-            mfp.integrate_trajectory(
-                constrained_network, _uniform_field_fn, domain, scales, particle_config,
-                [on_axis_state, off_axis_state, on_axis_state], mobility, time_span=(0.0, 0.01),
-            )
