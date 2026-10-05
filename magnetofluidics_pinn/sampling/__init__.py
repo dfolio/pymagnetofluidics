@@ -10,9 +10,11 @@ from magnetofluidics_pinn.sampling.collocation import (
     sample_collocation_points as sample_collocation_points,
     sample_collocation_points_with_particle as sample_collocation_points_with_particle,
 )
+from magnetofluidics_pinn.sampling.exterior import sample_exterior_points as sample_exterior_points  # NEW
 
 __all__ = [
     "sample_collocation_points",
     "sample_collocation_points_with_particle",
+    "sample_exterior_points",
 ]
 

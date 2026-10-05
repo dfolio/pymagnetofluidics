@@ -45,7 +45,13 @@ from magnetofluidics_pinn.verification.reporting import (
     pending_check as pending_check,
     render_verification_table as render_verification_table,
 )
-
+from magnetofluidics_pinn.verification.force_checks import (  # NEW
+    cross_section_momentum_force as cross_section_momentum_force,
+    global_momentum_balance as global_momentum_balance,
+    sphere_traction_force as sphere_traction_force,
+    surface_independence_report as surface_independence_report,
+    residual_by_region as residual_by_region,
+)
 __all__ = [
     # Analytical reference
     "hagen_poiseuille_velocity_field",
@@ -77,4 +83,10 @@ __all__ = [
     "evaluate_check",
     "pending_check",
     "render_verification_table",
+    # Force checks
+    "cross_section_momentum_force",
+    "global_momentum_balance",
+    "sphere_traction_force",
+    "surface_independence_report",
+    "residual_by_region",
 ]

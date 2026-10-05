@@ -70,9 +70,7 @@ rather than mutating the caller's config in place.
 
 from __future__ import annotations
 
-import dataclasses  # NEW — used to silence verbose logging on a per-call copy of the config; see module docstring.
-from operator import ifloordiv
-from tabnanny import verbose
+import dataclasses
 from typing import Callable, Any
 
 import torch

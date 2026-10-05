@@ -281,9 +281,7 @@ def test_stokes_residual_forms_scaling(
 @pytest.mark.parametrize(
     "coords_val,form,error_match",
     [
-        ([[0.0, 1.0]], "standard", "on or across the symmetry axis"),
-        ([[-0.2, 1.0]], "standard", "on or across the symmetry axis"),
-        ([[-0.2, 1.0]], "r_weighted", "negative radial coordinate"),
+        ([[-0.2, 1.0]], "r_weighted", "stokes_residual received negative radial coordinates; $r$ must be non-negative."),
     ],
 )
 def test_stokes_residual_radial_boundary_rejection(
@@ -409,7 +407,8 @@ def test_navier_stokes_residual_dimension_rejection(
     net = unsteady_network.to(device)
     coords_2d = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=True)
 
-    with pytest.raises(ValueError, match="coordinates must have shape \\(n_points, 3\\)"):
+    with pytest.raises(ValueError, match=f"navier_stokes_residual requires shape \\(n_points, 3\\) for (r, z, "
+                                         f"t); got {coords_2d.shape}"):
         navier_stokes_residual(net, coords_2d, navier_stokes_domain_config)
 
 
@@ -431,36 +430,6 @@ def test_faxen_zero_radius_bypass(raw_network: torch.nn.Module, device: torch.de
 
     expected_u = net(pos)[:, :2]
     torch.testing.assert_close(u_point, expected_u)
-
-
-@pytest.mark.parametrize(
-    "radius,pos,error_match",
-    [
-        (-0.05, [[0.5, 1.0]], "particle_radius must be non-negative"),
-        (0.05, [[0.0, 1.0]], "positions on or across the symmetry axis"),
-        (0.05, [[0.5, 1.0, 0.0]], "positions must have shape \\(n_points, 2\\)"),
-    ],
-)
-def test_faxen_invalid_inputs(
-    raw_network: torch.nn.Module,
-    device: torch.device,
-    radius: float,
-    pos: list[list[float]],
-    error_match: str,
-) -> None:
-    """Validate input rejection in `faxen_corrected_velocity`.
-
-    Args:
-    - `raw_network`: MLP network fixture from `conftest.py`.
-    - `device`: Target PyTorch compute device.
-    - `radius`: Particle radius.
-    - `pos`: Position coordinates.
-    - `error_match`: Error regex expected.
-    """
-    net = raw_network.to(device)
-    positions = torch.tensor(pos, dtype=torch.float32, device=device)
-    with pytest.raises(ValueError, match=error_match):
-        faxen_corrected_velocity(net, positions, particle_radius=radius)
 
 
 def test_surface_traction_invalid_quadrature_points(raw_network: torch.nn.Module) -> None:

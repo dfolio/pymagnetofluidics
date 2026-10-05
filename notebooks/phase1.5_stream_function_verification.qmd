@@ -1,0 +1,170 @@
+---
+title: "Phase 1.5 — Diagnostic ladder for the stream-function two-way solver"
+---
+
+## Purpose
+
+Verify the traction pathway on *exact* fields first, then train the stream-function
+flow and compare the resistance pair $(F_A, F_B)$ against the tube reference
+[@haberman1958motion; @happel1983low]. Every check reports **PASS** or **FAIL**.
+
+
+```{python}
+#| label: tbl-preview
+#| tbl-cap: "Verification matrix — populated progressively through the notebook."
+import sys
+from pathlib import Path
+
+for candidate in (Path.cwd(), Path.cwd().parent, Path.cwd().parent.parent):
+    if (candidate / "magnetofluidics_pinn").is_dir() and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
+        
+import magnetofluidics_pinn as mfp
+```
+
+```{python}
+#| label: setup
+import torch, pandas as pd
+import magnetofluidics_pinn as mfp
+
+RANDOM_SEED = 42
+DEVICE = str(mfp.resolve_device(None))
+DTYPE = torch.float32
+
+mfp.set_random_seed(RANDOM_SEED)
+
+pd.set_option("display.float_format", lambda value: f"{value:.3e}")
+
+R, L, A, ZP = 1.0, 8.0, 0.25, 4.0
+domain = mfp.Domain(kind="channel", length=L, radius=R, u_max=1.0)
+checks = ()
+
+print(f"PyTorch: {torch.__version__} | Active Device: {DEVICE} | dtype: {DTYPE}")
+print(f"magnetofluidics_pinn: v{mfp.__version__}")
+```
+
+## Exact-field ladder
+
+```{python}
+#| label: exact-field-ladder
+def exact(x):
+    return mfp.stokes_sphere_field(x, ZP, A, 1.0)
+
+radii = (1.0 * A, 1.2 * A, 1.5 * A, 2.0 * A)
+report = mfp.surface_independence_report(exact, ZP, radii, 721)
+expected = mfp.stokes_drag_reference(A, 1.0)
+checks += (mfp.evaluate_check(
+    "Traction on exact Stokes sphere (rel. error)", "F_z against -6 pi a U",
+    abs(report.force.mean() - expected) / abs(expected), 1.0e-4),)
+checks += (mfp.evaluate_check(
+    "Surface independence on exact field", "max relative spread over control radii",
+    float(report.relative_deviation.max()), 1.0e-4),)
+report
+```
+
+## Stream-function training and resistance pair
+
+```{python}
+#| label: stream-function-training-cfg
+cfg = mfp.TrainingConfig(
+    n_interior_points=4000, n_boundary_points=400, n_epochs=2000,
+    residual_form="r_weighted", dtype="float64", device=DEVICE,
+    use_lbfgs_refinement=True, lbfgs_rounds=4, lbfgs_iterations_per_round=300,
+    verbose=True, log_every = int(2000/10)
+)
+net_a = mfp.apply_stream_function_constraint(
+    mfp.build_mlp(2, 2, (64, 64, 64), training_config=cfg), domain, ZP, A, 0.0, domain.u_max)
+scale = mfp.diagnose_loss_scale(net_a, domain, mfp.FluidConfig(), cfg, ZP, A, 
+                                domain.u_max)
+pd.Series(scale)  # expect momentum losses of order 1e0-1e2, not 1e9
+```
+
+```{python}
+#| label: stream-function-training
+solution = mfp.solve_resistance_pair(domain, mfp.FluidConfig(), A, ZP, cfg)
+f_a_ref, f_b_ref = mfp.tube_resistance_reference(A, R, 1.0)
+pair = solution.pair
+pd.Series({"F_A": pair.ambient_force, "F_A ref": f_a_ref,
+           "F_B": pair.translation_force, "F_B ref": f_b_ref,
+           "spread F_A": solution.force_spread[0], "spread F_B": solution.force_spread[1]})
+```
+
+```{python}
+#| label: residual-by-region
+tbl = mfp.residual_by_region(solution.translation_network, domain, mfp.FluidConfig(), ZP, A,
+                             section_offset=2.0, residual_form="standard")
+print(tbl)
+```
+
+```{python}
+#| label: verification-checks
+tol = 0.05  # force-error budget: 5 %
+checks += tuple(
+    mfp.evaluate_check(name, desc, value, tol)
+    for name, desc, value in (
+        ("F_A against tube reference", "relative error", abs(pair.ambient_force / f_a_ref - 1.0)),
+        ("F_B against tube reference", "relative error", abs(pair.translation_force / f_b_ref - 1.0)),
+        ("Surface independence of F_B", "relative spread", solution.force_spread[1]),
+    ))
+mfp.render_verification_table(checks)
+```
+
+
+```{python}
+#| label: stream-function-training-extended
+cfg2 = mfp.TrainingConfig(
+    residual_form="standard", device=DEVICE, n_epochs=500,
+    lbfgs_n_interior_points=20_000, lbfgs_n_boundary_points=1_000,
+    lbfgs_rounds=40, lbfgs_iterations_per_round=250,
+    verbose=True, log_every = int(2000/10)
+)    
+sol2 = mfp.solve_resistance_pair(domain, mfp.FluidConfig(), A, ZP, cfg2)
+tbl2 = mfp.residual_by_region(sol2.translation_network, domain, mfp.FluidConfig(), ZP, A, section_offset=2.0)
+bal2 = mfp.global_momentum_balance(sol2.translation_network, ZP, A, R, section_offset=2.0)
+print(tbl2, pd.Series(bal2), sol2.force_spread, sol2.pair, sep="\n")
+```
+
+```{python}
+#| label: convergence-gate
+V_slab = 3.141592653589793 * R**2 * 4.0 - 4.0 / 3.0 * 3.141592653589793 * A**3
+target_rms = 0.05 * abs(f_b_ref) / V_slab        # 5 % force-error budget, about 0.037
+checks += (mfp.evaluate_check(
+    "Convergence gate: slab residual", "volume-weighted rms of f_z, standard form",
+    float(tbl2.loc["slab", "rms_z"]), target_rms),
+    mfp.evaluate_check(
+    "Convergence gate: momentum balance", "|F_surface - F_momentum| / max(|F|)",
+    bal2["relative_difference"], 0.05))
+```
+### Stokes-validity floor and position independence
+
+```{python}
+#| label: stokes-validity-floor
+Re_a = mfp.DomainConfig().reynolds * A          # radius-based Re with U_c = 1
+floor = mfp.physics.stokes_sphere.oseen_drag_correction(Re_a) - 1.0
+tol = max(tol, 2.0 * floor)
+pd.Series({"Re_a": Re_a, "Oseen estimate of inertial error": floor, "force tolerance": tol})
+```
+
+If `floor` exceeds `tol`, a 5 % PASS against the creeping-flow reference is not meaningful.
+Compare against the reference with a tolerance of at least `floor`, or lower $Re$.
+
+```{python}
+#| label: position-independence
+sweep = mfp.trajectory.mobility.resistance_position_sweep(
+    domain, mfp.FluidConfig(), A, (3.0, 4.0, 5.0), cfg)
+variation = mfp.trajectory.mobility.position_independence(sweep)
+checks += (mfp.evaluate_check(
+    "Resistance independent of z_p", "max relative variation of F_A, F_B", variation, tol),)
+sweep
+```
+
+## Global momentum balance and force-balanced velocity
+
+```{python}
+#| label: global-momentum-balance
+balance = mfp.global_momentum_balance(solution.translation_network, ZP, A, R, section_offset=2.0)
+passive = mfp.force_balanced_velocity(pair, 0.0)
+pd.Series({**balance, "U passive": passive, "Faxen reference": 1.0 - 2 * (A / R) ** 2 / 3})
+```
+
+A failing check is a failing check. Do not relabel it; extend training or inspect `solution.*_history`.

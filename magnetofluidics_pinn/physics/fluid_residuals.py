@@ -58,6 +58,7 @@ from __future__ import annotations
 from typing import Callable, Literal, NamedTuple
 
 import torch
+from fontTools.misc import iftSparseBitSet
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 from magnetofluidics_pinn.config import DomainConfig, FluidConfig
@@ -334,7 +335,7 @@ def _continuity_residual(
         residual_form: Literal["standard", "r_weighted"] = "standard",
         axis_regularization_eps: float = 1.0e-7,
 ) -> torch.Tensor:
-    """Evaluate axisymmetric continuity residual $\nabla \cdot \mathbf{u} = 0$.
+    r"""Evaluate axisymmetric continuity residual $\nabla \cdot \mathbf{u} = 0$.
 
     For $r > 0$:
     $$\nabla \cdot \mathbf{u} = \frac{\partial u_r}{\partial r} + \frac{u_r}{r} + \frac{\partial u_z}{\partial z} = 0.$$
@@ -391,7 +392,7 @@ def _stokes_momentum_residuals(
 def stokes_residual(
         network: Callable[[torch.Tensor], torch.Tensor],
         coordinates: torch.Tensor,
-        fluid_config: FluidConfig,
+        config: FluidConfig|DomainConfig,
         residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible Stokes-flow residual.
@@ -432,6 +433,7 @@ def stokes_residual(
       where that form's residual is singular), or if `network`'s output does
       not have exactly 3 columns (`u_r`, `u_z`, `p`).
     """
+    fluid_config = config.fluid if isinstance(config, DomainConfig) else config
     if fluid_config.regime != "stokes":
         raise ValueError(
             f"Expected a Stokes fluid configuration, got regime={fluid_config.regime!r}."

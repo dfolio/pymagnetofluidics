@@ -386,6 +386,30 @@ def _recompute_velocities(
     return ode_system(t, y)
 
 
+def _make_axial_exit_event(
+    particle_index: int, axial_limit: float, outlet: bool,
+) -> Callable[[float, np.ndarray], float]:
+    """Build a terminal event that fires when a particle reaches the inlet or outlet.
+
+    Args:
+    - `particle_index`: Particle index in the flattened state vector.
+    - `axial_limit`: Axial coordinate of the face (`domain.length` or `0.0`).
+    - `outlet`: `True` for the outlet, `False` for the inlet.
+
+    Returns:
+    - A root-findable event with `terminal = True` and `direction = -1`.
+    """
+    axial_index = particle_index * _N_DIMS_PER_PARTICLE + 1
+
+    def event(t: float, y: np.ndarray) -> float:
+        del t
+        return (axial_limit - y[axial_index]) if outlet else (y[axial_index] - axial_limit)
+
+    event.terminal = True
+    event.direction = -1
+    return event
+
+
 def integrate_trajectory(
     flow_network: nn.Module,
     field_fn: Callable[[torch.Tensor], MagneticFieldSample],
@@ -510,9 +534,18 @@ def integrate_trajectory(
             dtype=network_dtype,
         )
         
+        # CHANGED: three events per particle (wall, outlet, inlet), so the network is never evaluated
+        # outside its training domain.
         segment_events = [
-            _make_wall_collision_event(int(index), effective_wall_limit) for index in active_indices
+            event
+            for index in active_indices
+            for event in (
+                _make_wall_collision_event(int(index), effective_wall_limit),
+                _make_axial_exit_event(int(index), domain.length, outlet=True),
+                _make_axial_exit_event(int(index), 0.0, outlet=False),
+            )
         ]
+        event_owner = np.repeat(active_indices, 3)  # NEW: maps an event index to its particle
         
         if verbose:
             print(_format_batch_progress_line(segment_index, t_current, active_indices.size, n_particles))
@@ -554,11 +587,12 @@ def integrate_trajectory(
         t_current = float(sol.t[-1])
         
         if sol.status == 1:
-            newly_collided = [
-                int(active_indices[event_index])
+            # CHANGED: owner lookup replaces the one-event-per-particle assumption.
+            newly_collided = sorted({
+                int(event_owner[event_index])
                 for event_index, event_times in enumerate(sol.t_events)
                 if event_times.size > 0
-            ]
+            })
             active_mask_bool[newly_collided] = False
         
         segment_index += 1

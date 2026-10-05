@@ -50,20 +50,34 @@ from magnetofluidics_pinn.networks import (
     apply_hard_wall_constraint as apply_hard_wall_constraint,
     apply_hard_particle_constraint as apply_hard_particle_constraint,
     build_mlp as build_mlp,
+    apply_stream_function_constraint as apply_stream_function_constraint  # NEW
 )
 from magnetofluidics_pinn.physics import (annular_flow_rate as annular_flow_rate,
                                           axisymmetric_vector_laplacian as axisymmetric_vector_laplacian,
                                           compute_flow_derivatives as compute_flow_derivatives,
-                                          axial_flow_rate as axial_flow_rate, dipole_force as dipole_force,
+                                          axial_flow_rate as axial_flow_rate,
+                                          dipole_force as dipole_force,
+                                          axial_dipole_force_si as axial_dipole_force_si,
+                                          force_scale as force_scale,
+                                          make_dimensionless_dipole_force_fn as make_dimensionless_dipole_force_fn,
                                           brenner_poiseuille_wall_factor as brenner_poiseuille_wall_factor,
                                           faxen_corrected_velocity as faxen_corrected_velocity,
                                           navier_stokes_residual as navier_stokes_residual,
                                           poiseuille_reference_flow_rate as poiseuille_reference_flow_rate,
                                           stokes_residual as stokes_residual,
-                                          surface_traction_force as surface_traction_force)
+                                          surface_traction_force as surface_traction_force,
+                                          haberman_sayre_wall_factor as haberman_sayre_wall_factor,
+                                          stokes_drag_reference as stokes_drag_reference,
+                                          stokes_sphere_field as stokes_sphere_field,
+                                          tube_resistance_reference as tube_resistance_reference,
+                                          stokes_reduced_stream_function as stokes_reduced_stream_function,
+                                          stokes_sphere_pressure as stokes_sphere_pressure,
+                                          oseen_drag_correction as oseen_drag_correction,
+                                          )
 from magnetofluidics_pinn.sampling import (
     sample_collocation_points as sample_collocation_points,
     sample_collocation_points_with_particle as sample_collocation_points_with_particle,
+    sample_exterior_points as sample_exterior_points,  # NEW
 )
 # Normalization utilities, required to keep solvers dimensionless while
 # accepting/reporting physical (SI) quantities at the package boundary.
@@ -74,12 +88,21 @@ from magnetofluidics_pinn.scaling import (compute_scales as compute_scales,
                                           redimensionalize_domain as redimensionalize_domain, Scales as Scales)
 from magnetofluidics_pinn.training import (compose_loss as compose_loss, LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES,
                                            LossHistory as LossHistory, train as train,
-                                           TrainingHistory as TrainingHistory)
+                                           TrainingHistory as TrainingHistory,
+                                           train_stream_function_flow as train_stream_function_flow,
+                                           diagnose_loss_scale as diagnose_loss_scale,
+                                           )
 from magnetofluidics_pinn.trajectory import (
     integrate_trajectory as integrate_trajectory,
     solve_force_balanced_velocity as solve_force_balanced_velocity,
     advance_particle_two_way as advance_particle_two_way,
     make_dipole_applied_force_fn as make_dipole_applied_force_fn,
+    ResistancePair as ResistancePair,
+    advance_particle_resistance as advance_particle_resistance,
+    force_balanced_velocity as force_balanced_velocity,
+    solve_resistance_pair as solve_resistance_pair,
+    resistance_position_sweep as resistance_position_sweep,
+    position_independence as position_independence,
 )
 from magnetofluidics_pinn.types import (
     CollocationPoints as CollocationPoints,
@@ -116,7 +139,13 @@ from magnetofluidics_pinn.verification import (analytical_pressure_gradient as a
                                                render_verification_table as render_verification_table,
                                                summarize_residual as summarize_residual,
                                                VerificationCheck as VerificationCheck,
-                                               VerificationThresholds as VerificationThresholds)
+                                               VerificationThresholds as VerificationThresholds,
+                                               cross_section_momentum_force as cross_section_momentum_force,
+                                               global_momentum_balance as global_momentum_balance,
+                                               sphere_traction_force as sphere_traction_force,
+                                               surface_independence_report as surface_independence_report,
+                                               residual_by_region as residual_by_region,
+                                               )
 from magnetofluidics_pinn.visualization import (plot_flow_rate_deviation as plot_flow_rate_deviation,
                                                 plot_pressure_gradient_fit as plot_pressure_gradient_fit,
                                                 plot_profile_error as plot_profile_error,
@@ -170,27 +199,47 @@ __all__ = [
     "stokes_residual",
     "navier_stokes_residual",
     "dipole_force",
+    "axial_dipole_force_si",
+    "force_scale",
+    "make_dimensionless_dipole_force_fn",
     "brenner_poiseuille_wall_factor",
     "faxen_corrected_velocity",
     "surface_traction_force",
+    "haberman_sayre_wall_factor",
+    "stokes_drag_reference",
+    "stokes_sphere_field",
+    "tube_resistance_reference",
+    "stokes_reduced_stream_function",
+    "stokes_sphere_pressure",
+    "oseen_drag_correction",
     # Sampling
     "sample_collocation_points",
     "sample_collocation_points_with_particle",
+    "sample_exterior_points",
     # Networks
     "build_mlp",
     "apply_hard_wall_constraint",
     "apply_hard_particle_constraint",
+    "apply_stream_function_constraint",
     # Training
     "compose_loss",
     "train",
     "LossHistory",
     "TrainingHistory",
     "LOSS_COMPONENT_NAMES",
+    "train_stream_function_flow",
+    "diagnose_loss_scale",
     # Trajectory
     "integrate_trajectory",
     "solve_force_balanced_velocity",
     "advance_particle_two_way",
     "make_dipole_applied_force_fn",
+    "ResistancePair",
+    "advance_particle_resistance",
+    "force_balanced_velocity",
+    "solve_resistance_pair",
+    "resistance_position_sweep",
+    "position_independence",
     # Visualization
     "plot_streamlines",
     "plot_trajectories",
@@ -216,7 +265,7 @@ __all__ = [
     "resolve_module_device",
     "resolve_module_dtype",
     "configure_cuda_matmul_precision",
-    # NEW: Verification
+    # Verification
     "ProfileEvaluation",
     "summarize_residual",
     "evaluate_structural_constraints",
@@ -244,4 +293,9 @@ __all__ = [
     "evaluate_check",
     "pending_check",
     "render_verification_table",
+    "cross_section_momentum_force",
+    "global_momentum_balance",
+    "sphere_traction_force",
+    "surface_independence_report",
+    "residual_by_region",
 ]

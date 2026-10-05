@@ -307,7 +307,7 @@ class TestTrainEndToEnd:
         )
         _, history = mfp.train(constrained_network, domain, fluid_config=fluid_config, field_config=field_config, training_config=training_config)
         for name in trainer_module.LOSS_COMPONENT_NAMES + ("step", "total"):
-            assert getattr(history.lbfgs, name) == ()
+            assert history.lbfgs is None
     
     def test_print_summary_runs_without_error(self, constrained_network, domain, fluid_config, field_config) -> None:
         training_config = mfp.TrainingConfig(

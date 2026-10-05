@@ -10,10 +10,12 @@ from magnetofluidics_pinn.networks.constraints import (
     apply_hard_wall_constraint as apply_hard_wall_constraint,
     apply_hard_particle_constraint as apply_hard_particle_constraint,
 )
+from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint as apply_stream_function_constraint  # NEW
 from magnetofluidics_pinn.networks.mlp import build_mlp as build_mlp
 
 __all__ = [
     "build_mlp",
     "apply_hard_wall_constraint",
     "apply_hard_particle_constraint",
+    "apply_stream_function_constraint",
 ]
