@@ -7,6 +7,10 @@ procedure.
 
 # NOTE: explicit `as <same_name>` re-export (PEP 484); see package __init__.py.
 from magnetofluidics_pinn.training.losses import compose_loss as compose_loss
+from magnetofluidics_pinn.training.stream_trainer import (
+    train_stream_function_flow as train_stream_function_flow,  # NEW
+    diagnose_loss_scale as diagnose_loss_scale,  # NEW
+)
 from magnetofluidics_pinn.training.trainer import (
     train as train,
     LossHistory as LossHistory,
@@ -20,4 +24,6 @@ __all__ = [
     "LossHistory",
     "TrainingHistory",
     "LOSS_COMPONENT_NAMES",
+    "train_stream_function_flow",
+    "diagnose_loss_scale",
 ]

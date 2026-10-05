@@ -58,12 +58,6 @@ def _check_if_finite_positive(value: float, name: str = "") -> None:
         raise ValueError(f"{name} must be finite and non-negative; got {value!r}.")
 
 
-def _check_if_positive(value: float, name: str = "") -> None:
-    """Raise ValueError if `value` is not finite and non-negative."""
-    if value < 0.0:
-        raise ValueError(f"{name} must be positive; got {value!r}.")
-
-
 @dataclass(frozen=True)
 class FluidConfig:
     """Configuration of the viscous flow model.
@@ -239,7 +233,7 @@ class MagneticFieldConfig:
     time_dependent: bool = False
     
     def __post_init__(self) -> None:
-        _check_if_finite_positive(self.magnitude, "magnitude")
+        _check_if_finite_positive_strictly(self.magnitude, "magnitude")   # CHANGED: was non-strict; compute_scales rejects 0
         if not all(math.isfinite(component) for component in self.orientation):
             raise ValueError(f"orientation components must be finite; got {self.orientation!r}.")
         orientation_norm = math.hypot(*self.orientation)
@@ -315,12 +309,15 @@ class ParticleConfig:
         _check_if_finite_positive(self.radius, "radius")
         _check_if_finite_positive(self.length, "length")
         _check_if_finite_positive_strictly(self.aspect_ratio, "aspect_ratio")
-        _check_if_positive(self.number, "number")
-        _check_if_finite_positive(self.magnetic_ratio, "magnetic_ratio")
+        _check_if_finite_positive_strictly(self.number, "number")
+        _check_if_finite_positive_strictly(self.magnetic_ratio, "magnetic_ratio")
         if not all(math.isfinite(component) for component in self.magnetic_moment):
             raise ValueError(f"magnetic_moment components must be finite; got {self.magnetic_moment!r}.")
         if math.hypot(*self.magnetic_moment) <= 0.0:
             raise ValueError("magnetic_moment must be non-zero.")
+        if self.kind in ("spherical", "swarms", "cylinder") and self.radius <= 0.0:  # NEW: avoids division by zero in
+            # `magnetization`
+            raise ValueError(f"radius must be strictly positive for kind={self.kind!r}.")
         if self.kind == "swarms" and self.number <= 0:
             raise ValueError(f"number of particles must be positive for swarms; got {self.number!r}.")
         if self.kind == "cylinder" and self.length <= 0:
@@ -642,10 +639,8 @@ class TrainingConfig:
             )
         if self.verbose and self.log_every < 1:
             raise ValueError(f"log_every must be at least 1 when verbose=True; got {self.log_every!r}.")
-        if self.device not in ("cuda", "cpu"):
-            raise ValueError(
-                f"device type must be 'cuda' or 'cpu', got '{self.device}'."
-            )
+        if self.device.split(":")[0] not in ("cuda", "cpu"):  # CHANGED: accepts "cuda:0" as documented
+            raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
     
     @property
     def torch_device(self) -> torch.device:
