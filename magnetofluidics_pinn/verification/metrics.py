@@ -809,7 +809,7 @@ def evaluate_residual_grid(
     radial_grid = radial_grid.to(device=resolved_device, dtype=resolved_dtype)
     axial_grid = axial_grid.to(device=resolved_device, dtype=resolved_dtype)
     coordinates = _cartesian_grid(radial_grid, axial_grid).requires_grad_(True)
-    residual = stokes_residual(network, coordinates, fluid_config=fluid_config, residual_form=residual_form)
+    residual = stokes_residual(network, coordinates, config=fluid_config, residual_form=residual_form)
     n_radial, n_axial = radial_grid.shape[0], axial_grid.shape[0]
     return {
         name: residual[:, index].detach().abs().reshape(n_radial, n_axial)
