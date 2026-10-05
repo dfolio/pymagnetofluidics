@@ -82,7 +82,6 @@ verification_checks: tuple[mfp.VerificationCheck, ...] = ()
 verification_categories: dict[str, str] = {}
 verification_status_labels: dict[str, str] = {}  # overrides the default "PASS" label for specific checks (e.g. Faxén consistency -> "MODEL CONSISTENCY")
 
-
 print(f"PyTorch: {torch.__version__} | Active Device: {DEVICE} | dtype: {DTYPE}")
 print(f"magnetofluidics_pinn: v{mfp.__version__}")
 ```
@@ -93,7 +92,8 @@ This notebook exercises `magnetofluidics_pinn`'s two-way particle–flow couplin
 rather than advecting a point (or Faxén-corrected finite) tracer through an
 *undisturbed* flow field, the package solves for the flow that a translating
 spherical particle perturbs, evaluates the hydrodynamic force from the resulting
-Cauchy stress, and closes the overdamped particle equation through force balance.
+Cauchy stress, and closes the overdamped particle equation through force
+balance.
 
 The evidence is deliberately separated into three categories:
 
@@ -105,14 +105,17 @@ The evidence is deliberately separated into three categories:
    physical model or limiting law. Such a comparison does not establish
    convergence of the underlying PINN by itself.
 
-This distinction is important for the present problem. In particular, convergence
-of the surface quadrature does not imply convergence of the neural approximation,
+This distinction is important for the present problem. In particular,
+convergence
+of the surface quadrature does not imply convergence of the neural
+approximation,
 and agreement with a Faxén estimate does not constitute a validation of the
 two-way solver at a finite blockage ratio.
 
 ## What this notebook does **not** verify
 
-The notebook considers one on-axis spherical particle in an axisymmetric channel.
+The notebook considers one on-axis spherical particle in an axisymmetric
+channel.
 It does not verify off-axis particles, particle swarms, non-uniform magnetic
 fields, or long production trajectories. A short trajectory is retained as an
 integration demonstration; it is not promoted to physical validation unless a
@@ -120,7 +123,8 @@ time-step convergence result is available.
 
 ## Quantitative reporting convention
 
-Every figure and numerical result below is followed by a quantitative discussion.
+Every figure and numerical result below is followed by a quantitative
+discussion.
 Numerical values in the prose are generated from the corresponding Python
 variables, rather than duplicated as hard-coded constants. This makes the
 rendered report update automatically when the training or physical parameters
@@ -200,7 +204,7 @@ pd.Series({"domain.radius": domain.radius, "domain.length": domain.length,
            "scales.length [m]": scales.length, "scales.velocity [m/s]": scales.velocity,
            "scales.pressure [Pa]": scales.pressure})
            
-particle_radius = 0.1 * R
+particle_radius = 0.25 * R
 # Scale applied force with particle volume relative to baseline radius (0.25 * R)
 baseline_radius = 0.25 * R
 applied_force_factor = (particle_radius / baseline_radius) ** 3
@@ -374,17 +378,24 @@ training_loss_reduction = (
 
 ```
 
-The Adam-to-final optimization loss decreases from `{python} f"{adam_initial_loss:.3e}"` to
+The Adam-to-final optimization loss decreases from
+`{python} f"{adam_initial_loss:.3e}"` to
 `{python} f"{lbfgs_final_loss:.3e}"`, corresponding to a relative reduction of
-`{python} f"{training_loss_reduction:.3%}"`. This quantifies optimizer progress, but
-it is not sufficient evidence of solution convergence because the final objective is
+`{python} f"{training_loss_reduction:.3%}"`. This quantifies optimizer progress,
+but
+it is not sufficient evidence of solution convergence because the final
+objective is
 not itself an observable of hydrodynamic accuracy.
 
-The loss history is a training diagnostic, not by itself a convergence certificate.
-The final radial-momentum, axial-momentum, and continuity residuals are extracted
+The loss history is a training diagnostic, not by itself a convergence
+certificate.
+The final radial-momentum, axial-momentum, and continuity residuals are
+extracted
 below and compared with observable errors such as particle no-slip, flow-rate
-conservation, and drag. This distinction matters because the particle boundary is
-currently imposed as a small loss and therefore a small global loss can coexist with
+conservation, and drag. This distinction matters because the particle boundary
+is
+currently imposed as a small loss and therefore a small global loss can coexist
+with
 a comparatively larger local surface error.
 
 Unlike the outer wall and symmetry axis, which are enforced exactly by
@@ -442,13 +453,20 @@ mfp.plot_particle_flow_field(
 )
 ```
 
-The fluid-region velocity magnitude spans `{python} f"{velocity_magnitude_min:.3e}"` to 
-`{python} f"{velocity_magnitude_max:.3e}"` in the plotted domain $z^* \in [0,$ `{python} f"{L:.1f}"` $]$. 
-The presence of the spherical particle of radius $a^* =$ `{python} f"{particle_config.radius:.2f}"` 
-at $z_p^* =$ `{python} f"{particle_axial_position:.2f}"` forces the flow around the rigid obstacle, 
-generating local flow acceleration in the annular clearance ($r^* \in [a^*, R^*]$) and stagnation 
-zones upstream and downstream [@kim2005microhydrodynamics; @sukumar2022exact]. The overlaid 
-streamlines illustrate the deflection of fluid parcel trajectories around the particle surface.
+The fluid-region velocity magnitude spans
+`{python} f"{velocity_magnitude_min:.3e}"` to
+`{python} f"{velocity_magnitude_max:.3e}"` in the plotted domain $z^* \in [0,$
+`{python} f"{L:.1f}"` $]$.
+The presence of the spherical particle of radius $a^* =$
+`{python} f"{particle_config.radius:.2f}"`
+at $z_p^* =$ `{python} f"{particle_axial_position:.2f}"` forces the flow around
+the rigid obstacle,
+generating local flow acceleration in the annular clearance
+($r^* \in [a^*, R^*]$) and stagnation
+zones upstream and downstream [@kim2005microhydrodynamics; @sukumar2022exact].
+The overlaid
+streamlines illustrate the deflection of fluid parcel trajectories around the
+particle surface.
 
 ```{python}
 #| label: fig-axial-velocity-profile-stations
@@ -504,15 +522,19 @@ profile_max_deviation = max(profile_deviations)
 profile_far_deviation = profile_deviations[farthest_profile_index]
 ```
 
-The largest pointwise difference between the coupled and undisturbed axial-velocity
-profiles is `{python} f"{profile_max_deviation:.3e}"` in dimensionless velocity units.
-At the nearest selected station the maximum difference is `{python} f"{profile_deviations[nearest_profile_index]:.3e}"`,
+The largest pointwise difference between the coupled and undisturbed
+axial-velocity
+profiles is `{python} f"{profile_max_deviation:.3e}"` in dimensionless velocity
+units.
+At the nearest selected station the maximum difference is
+`{python} f"{profile_deviations[nearest_profile_index]:.3e}"`,
 whereas at the farthest station it is `{python} f"{profile_far_deviation:.3e}"`.
 Their ratio is `{python} f"{profile_relaxation_ratio:.3g}"`. These
-values quantify the spatial extent of the particle disturbance; they should not be interpreted as
-an error because the perturbed solution is expected to differ physically from the undisturbed
+values quantify the spatial extent of the particle disturbance; they should not
+be interpreted as
+an error because the perturbed solution is expected to differ physically from
+the undisturbed
 reference [@kim2005microhydrodynamics; @sukumar2022exact].
-
 
 ```{python}
 #| label: fig-predicted-vs-analytical-profiles
@@ -545,12 +567,18 @@ profile_error_reference = max(float(PEAK_VELOCITY_NONDIM), 1.0e-12)
 profile_max_relative_to_scale = profile_max_absolute_error / profile_error_reference
 ```
 
-Across the `{python} len(z_stations_eval)` selected radial stations, the maximum absolute axial-velocity error
-relative to the particle-free analytical scale is `{python} f"{profile_max_relative_to_scale:.3%}"`,
-and the RMS absolute error is `{python} f"{profile_rms_error:.3e}"`. The worst selected
-station is `{python} f"{worst_station_z_particle:.3f}"` (`{python} worst_station_label_particle`).
-These errors measure departure from the particle-free Hagen–Poiseuille solution, so
-they are diagnostic of the particle-induced disturbance plus numerical error rather
+Across the `{python} len(z_stations_eval)` selected radial stations, the maximum
+absolute axial-velocity error
+relative to the particle-free analytical scale is
+`{python} f"{profile_max_relative_to_scale:.3%}"`,
+and the RMS absolute error is `{python} f"{profile_rms_error:.3e}"`. The worst
+selected
+station is `{python} f"{worst_station_z_particle:.3f}"`
+(`{python} worst_station_label_particle`).
+These errors measure departure from the particle-free Hagen–Poiseuille solution,
+so
+they are diagnostic of the particle-induced disturbance plus numerical error
+rather
 than a pure solver error [@raissi2019physics; @sukumar2022exact].
 
 ```{python}
@@ -562,13 +590,16 @@ radial_leakage_relative = radial_leakage_max / max(float(PEAK_VELOCITY_NONDIM), 
 mfp.plot_radial_leakage(profile_evaluation_particle)
 ```
 
-The radial-velocity leakage is quantified directly from the profile data. The maximum
-absolute radial velocity on the `{python} len(z_stations_eval)` stations is `{python} f"{radial_leakage_max:.3e}"`,
-corresponding to `{python} f"{radial_leakage_relative:.3%}"` of the reference velocity
+The radial-velocity leakage is quantified directly from the profile data. The
+maximum
+absolute radial velocity on the `{python} len(z_stations_eval)` stations is
+`{python} f"{radial_leakage_max:.3e}"`,
+corresponding to `{python} f"{radial_leakage_relative:.3%}"` of the reference
+velocity
 scale. A nonzero value is a local numerical diagnostic; it should decrease with
-training and sampling refinement if the learned field approaches the axisymmetric
+training and sampling refinement if the learned field approaches the
+axisymmetric
 solution accurately [@kim2005microhydrodynamics].
-
 
 ```{python}
 #| label: fig-particle-flowrate
@@ -673,6 +704,7 @@ ax_p.grid(True, linestyle=":", alpha=0.5)
 fig_p.tight_layout()
 fig_p
 ```
+
 ```{python}
 #| label: outside-pressure
 outside_pressure_mask = ~inside_particle_axis
@@ -693,11 +725,14 @@ pressure_difference_relative = (
 ```
 
 Outside the excluded particle interval, the maximum absolute pressure difference
-from the particle-free analytical profile is `{python} f"{pressure_difference_max:.3e}"`,
+from the particle-free analytical profile is
+`{python} f"{pressure_difference_max:.3e}"`,
 with RMS difference `{python} f"{pressure_difference_rms:.3e}"`. Relative to the
 analytical pressure-drop scale, the maximum discrepancy is
-`{python} f"{pressure_difference_relative:.3%}"`. The comparison is restricted to the
-fluid region; pressure values inside the particle are not interpreted as physical
+`{python} f"{pressure_difference_relative:.3%}"`. The comparison is restricted
+to the
+fluid region; pressure values inside the particle are not interpreted as
+physical
 flow-field predictions [@happel1983low].
 
 ```{python}
@@ -736,8 +771,13 @@ noslip_verdict = "clears" if noslip_check.passed else "misses"
 mfp.render_verification_table((noslip_check,))
 ```
 
-The particle surface velocity deviation yields a maximum pointwise $L_\infty$ error of `{python} f"{surface_error_linf:.3e}"` and an area-weighted relative $L^2$ surface norm of `{python} f"{surface_error_l2_relative:.3%}"`.
-The surface RMS error normalized against reference velocity is `{python} f"{surface_error_rms / surface_error_normalization:.3e}"`. These metrics confirm that the soft particle boundary loss enforces rigid-body surface motion uniformly across polar angle $\theta$.
+The particle surface velocity deviation yields a maximum pointwise $L_\infty$
+error of `{python} f"{surface_error_linf:.3e}"` and an area-weighted
+relative $L^2$ surface norm of `{python} f"{surface_error_l2_relative:.3%}"`.
+The surface RMS error normalized against reference velocity is
+`{python} f"{surface_error_rms / surface_error_normalization:.3e}"`. These
+metrics confirm that the soft particle boundary loss enforces rigid-body surface
+motion uniformly across polar angle $\theta$.
 
 ```{python}
 #| label: check-particle-convergence
@@ -760,10 +800,14 @@ convergence_verdict = "clears" if convergence_check.passed else "does not clear"
 mfp.render_verification_table((convergence_check,))
 ```
 
-The final residual magnitudes are `{python} f'{final_residuals["momentum_r"]:.3e}'` for
-radial momentum, `{python} f'{final_residuals["momentum_z"]:.3e}'` for axial momentum,
-and `{python} f'{final_residuals["continuity"]:.3e}'` for continuity. The largest is
-`{python} f"{final_residual:.3e}"`, compared with the configured residual tolerance
+The final residual magnitudes are
+`{python} f'{final_residuals["momentum_r"]:.3e}'` for
+radial momentum, `{python} f'{final_residuals["momentum_z"]:.3e}'` for axial
+momentum,
+and `{python} f'{final_residuals["continuity"]:.3e}'` for continuity. The
+largest is
+`{python} f"{final_residual:.3e}"`, compared with the configured residual
+tolerance
 `{python} f"{thresholds.two_way_residual_tolerance:.3e}"`. This is a numerical
 convergence diagnostic, not physical validation: a residual threshold can be met
 while local traction or surface errors remain insufficiently resolved.
@@ -863,11 +907,15 @@ manufactured_table = pd.Series(manufactured_forces, name="f_z* (should -> 0)")
 manufactured_table
 ```
 
-The manufactured traction integral remains close to zero over all tested quadrature
-resolutions. Its finest-resolution residual is `{python} f"{abs(manufactured_forces[721]):.3e}"`,
-while the largest absolute residual across the tested resolutions is 
-`{python} f"{max(abs(value) for value in manufactured_forces.values()):.3e}"`. This
-checks the stress-to-force integration pathway on a known source-free Stokes field,
+The manufactured traction integral remains close to zero over all tested
+quadrature
+resolutions. Its finest-resolution residual is
+`{python} f"{abs(manufactured_forces[721]):.3e}"`,
+while the largest absolute residual across the tested resolutions is
+`{python} f"{max(abs(value) for value in manufactured_forces.values()):.3e}"`.
+This
+checks the stress-to-force integration pathway on a known source-free Stokes
+field,
 independently of the trained particle-perturbed network.
 
 ```{python}
@@ -911,12 +959,27 @@ pd.Series({
 })
 ```
 
-The two-way drag is `{python} f"{drag_force:.6f}"`, compared with an unconfined Stokes estimate of `{python} f"{stokes_drag:.6f}"`
-based on the local undisturbed centerline velocity. The resulting drag correction factor is
-`{python} f"{drag_correction_factor:.4f}"`. A value different from unity is expected for a finite particle in a confined, non-uniform
-flow; it cannot be uniquely attributed to wall confinement without a blockage-ratio convergence/validation study [@happel1983low; @haberman1958motion].
+The two-way drag is `{python} f"{drag_force:.6f}"`, compared with an unconfined
+Stokes estimate of `{python} f"{stokes_drag:.6f}"`
+based on the local undisturbed centerline velocity. The resulting drag
+correction factor is
+`{python} f"{drag_correction_factor:.4f}"`. A value different from unity is
+expected for a finite particle in a confined, non-uniform
+flow; it cannot be uniquely attributed to wall confinement without a
+blockage-ratio convergence/validation
+study [@happel1983low; @haberman1958motion].
 
-The computed drag correction factor is `{python} f"{drag_correction_factor:.4f}"`. The reference wall-correction expression of Haberman & Sayre [-@haberman1958motion] gives `{python} f"{brenner_confinement_factor:.4f}"` at blockage ratio `{python} f"{particle_radius / R:.3f}"`. The relative difference between these two quantities is `{python} f"{abs(drag_correction_factor - brenner_confinement_factor) / brenner_confinement_factor * 100:.3f}%"`. This comparison is a model-level physical diagnostic, not a direct validation of the PINN: the finite particle size, background-flow parabolic curvature, blockage, domain truncation, and neural approximation all contribute to the observed drag [@haberman1958motion; @kim2005microhydrodynamics].
+The computed drag correction factor is
+`{python} f"{drag_correction_factor:.4f}"`. The reference wall-correction
+expression of Haberman & Sayre [-@haberman1958motion] gives
+`{python} f"{brenner_confinement_factor:.4f}"` at blockage ratio
+`{python} f"{particle_radius / R:.3f}"`. The relative difference between these
+two quantities is
+`{python} f"{abs(drag_correction_factor - brenner_confinement_factor) / brenner_confinement_factor * 100:.3f}%"`.
+This comparison is a model-level physical diagnostic, not a direct validation of
+the PINN: the finite particle size, background-flow parabolic curvature,
+blockage, domain truncation, and neural approximation all contribute to the
+observed drag [@haberman1958motion; @kim2005microhydrodynamics].
 
 # Verification 2: Force-Balanced Velocity Root-Finding
 
@@ -981,8 +1044,12 @@ mfp.render_verification_table((faxen_check,))
 ```
 
 The passive force-balanced velocity is `{python} f"{u_passive:.6f}"`, while the
-Faxén-corrected estimate is `{python} f"{faxen_velocity:.6f}"`. Their relative difference
-is `{python} f"{faxen_relative_error:.3%}"`. Because the blockage ratio  is finite ($a^*/R^*=$ `{python} f"{particle_radius / R:.3f}"`), this comparison is reported as model consistency rather than an asymptotic validation in the unbounded limit [@faxen1922widerstand; @happel1983low].
+Faxén-corrected estimate is `{python} f"{faxen_velocity:.6f}"`. Their relative
+difference
+is `{python} f"{faxen_relative_error:.3%}"`. Because the blockage ratio is
+finite ($a^*/R^*=$ `{python} f"{particle_radius / R:.3f}"`), this comparison is
+reported as model consistency rather than an asymptotic validation in the
+unbounded limit [@faxen1922widerstand; @happel1983low].
 
 ```{python}
 #| label: force-balance-passive-diagnostics
@@ -996,9 +1063,12 @@ passive_force_balance_scale = max(abs(passive_drag_force), abs(u_passive), 1.0e-
 ```
 
 The independently recomputed hydrodynamic force at the passive root is
-`{python} f"{passive_drag_force:.6f}"`. With zero applied force, the absolute force-balance
-residual is therefore `{python} f"{passive_force_balance_residual:.3e}"` in the current
-dimensionless convention. This directly checks the equation solved by the root finder
+`{python} f"{passive_drag_force:.6f}"`. With zero applied force, the absolute
+force-balance
+residual is therefore `{python} f"{passive_force_balance_residual:.3e}"` in the
+current
+dimensionless convention. This directly checks the equation solved by the root
+finder
 rather than validating it only through the resulting velocity.
 
 ## Directional response to an applied force
@@ -1070,13 +1140,16 @@ force_response_table
 
 ```
 
-The opposing, passive, and assisting cases produce force-balanced axial velocities of
-`{python} f"{u_forced:.6f}"`, `{python} f"{u_passive:.6f}"`, and `{python} f"{u_assisting:.6f}"`,
+The opposing, passive, and assisting cases produce force-balanced axial
+velocities of
+`{python} f"{u_forced:.6f}"`, `{python} f"{u_passive:.6f}"`, and
+`{python} f"{u_assisting:.6f}"`,
 respectively. The corresponding force-balance residuals are
-`{python} f"{forced_balance_residual:.3e}"`, `{python} f"{passive_force_balance_residual:.3e}"`,
+`{python} f"{forced_balance_residual:.3e}"`,
+`{python} f"{passive_force_balance_residual:.3e}"`,
 and `{python} f"{assisting_balance_residual:.3e}"`. The strict velocity ordering
-`{python} u_forced < u_passive < u_assisting` confirms correct directional physical response under opposing and assisting external forces.
-
+`{python} u_forced < u_passive < u_assisting` confirms correct directional
+physical response under opposing and assisting external forces.
 
 ```{python}
 #| label: fig-force-velocity-response
@@ -1102,16 +1175,24 @@ fig_resp.tight_layout()
 fig_resp
 ```
 
-The `{python} force_values.size` force states span `{python} f"{force_values.min():.3f}"` to
-`{python} f"{force_values.max():.3f}"` in applied force and `{python} f"{velocity_values.min():.6f}"`
+The `{python} force_values.size` force states span
+`{python} f"{force_values.min():.3f}"` to
+`{python} f"{force_values.max():.3f}"` in applied force and
+`{python} f"{velocity_values.min():.6f}"`
 to `{python} f"{velocity_values.max():.6f}"` in balanced velocity. The maximum
-deviation from the three-point linear fit is `{python} f"{mobility_fit_max_residual:.3e}"`.
- This response curve confirms strict monotonic ordering ($U_{z,opp}^*<U_{z, pass}^*<U_{z,assist}^*$) and checks local linearity in the creeping Stokes regime [@happel1983low].
+deviation from the three-point linear fit is
+`{python} f"{mobility_fit_max_residual:.3e}"`.
+This response curve confirms strict monotonic ordering
+($U_{z,opp}^*<U_{z, pass}^*<U_{z,assist}^*$) and checks local linearity in the
+creeping Stokes regime [@happel1983low].
 
-Across the `{python} force_values.size` computed force states, a local linear fit gives an effective mobility
+Across the `{python} force_values.size` computed force states, a local linear
+fit gives an effective mobility
 slope of `{python} f"{mobility_fit_slope:.6f}"` and a maximum fit residual of
-`{python} f"{mobility_fit_max_residual:.3e}"`. This is a compact diagnostic of the local
-force–velocity response; three points are insufficient to establish a general linear
+`{python} f"{mobility_fit_max_residual:.3e}"`. This is a compact diagnostic of
+the local
+force–velocity response; three points are insufficient to establish a general
+linear
 mobility law, so the result remains a numerical consistency check.
 
 ```{python}
@@ -1245,11 +1326,15 @@ trajectory_absolute_difference = abs(two_way_final_z - one_way_final_z)
 fig_traj
 ```
 
-The two-way and one-way trajectories end at `{python} f"{two_way_final_z:.6f}"` and
+The two-way and one-way trajectories end at `{python} f"{two_way_final_z:.6f}"`
+and
 `{python} f"{one_way_final_z:.6f}"`, respectively. Their absolute final-position
-difference is `{python} f"{trajectory_absolute_difference:.3e}"`, while the relative
-difference in travelled distance is `{python} f"{trajectory_relative_difference:.3%}"`.
-Because the present calculation uses only `{python} N_STEPS` steps, this result is
+difference is `{python} f"{trajectory_absolute_difference:.3e}"`, while the
+relative
+difference in travelled distance is
+`{python} f"{trajectory_relative_difference:.3%}"`.
+Because the present calculation uses only `{python} N_STEPS` steps, this result
+is
 reported as an integration demonstration rather than trajectory validation. A
 time-step refinement is required before attributing the difference to physical
 two-way coupling rather than temporal or PINN approximation error.
@@ -1274,7 +1359,7 @@ verification_rows = [
         "reference": check.threshold,
         "status": (
             verification_status_labels.get(check.name, "PASS") if check.passed
-            else "INCONCLUSIVE"
+            else "FAIL"
         ),
     }
     for check in verification_checks
@@ -1294,17 +1379,25 @@ evidence_table = pd.DataFrame(verification_rows)
 evidence_table
 ```
 
-The flow-rate maximum relative deviation is `{python} f"{q_curve_max_relative_error:.3%}"`,
+The flow-rate maximum relative deviation is
+`{python} f"{q_curve_max_relative_error:.3%}"`,
 while the particle-surface $L_\infty$ error is
 `{python} f"{surface_error_linf:.3e}"` and the area-weighted relative
-$L^2$ error is `{python} f"{surface_error_l2_relative:.3%}"`. The finest manufactured traction residual
-is `{python} f"{manufactured_residual:.3e}"`, and the final drag quadrature change is
-`{python} f"{quadrature_relative_change:.3%}"`. These quantities address different
-numerical properties and therefore are not combined into a single verification score.
+$L^2$ error is `{python} f"{surface_error_l2_relative:.3%}"`. The finest
+manufactured traction residual
+is `{python} f"{manufactured_residual:.3e}"`, and the final drag quadrature
+change is
+`{python} f"{quadrature_relative_change:.3%}"`. These quantities address
+different
+numerical properties and therefore are not combined into a single verification
+score.
 
-The physical/model diagnostics are similarly reported separately. The drag correction
-factor is `{python} f"{drag_correction_factor:.4f}"`, and the passive two-way/Faxén
-velocity difference is `{python} f"{faxen_relative_error:.3%}"`. Neither quantity alone
+The physical/model diagnostics are similarly reported separately. The drag
+correction
+factor is `{python} f"{drag_correction_factor:.4f}"`, and the passive
+two-way/Faxén
+velocity difference is `{python} f"{faxen_relative_error:.3%}"`. Neither
+quantity alone
 can establish physical validity of the complete two-way PINN at blockage ratio
 `{python} f"{particle_radius / R:.3f}"`.
 
@@ -1333,21 +1426,27 @@ summary_counts = pd.Series({
 summary_counts
 ```
 
-The matrix contains `{python} n_verification` implementation-verification criteria,
+The matrix contains `{python} n_verification` implementation-verification
+criteria,
 of which `{python} n_verification_pass` clear their configured thresholds, and
 `{python} n_convergence` numerical-convergence criteria, of which
 `{python} n_convergence_pass` clear their thresholds. The
-`{python} n_validation` physical/model entries are intentionally not converted into
-a pass/fail score because they compare the computation with reduced physical models
+`{python} n_validation` physical/model entries are intentionally not converted
+into
+a pass/fail score because they compare the computation with reduced physical
+models
 whose assumptions differ from the present finite-blockage problem.
 
 ## Convergence interpretation
 
-The most important numerical limitation is the distinction between the accuracy of
+The most important numerical limitation is the distinction between the accuracy
+of
 the trained neural field and the accuracy of operations performed on that field.
-The surface quadrature converges to a stable value, but that value is conditional on
+The surface quadrature converges to a stable value, but that value is
+conditional on
 the current PINN approximation. Likewise, the final PDE residual is a training
-diagnostic and should be considered together with surface, flow-rate, and traction
+diagnostic and should be considered together with surface, flow-rate, and
+traction
 observables.
 
 The present notebook therefore supports the following evidence chain:
@@ -1356,71 +1455,96 @@ $$\text{PDE/BC accuracy} \;\longrightarrow\;
 \text{traction convergence} \;\longrightarrow\;
 \text{force-balance consistency} \;\longrightarrow\;
 \text{physical/model comparison}$$
-It does not yet establish convergence with respect to the full PINN training budget.
+It does not yet establish convergence with respect to the full PINN training
+budget.
 A dedicated budget sweep should vary collocation density, network capacity, and
-optimization effort while tracking at least the particle-surface \(L_\infty\) error,
+optimization effort while tracking at least the particle-surface \(L_\infty\)
+error,
 flow-rate error, drag, and force-balanced velocity.
 
 ## Physical-validation interpretation
 
-The Stokes drag ratio of `{python} f"{drag_correction_factor:.4f}"` demonstrates a substantial
-departure from the unconfined \(6\pi\mu aU\) reference at the current blockage ratio
-of `{python} f"{particle_radius / R:.3f}"`. The notebook's wall-correction reference gives
-`{python} f"{brenner_confinement_factor:.4f}"` for the same blockage ratio, but the
-difference of `{python} f"{abs(drag_correction_factor - brenner_confinement_factor) / abs(brenner_confinement_factor):.3%}"`
-should not be assigned exclusively to wall confinement without a converged blockage
+The Stokes drag ratio of `{python} f"{drag_correction_factor:.4f}"` demonstrates
+a substantial
+departure from the unconfined \(6\pi\mu aU\) reference at the current blockage
+ratio
+of `{python} f"{particle_radius / R:.3f}"`. The notebook's wall-correction
+reference gives
+`{python} f"{brenner_confinement_factor:.4f}"` for the same blockage ratio, but
+the
+difference of
+`{python} f"{abs(drag_correction_factor - brenner_confinement_factor) / abs(brenner_confinement_factor):.3%}"`
+should not be assigned exclusively to wall confinement without a converged
+blockage
 sweep.
 
 The passive two-way velocity differs from the Faxén estimate by
-`{python} f"{faxen_relative_error:.3%}"`. Since the current blockage ratio is finite,
+`{python} f"{faxen_relative_error:.3%}"`. Since the current blockage ratio is
+finite,
 this is a consistency comparison rather than an asymptotic Faxén validation. A
 small-particle sweep is required to demonstrate recovery of the one-way limit.
 
 ## Conclusions
 
-1. **Numerical verification:** the notebook directly tests flow-rate conservation,
+1. **Numerical verification:** the notebook directly tests flow-rate
+   conservation,
    particle no-slip, the Cauchy-stress traction pathway, and the sign of the
    applied-force response. Their quantitative values are reported above from the
    actual computed fields.
 
-2. **Numerical convergence:** the current drag integral is converged with respect
-   to the tested surface quadrature resolution, but the coupled PINN itself is not
-   demonstrated to be converged with respect to training budget. The distinction is
+2. **Numerical convergence:** the current drag integral is converged with
+   respect
+   to the tested surface quadrature resolution, but the coupled PINN itself is
+   not
+   demonstrated to be converged with respect to training budget. The distinction
+   is
    explicit in the evidence matrix.
 
-3. **Force balance:** the passive, opposing, and assisting cases are accompanied by
-   independently recomputed hydrodynamic forces and force-balance residuals. This
+3. **Force balance:** the passive, opposing, and assisting cases are accompanied
+   by
+   independently recomputed hydrodynamic forces and force-balance residuals.
+   This
    provides a direct diagnostic of the scalar root-finding operation.
 
-4. **Physical/model comparison:** the Stokes and Faxén comparisons are retained as
+4. **Physical/model comparison:** the Stokes and Faxén comparisons are retained
+   as
    model-level diagnostics. They are not promoted to validation claims at the
    present finite blockage ratio.
 
-5. **Trajectory:** the short trajectory remains an integration demonstration. Its
-   final-position discrepancy is reported quantitatively, but it is not included as
-   a validated result because the current two-step calculation does not establish
+5. **Trajectory:** the short trajectory remains an integration demonstration.
+   Its
+   final-position discrepancy is reported quantitatively, but it is not included
+   as
+   a validated result because the current two-step calculation does not
+   establish
    time-step convergence.
 
-6. **Next convergence experiment:** the highest-value numerical study is a controlled
+6. **Next convergence experiment:** the highest-value numerical study is a
+   controlled
    PINN budget sweep tracking surface no-slip, flow-rate conservation, drag, and
    force-balanced velocity simultaneously.
 
 7. **Next physical-validation experiment:** a converged blockage-ratio sweep
-   \(a^*/R^*\) should be used to distinguish finite-particle, wall-confinement, and
+   \(a^ */R^*\) should be used to distinguish finite-particle, wall-confinement,
+   and
    one-way/Faxén effects.
 
 ## Scope and limitations
 
-This notebook verifies selected components of the two-way coupling machinery for a
+This notebook verifies selected components of the two-way coupling machinery for
+a
 single spherical particle, on-axis, at one principal blockage ratio. It does not
 verify off-axis motion, particle swarms, non-uniform fields, or long production
-trajectories. The Stokes model is assumed, with its validity quantified through the
+trajectories. The Stokes model is assumed, with its validity quantified through
+the
 reported Reynolds numbers but not independently established by an inertial
 sensitivity study.
 
-Two further levers introduced alongside these corrections are not exercised here:
+Two further levers introduced alongside these corrections are not exercised
+here:
 `TwoWayCouplingConfig.positivity_loss_weight_override` can relax the global
-no-negative-$u_z$ penalty for a more strongly confined particle, where local flow
+no-negative-$u_z$ penalty for a more strongly confined particle, where local
+flow
 reversal is not obviously unphysical even at zero Reynolds number; and
 `apply_hard_particle_constraint` is reserved for a hard, rather than soft,
 particle-surface boundary condition, once its combination with the existing
