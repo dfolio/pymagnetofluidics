@@ -9,6 +9,7 @@ coordinates, independent of the fluid-flow network.
 
 from __future__ import annotations
 
+import math  # NEW
 import torch
 
 from magnetofluidics_pinn.types import MagneticFieldSample
@@ -72,20 +73,38 @@ def uniform_field(
 def gradient_field(
         coordinates: torch.Tensor, magnitude: float, gradient: tuple[float, float]
 ) -> MagneticFieldSample:
-    """Evaluate a linearly varying (non-uniform) magnetic field.
+    r"""Evaluate the linear, Maxwell-consistent axisymmetric field with an axial gradient.
+
+    $$ B_r = g_r\,r,\qquad B_z = B_0 + g_z\,z,\qquad g_r = -\tfrac12 g_z. $$
+
+    In a current-free region $\div\mathbf B = 2g_r + g_z = 0$ and
+    $\curl\mathbf B = \mathbf 0$. An arbitrary pair $(g_r, g_z)$ would violate Gauss's law and
+    make $\nabla(\mathbf m\cdot\mathbf B) \ne (\mathbf m\cdot\nabla)\mathbf B$, so it is rejected
+    [@abbott2020magnetic]. Output is in **SI** (tesla); inputs are in meter.
 
     Args:
-    - `coordinates`: Tensor of shape `(n_points, n_dims)` where the field is
-      evaluated.
-    - `magnitude`: Reference field magnitude at the domain origin, in `tesla`.
-    - `gradient`: Spatial gradient of the field magnitude along each axis, in
-      `tesla-per-meter`.
+    - `coordinates`: Tensor `(n_points, 2)` of `(r, z)` points, in meter.
+    - `magnitude`: Axial field $B_0$ at the origin, in tesla.
+    - `gradient`: Pair `(g_r, g_z)` in (T), with `g_r = -g_z / 2`.
 
     Returns:
     - A [`FieldSample`][magnetofluidics_pinn.types.FieldSample] with the field
       vector evaluated at each coordinate.
+   
+    Raises:
+    - `ValueError`: If `coordinates` is not `(n_points, 2)`, a value is not finite, or the gradient
+      violates $\div\mathbf B = 0$.
     """
-    raise NotImplementedError("Implementation scheduled for a later roadmap phase.")
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(f"coordinates must have shape (n_points, 2); got {tuple(coordinates.shape)}.")
+    g_r, g_z = gradient
+    if not all(math.isfinite(value) for value in (magnitude, g_r, g_z)):
+        raise ValueError("magnitude and gradient components must be finite.")
+    if not math.isclose(g_r, -0.5 * g_z, rel_tol=1.0e-9, abs_tol=1.0e-12 * max(1.0, abs(g_z))):
+        raise ValueError(f"gradient must satisfy g_r = -g_z / 2 (div B = 0); got {gradient!r}.")
+    b_r = g_r * coordinates[:, 0:1]
+    b_z = magnitude + g_z * coordinates[:, 1:2]
+    return MagneticFieldSample(coordinates=coordinates, field=torch.cat([b_r, b_z], dim=1))
 
 
 def biot_savart_field(

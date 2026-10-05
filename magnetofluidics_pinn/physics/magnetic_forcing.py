@@ -8,11 +8,13 @@ network: it only consumes field values and particle positions.
 
 from __future__ import annotations
 
+import math  # NEW
 from typing import Callable
 
 import torch
 
 from magnetofluidics_pinn.types import MagneticFieldSample
+from magnetofluidics_pinn.scaling import Scales  # NEW
 
 
 def dipole_force(
@@ -102,3 +104,66 @@ def dipole_force(
         # applies.
         return torch.zeros_like(positions)
     return gradient
+
+
+def axial_dipole_force_si(
+    field_fn: Callable[[torch.Tensor], MagneticFieldSample],
+    axial_position: float,
+    axial_moment: float,
+) -> float:
+    r"""Evaluate the axial dipole force $F_z = \partial_z (m_z B_z)$ on the axis, in newton.
+
+    Args:
+    - `field_fn`: Field callable taking **SI** coordinates (meter) and returning tesla.
+    - `axial_position`: Axial position, in meter.
+    - `axial_moment`: Axial magnetic moment $m_z$, in $\si{\ampere\meter\squared}$.
+
+    Returns:
+    - The axial force in newton.
+
+    Raises:
+    - `ValueError`: If an argument is not finite.
+    """
+    if not (math.isfinite(axial_position) and math.isfinite(axial_moment)):
+        raise ValueError("axial_position and axial_moment must be finite.")
+    position = torch.tensor([[0.0, axial_position]], dtype=torch.float64).requires_grad_(True)
+    moment = torch.tensor([0.0, axial_moment], dtype=torch.float64)
+    with torch.enable_grad():
+        force = dipole_force(field_fn, position, moment)
+    return force[0, 1].item()
+
+
+def force_scale(scales: Scales) -> float:
+    r"""Return the viscous force scale $F_c = \mu U_c L_c = P_c L_c^2$, in newton.
+
+    Args:
+    - `scales`: Characteristic scales from `compute_scales`.
+
+    Returns:
+    - The force scale.
+    """
+    return scales.pressure * scales.length**2
+
+
+def make_dimensionless_dipole_force_fn(
+    field_fn: Callable[[torch.Tensor], MagneticFieldSample],
+    axial_moment: float,
+    scales: Scales,
+) -> Callable[[float], float]:
+    r"""Build a dimensionless `applied_force_fn` for the resistance-pair mobility model.
+
+    The returned callable maps a dimensionless axial position $z^*$ to
+    $f^* = F_z(z^* L_c)/F_c$, so it composes directly with
+    [`force_balanced_velocity`][magnetofluidics_pinn.trajectory.mobility.force_balanced_velocity].
+    This replaces the unit-mobility placeholder, which mixed newton with dimensionless velocity.
+
+    Args:
+    - `field_fn`: Field callable in SI units (see `axial_dipole_force_si`).
+    - `axial_moment`: Axial magnetic moment, in $\si{\ampere\meter\squared}$.
+    - `scales`: Characteristic scales.
+
+    Returns:
+    - A callable `z_nondim -> f_nondim`.
+    """
+    scale = force_scale(scales)
+    return lambda z_nondim: axial_dipole_force_si(field_fn, z_nondim * scales.length, axial_moment) / scale
