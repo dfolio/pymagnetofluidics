@@ -46,7 +46,7 @@ from magnetofluidics_pinn.types import Domain
 # keys, a different meaning for an existing key) - not for ordinary model
 # retraining. `load_checkpoint` refuses to read a mismatched version rather
 # than guessing at a possibly-incompatible layout.
-_CHECKPOINT_SCHEMA_VERSION = 2
+_CHECKPOINT_SCHEMA_VERSION = 3
 
 _REQUIRED_CHECKPOINT_KEYS = frozenset(
     {
@@ -102,6 +102,9 @@ class NetworkArchitecture:
     hidden_layers: tuple[int, ...]
     activation: str = "tanh"
     hard_wall_constraint_radius: float | None = None
+    hard_wall_constraint_length: float = 1.0   # NEW: needed for the pressure gauge point p(0, L)
+    hard_wall_constraint_u_max: float = 0.0    # NEW: needed for the Poiseuille lift of u_z
+
 
     def build(self) -> nn.Module:
         """Construct a fresh, untrained network matching this architecture.
@@ -116,10 +119,12 @@ class NetworkArchitecture:
                             training_config=TrainingConfig(device="cpu"),
                             activation=self.activation)
         if self.hard_wall_constraint_radius is not None:
-            # `apply_hard_wall_constraint` only reads `domain.radius`; the
-            # other `Domain` fields are placeholders with no effect on the
-            # reconstructed architecture.
-            placeholder_domain = Domain(kind="channel", length=1.0, radius=self.hard_wall_constraint_radius)
+            placeholder_domain = Domain(
+                kind="channel",
+                length=self.hard_wall_constraint_length,  # CHANGED: was the placeholder 1.0
+                radius=self.hard_wall_constraint_radius,
+                u_max=self.hard_wall_constraint_u_max,  # CHANGED: was silently 0.0
+            )
             network = apply_hard_wall_constraint(network, placeholder_domain)
         return network
 
