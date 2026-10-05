@@ -39,6 +39,8 @@ alone already gave.
 
 from __future__ import annotations
 
+import warnings  # NEW
+
 import torch
 from torch import nn
 
@@ -271,7 +273,12 @@ def apply_hard_particle_constraint(  # NEW
             f"particle_radius ({particle_radius!r}) must be strictly less than "
             f"domain.radius ({domain.radius!r})."
         )
-    
+    warnings.warn(
+        "apply_hard_particle_constraint is deprecated and not physically consistent; use "
+        "networks.apply_stream_function_constraint instead.",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return _HardParticleConstrainedFlow(
         network=network,
         domain=domain,

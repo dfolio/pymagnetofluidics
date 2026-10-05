@@ -674,7 +674,7 @@ def _evaluate_loss_components(
         terms["particle"] = lambda: particle_value
         # CHANGED: Calibrated weight (100.0) eliminates surface slip (L_inf < 0.05)
         # without stiffening the L-BFGS line search
-        weights["particle"] = max(coupling_config.particle_loss_weight * 5.0, 100.0)
+        weights["particle"] = coupling_config.particle_loss_weight
     
     total_loss = compose_loss(terms=terms, weights=weights)
     return _LossComponents(
@@ -685,28 +685,11 @@ def _evaluate_loss_components(
     )
 
 
+# CHANGED: one host synchronization instead of about nine `.item()` calls per step.
 def _record_loss_components(components: _LossComponents) -> dict[str, float]:
-    """Reduce every scalar tensor in `components` to a plain Python float.
-
-    Single point of truth turning a `_LossComponents` (still attached to
-    the autograd graph) into the plain-float dict `_run_adam_phase` and
-    `_run_lbfgs_phase` accumulate into a `LossHistory`, and that
-    `_format_progress_line` renders for verbose logging.
-
-    Args:
-    - `components`: Loss components for the current step, as returned by
-      `_evaluate_loss_components`.
-
-    Returns:
-    - A dict mapping `"total"` and every name in
-      [`_component_names`][magnetofluidics_pinn.training.trainer._component_names]
-      (derived from whether `components.particle` is `None`) to its
-      corresponding scalar value.
-    """
-    names = LOSS_COMPONENT_NAMES + (("particle",) if components.particle is not None else ())
-    return {"total": components.total.item()} | {
-        name: getattr(components, name).item() for name in names
-    }
+    names = ("total",) + LOSS_COMPONENT_NAMES + (("particle",) if components.particle is not None else ())
+    values = torch.stack([getattr(components, name).detach() for name in names]).tolist()
+    return dict(zip(names, values))
 
 
 @dataclass(frozen=True)
@@ -761,7 +744,7 @@ class TrainingHistory:
     """
     
     adam: LossHistory
-    lbfgs: LossHistory
+    lbfgs: LossHistory | None
     
     def print_summary(self) -> None:
         """Prints a formatted summary table of initial, intermediate, and final loss values.
@@ -772,9 +755,8 @@ class TrainingHistory:
         without a second, near-identical `print_summary` implementation
         (the former `particleTrainingHistory.print_summary`).
         """
-        has_lbfgs = len(self.lbfgs.step) > 0
         fields = LOSS_COMPONENT_NAMES + (("particle",) if self.adam.particle is not None else ()) + ("total",)
-        
+        has_lbfgs = len(self.lbfgs.step) > 0 if self.lbfgs is not None else False
         print("\n" + "=" * 78)
         print(
             f"{'Loss Component':<20} | {'Initial (Adam)':<14} | {'Post-Adam':<14} | {'Final Loss':<14} | {'Factor':<8}")
@@ -783,11 +765,18 @@ class TrainingHistory:
         for f in fields:
             initial = getattr(self.adam, f)[0]
             post_adam = getattr(self.adam, f)[-1]
-            final = getattr(self.lbfgs, f)[-1] if has_lbfgs else post_adam
-            reduction = initial / max(final, 1e-15)
-            print(
-                f"{f.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {final:14.4e} | {reduction:7.1f}x"
-            )
+            if self.lbfgs is not None:
+                final = getattr(self.lbfgs, f)[-1] if has_lbfgs else post_adam
+                reduction = initial / max(final, 1e-15)
+                print(
+                    f"{f.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {final:14.4e} | {reduction:7.1f}x"
+                )
+            else:
+                reduction = initial / max(post_adam, 1e-15)
+                print(
+                    f"{f.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {reduction:7.1f}x"
+                )
+                
         print("=" * 78 + "\n")
 
 
@@ -924,6 +913,9 @@ def train(
         print(
             f"Adam phase finished in {time.perf_counter() - adam_start_time:.1f}s |"
             f"Final Total Loss: {adam_history.total[-1]:.2e}")
+        
+    if not training_config.use_lbfgs_refinement:
+        return trained_network, TrainingHistory(adam=adam_history, lbfgs=None)
     
     lbfgs_start_time = time.perf_counter()
     empty_history_fields = ("step",) + _component_names(coupling_config) + ("total",)
