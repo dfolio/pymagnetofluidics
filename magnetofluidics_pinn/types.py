@@ -103,11 +103,6 @@ class CollocationPoints:
 class MagneticFieldSample:
     """Prescribed magnetic field evaluated at a set of coordinates.
 
-    Both `coordinates` and `field` are dimensionless here: field-generating
-    functions in `boundary_conditions.magnetic_field_bc` accept physical (SI)
-    parameters but return values already normalized by
-    `scaling.compute_scales`.
-
     Args:
     - `coordinates`: Tensor of shape `(n_points, n_dims)` where the field is
       evaluated.
