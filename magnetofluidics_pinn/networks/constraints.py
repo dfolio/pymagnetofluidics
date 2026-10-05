@@ -135,12 +135,12 @@ def apply_hard_wall_constraint(network: nn.Module, domain: Domain) -> nn.Module:
 class _HardParticleConstrainedFlow(nn.Module):
     r"""Wrap a flow network to enforce wall, axis, and particle constraints structurally.
 
-    Constructs a composite velocity field satisfying:
-    1. Exact wall no-slip: $\mathbf{u}(R, z) = \mathbf{0}$.
-    2. Exact axis regularity: $u_r(0, z) = 0$ and $\partial u_z / \partial r |_{r=0} = 0$.
-    3. Exact particle rigid-body velocity: $\mathbf{u}|_S = (0, U_p)$.
-    4. Non-zero viscous shear stress: $\left.\frac{\partial u_z}{\partial n}\right|_S = \frac{1 - r^2/R^2}{a} N_z \neq 0$.
-    5. Non-choking far field: $\mathbf{u} \to \mathbf{u}_{\mathrm{Poiseuille}}$ for $\|\mathbf{x} - \mathbf{x}_p\| > 3a$.
+    Implements Approach A (Shear-Preserving Radial Distance Factoring):
+    - Exact wall no-slip: $\mathbf{u}(R, z) = \mathbf{0}$[cite: 70]
+    - Exact axis symmetry: $u_r(0, z) = 0$ and $\partial u_z / \partial r \vert{}_{r=0} = 0$[cite: 70]
+    - Exact particle rigid-body translation: $\mathbf{u}\vert{}_S = (0, U_p)$[cite: 70]
+    - Non-zero viscous surface shear stress: $\left.\frac{\partial \mathbf{u}}{\partial \mathbf{n}}\right\vert{}_S \neq 0$[cite: 70]
+    - Smooth decay to ambient flow in far field ($d_p \gg a$)[cite: 70]
 
     Args:
     - `network`: Underlying flow network mapping `((r/R)^2, z)` to `(N_r, N_z, p)`.
@@ -174,59 +174,60 @@ class _HardParticleConstrainedFlow(nn.Module):
         r"""Compute constrained velocity and pressure fields with CUDA optimization.
 
         Args:
-        * `coordinates`: Tensor of shape `(n_points, 2)` containing `(r, z)`.
+        - `coordinates`: Tensor of shape `(n_points, 2)` containing `(r, z)`.
 
         Returns:
-        * Tensor of shape `(n_points, 3)` containing `(u_r, u_z, p)`.
+        - Tensor of shape `(n_points, 3)` containing `(u_r, u_z, p)`.
         """
         param_device = next(self.network.parameters()).device
         param_dtype = next(self.network.parameters()).dtype
         if coordinates.device != param_device or coordinates.dtype != param_dtype:
             coordinates = coordinates.to(device=param_device, dtype=param_dtype)
-
+        
         radial_coordinate = coordinates[:, 0:1]
         axial_coordinate = coordinates[:, 1:2]
-
+        
         r_sq = radial_coordinate.square()
-        r_norm_sq = r_sq / (self.radius**2)
+        r_norm_sq = r_sq / (self.radius ** 2)
         wall_vanishing_factor = 1.0 - r_norm_sq
-
-        # Evaluate underlying raw neural field
+        
+        # Evaluate raw underlying MLP mapped from ((r/R)^2, z)[cite: 70]
         raw_output = self.network(torch.cat([r_norm_sq, axial_coordinate], dim=1))
         n_r = raw_output[:, 0:1]
         n_z = raw_output[:, 1:2]
         raw_p = raw_output[:, 2:3]
-
-        # Regularized Euclidean distance to sphere center
+        
+        # Regularized distance to particle center (0, z_p)
         axial_offset = axial_coordinate - self.particle_axial_position
         center_distance = torch.sqrt(r_sq + axial_offset.square() + 1.0e-14)
         signed_particle_distance = center_distance - self.particle_radius
-
-        # CHANGED: Use smooth tanh factoring instead of non-differentiable clamp.
-        # This guarantees non-zero surface normal derivatives for Cauchy stress evaluation.
+        
+        # Approach A: Linear distance factor via tanh
+        # At sphere surface (signed_distance = 0), d_norm = 0 with d/dn(d_norm) = 1/a != 0[cite: 70]
         d_norm = torch.tanh(signed_particle_distance / self.particle_radius)
-
-        # CHANGED: Localized spherical envelope ensuring the bypass gap is never choked
+        
+        # Gaussian envelope for particle velocity influence region
         envelope = torch.exp(- (signed_particle_distance / self.delta).square())
-
-        # Radial velocity: odd in r, zero at r=0, zero at r=R, zero on sphere surface
+        
+        # Wall blending factor for particle velocity (vanishes at r = R)[cite: 70]
+        r_diff_sq = torch.clamp(self.radius ** 2 - r_sq, min=0.0)
+        f_p = r_diff_sq / (
+                    r_diff_sq + self.radius * (signed_particle_distance.square() / self.particle_radius) + 1.0e-7)
+        
+        # 1. Radial velocity: zero at r=0, zero at r=R, zero on sphere surface S[cite: 70]
         u_r = (radial_coordinate / self.radius) * wall_vanishing_factor * d_norm * n_r
-
-        # Wall factor for prescribed particle velocity Up
-        r_diff_sq = torch.clamp(self.radius**2 - r_sq, min=0.0)
-        f_p = r_diff_sq / (r_diff_sq + self.radius * (signed_particle_distance.square() / self.particle_radius) + 1.0e-7)
-
-        # Axial velocity: Up on sphere, 0 at wall, Poiseuille far field
+        
+        # 2. Axial velocity: Up on S, 0 at wall r=R, Poiseuille far field[cite: 70]
         u_z_particle = self.particle_axial_velocity * envelope * f_p
         u_z_shear = wall_vanishing_factor * d_norm * n_z
         u_z_ambient = self.u_max * wall_vanishing_factor * (1.0 - envelope)
         u_z = u_z_particle + u_z_shear + u_z_ambient
-
-        # Pressure gauge fixing: Anchor pressure relative to outlet centerline p(0, L) = 0
+        
+        # 3. Pressure gauge anchoring: p(0, L) = 0[cite: 70]
         ref_point = torch.tensor([[0.0, self.length]], device=param_device, dtype=param_dtype)
         p_ref = self.network(ref_point)[:, 2:3]
         p = raw_p - p_ref
-
+        
         return torch.cat([u_r, u_z, p], dim=1)
 
 

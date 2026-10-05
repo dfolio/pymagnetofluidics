@@ -313,6 +313,7 @@ PARTICLE_TRAINING_CONFIG = mfp.TrainingConfig(
     lbfgs_n_boundary_points=lbfgs_n_boundary_points,
     lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
     residual_form=residual_form,
+    verbose=True, log_every=log_every,
 )
 N_PARTICLE_SURFACE_POINTS = 250
 
@@ -331,12 +332,12 @@ particle_raw = mfp.build_mlp(n_inputs=2, n_outputs=3, hidden_layers= (64, 64, 64
 particle_network_init = mfp.apply_hard_wall_constraint(particle_raw, domain)
 
 # try:
-# particle_network_init = mfp.apply_hard_particle_constraint(
-#     particle_network_init,
-#     domain,
-#     particle_axial_position=particle_axial_position,
-#     particle_radius=particle_radius,
-#     particle_axial_velocity=particle_axial_velocity,)
+particle_network_init = mfp.apply_hard_particle_constraint(
+    particle_network_init,
+    domain,
+    particle_axial_position=particle_axial_position,
+    particle_radius=particle_radius,
+    particle_axial_velocity=particle_axial_velocity,)
 # except NotImplementedError:
 #    print("Skip `apply_hard_particle_constraint` as still not implemented...")
 
