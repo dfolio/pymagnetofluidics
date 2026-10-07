@@ -67,16 +67,16 @@ def stokes_sphere_field(
     rho_sq = r.square() + zeta.square()
     if torch.any(rho_sq < radius**2 * (1.0 - _INTERIOR_TOLERANCE)):
         raise ValueError("coordinates contain points strictly inside the sphere.")
-
+    
     rho = torch.sqrt(rho_sq)
     rho3 = rho * rho_sq
     rho5 = rho3 * rho_sq
     a = radius
     u_z = velocity * (
-        0.75 * a * (1.0 / rho + zeta.square() / rho3)
-        + 0.25 * a**3 * (1.0 / rho3 - 3.0 * zeta.square() / rho5)
+            0.75 * a * (1.0 / rho + zeta.square() / rho3)
+            + 0.25 * a ** 3 * (1.0 / rho3 - 3.0 * zeta.square() / rho5)
     )
-    u_r = velocity * (0.75 * a * r * zeta / rho3 - 0.75 * a**3 * r * zeta / rho5)
+    u_r = velocity * (0.75 * a * r * zeta / rho3 - 0.75 * a ** 3 * r * zeta / rho5)
     pressure = 1.5 * a * velocity * zeta / rho3
     return torch.cat([u_r, u_z, pressure], dim=1)
 

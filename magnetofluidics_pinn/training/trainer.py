@@ -109,6 +109,11 @@ def _component_names(coupling_config: TwoWayCouplingConfig | None) -> tuple[str,
     return LOSS_COMPONENT_NAMES + (("particle",) if coupling_config is not None else ())
 
 
+def _reference_flow_rate(radius: float, peak_velocity: float) -> float:  # NEW: allows the zero-ambient problem
+    r"""Reference volumetric flow $Q_\text{ref} = \pi R^2 u_\text{peak}/2$, with $Q_\text{ref}=0$ for a fluid at rest."""
+    return 0.0 if peak_velocity == 0.0 else poiseuille_reference_flow_rate(radius, peak_velocity)
+
+
 def _stokes_residual_losses(
         network: nn.Module, coordinates: torch.Tensor, fluid_config: FluidConfig,
         residual_form: Literal["standard", "r_weighted"] = "standard",  # NEW
@@ -206,7 +211,7 @@ def _conservation_loss(
     """
     axial_positions = torch.linspace(0.0, domain.length, n_stations, device=device)
     predicted_flow_rate = axial_flow_rate(network, domain.radius, axial_positions, n_quadrature_points)
-    reference_flow_rate = poiseuille_reference_flow_rate(domain.radius, peak_velocity)
+    reference_flow_rate = _reference_flow_rate(domain.radius, peak_velocity)
     return torch.mean((predicted_flow_rate - reference_flow_rate).square())
 
 
@@ -235,6 +240,7 @@ def _particle_core_loss(
     core_points: torch.Tensor,
     target_axial_velocity: float,
     particle_radius: float,
+    strain_weight: float = 1.0,
 ) -> torch.Tensor:
     r"""Penalize deviation from rigid-body velocity inside the solid particle core.
 
@@ -272,7 +278,7 @@ def _particle_core_loss(
     grad_uz = scalar_field_gradient(velocity[:, 1:2], core_coords)
     strain_loss = torch.mean(grad_ur.square() + grad_uz.square())
 
-    return vel_loss + (particle_radius**2) * strain_loss
+    return vel_loss + strain_weight * (particle_radius**2) * strain_loss
 
 
 def _particle_conservation_loss(
@@ -337,7 +343,7 @@ def _particle_conservation_loss(
         axial_positions=all_stations,
         n_radial_quadrature_points=n_quadrature_points,
     )
-    reference_flux = poiseuille_reference_flow_rate(domain.radius, peak_velocity)
+    reference_flux = _reference_flow_rate(domain.radius, peak_velocity)
     return torch.mean((predicted_flux - reference_flux).square())
 
 
@@ -503,13 +509,14 @@ def _build_training_batch(
     inlet_points = collocation.boundary[n_wall: n_wall + n_inlet]
     outlet_points = collocation.boundary[n_wall + n_inlet: n_wall + n_inlet + n_outlet]
     
+    peak_velocity = coupling_config.ambient_peak_velocity if coupling_config is not None else _DIMENSIONLESS_PEAK_INLET_VELOCITY
     return _TrainingBatch(
         interior=interior,
         wall_points=wall_points,
         wall_target=no_slip_condition(domain, wall_points),
         inlet_points=inlet_points,
         inlet_target=inlet_velocity_condition(
-            domain, inlet_points, peak_velocity=_DIMENSIONLESS_PEAK_INLET_VELOCITY
+            domain, inlet_points, peak_velocity=peak_velocity
         ),
         outlet_points=outlet_points,
         outlet_target=outlet_pressure_condition(
@@ -630,12 +637,13 @@ def _evaluate_loss_components(
         "positivity": resolved_positivity_weight,
     }
     
+    peak_velocity = coupling_config.ambient_peak_velocity if coupling_config is not None else _DIMENSIONLESS_PEAK_INLET_VELOCITY
     # Inside _evaluate_loss_components:
     if coupling_config is None:
         conservation_value = _conservation_loss(
             network,
             domain,
-            peak_velocity=_DIMENSIONLESS_PEAK_INLET_VELOCITY,
+            peak_velocity=peak_velocity,
             n_stations=training_config.n_conservation_stations,
             n_quadrature_points=training_config.n_conservation_quadrature_points,
             device=batch.interior.device,
@@ -648,7 +656,7 @@ def _evaluate_loss_components(
             domain,
             particle_state=coupling_config.particle_state.to(device=batch.interior.device),
             particle_config=coupling_config.particle_config,
-            peak_velocity=_DIMENSIONLESS_PEAK_INLET_VELOCITY,
+            peak_velocity=peak_velocity,
             n_stations=training_config.n_conservation_stations,
             n_quadrature_points=training_config.n_conservation_quadrature_points,
             device=batch.interior.device,
@@ -663,6 +671,7 @@ def _evaluate_loss_components(
             core_points=batch.particle_core_points,
             target_axial_velocity=coupling_config.axial_particle_velocity,
             particle_radius=coupling_config.particle_config.radius,
+            strain_weight=coupling_config.core_strain_weight
         )
         # Combined immersed boundary loss
         particle_value = surface_loss + 1.0 * core_loss
@@ -672,8 +681,6 @@ def _evaluate_loss_components(
     
     if particle_value is not None:
         terms["particle"] = lambda: particle_value
-        # CHANGED: Calibrated weight (100.0) eliminates surface slip (L_inf < 0.05)
-        # without stiffening the L-BFGS line search
         weights["particle"] = coupling_config.particle_loss_weight
     
     total_loss = compose_loss(terms=terms, weights=weights)

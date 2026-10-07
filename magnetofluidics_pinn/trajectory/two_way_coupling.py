@@ -70,7 +70,10 @@ rather than mutating the caller's config in place.
 
 from __future__ import annotations
 
+import math
+import warnings
 import dataclasses
+from dataclasses import dataclass
 from typing import Callable, Any
 
 import torch
@@ -87,6 +90,10 @@ from magnetofluidics_pinn.physics.hydrodynamic_drag import surface_traction_forc
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force  # NEW
 from magnetofluidics_pinn.training.trainer import TrainingHistory, train
 from magnetofluidics_pinn.types import Domain, MagneticFieldSample, ParticleState
+from magnetofluidics_pinn.verification.benchmarks import shell_force_profile, shell_force_spread
+
+# CHANGED: ambient centreline velocity of the "fixed sphere in Poiseuille flow" problem.
+_AMBIENT_PEAK_VELOCITY = 1.0
 
 
 def _expand_velocity_bracket(
@@ -444,3 +451,140 @@ def make_dipole_applied_force_fn(  # NEW
             return force[0, 1].item()
 
     return applied_force_fn
+
+
+def force_balanced_velocity(
+        force_fixed: float, force_unit_translation: float, applied_force_z: float = 0.0,
+) -> float:
+    r"""Solve the linear force balance $F_\text{app} + F_0 + U F_1 = 0$ for $U$.
+
+    Stokes flow is linear in the boundary data, so the hydrodynamic force on a
+    sphere moving at $U$ in a prescribed ambient flow is affine in $U$:
+    $F(U) = F_0 + U F_1$, where $F_0$ is the force on the *fixed* sphere and
+    $F_1$ the force per unit velocity in fluid at rest (negative, since drag
+    opposes motion) [@happel1983low]. Hence
+    $$U = -\frac{F_\text{app} + F_0}{F_1}.$$
+
+    Args:
+    - `force_fixed`: $F_0$, force on the fixed sphere in the ambient flow.
+    - `force_unit_translation`: $F_1 < 0$.
+    - `applied_force_z`: Sum of the external axial forces.
+
+    Returns:
+    - The force-balanced axial velocity $U$.
+
+    Raises:
+    - `ValueError`: If an argument is not finite, or `force_unit_translation`
+      is not strictly negative (a non-dissipative or failed solve).
+    """
+    values = (force_fixed, force_unit_translation, applied_force_z)
+    if not all(math.isfinite(value) for value in values):
+        raise ValueError(f"All forces must be finite; got {values!r}.")
+    if force_unit_translation >= 0.0:
+        raise ValueError(
+            f"force_unit_translation must be strictly negative (drag opposes motion); got {force_unit_translation!r}."
+        )
+    return -(applied_force_z + force_fixed) / force_unit_translation
+
+
+@dataclass(frozen=True)
+class ResistanceResult:
+    r"""Outcome of the two linear resistance problems at one particle position.
+
+    Args:
+    - `force_fixed`: $F_0$, fixed sphere in ambient Poiseuille flow.
+    - `force_unit_translation`: $F_1$, unit-velocity sphere in fluid at rest.
+    - `shell_spread_fixed`, `shell_spread_unit`: Relative shell-force spreads
+      (see `shell_force_spread`); error indicators for $F_0$ and $F_1$.
+    - `network_fixed`, `network_unit`: The two trained networks.
+    - `history_fixed`, `history_unit`: Their training histories.
+    """
+    
+    force_fixed: float
+    force_unit_translation: float
+    shell_spread_fixed: float
+    shell_spread_unit: float
+    network_fixed: nn.Module
+    network_unit: nn.Module
+    history_fixed: TrainingHistory
+    history_unit: TrainingHistory
+    
+    def balanced_velocity(self, applied_force_z: float = 0.0) -> float:
+        """Force-balanced velocity for a given applied force; see `force_balanced_velocity`."""
+        return force_balanced_velocity(self.force_fixed, self.force_unit_translation, applied_force_z)
+
+
+def solve_resistance_problems(
+        build_network: Callable[[Domain], nn.Module],
+        domain: Domain,
+        fluid_config: FluidConfig,
+        particle_config: ParticleConfig,
+        particle_state: ParticleState,
+        training_config: TrainingConfig,
+        n_surface_points: int = 200,
+        n_quadrature_points: int = 181,
+        particle_loss_weight: float = 100.0,
+        core_strain_weight: float = 1.0,
+        shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5),
+) -> ResistanceResult:
+    r"""Train the two linear problems that replace the `brentq` retraining loop.
+
+    1. *Fixed sphere*, $U = 0$, ambient Poiseuille flow of peak 1: gives $F_0$.
+    2. *Unit translation*, $U = 1$, ambient flow zero (inlet at rest, zero
+       mass-flux reference): gives $F_1$.
+
+    Every force-balanced velocity then follows analytically from
+    [`force_balanced_velocity`][magnetofluidics_pinn.trajectory.two_way_coupling.force_balanced_velocity],
+    with no further training. Both problems run with the positivity penalty
+    off and the same training budget.
+
+    Args:
+    - `build_network`: Factory returning a *fresh*, wrapped network for a
+      given domain. It is called with `domain` and with a copy of `domain`
+      whose `u_max` is zero, because `apply_hard_wall_constraint` embeds the
+      ambient profile `u_max (1 - (r/R)^2)` in the network.
+    - `domain`, `fluid_config`, `particle_config`, `particle_state`,
+      `training_config`: As in `train`. `domain.u_max` must be 1.
+    - `n_surface_points`, `core_strain_weight`, `particle_loss_weight`:
+      Forwarded to `TwoWayCouplingConfig`.
+    - `n_quadrature_points`: Polar nodes of the traction quadrature.
+    - `shell_factors`: Shell radii (multiples of $a$) for the error indicator.
+
+    Returns:
+    - A `ResistanceResult`.
+
+    Raises:
+    - `ValueError`: If `domain.u_max` is not 1.
+    """
+    if not math.isclose(domain.u_max, _AMBIENT_PEAK_VELOCITY, rel_tol=1.0e-9):
+        raise ValueError(f"domain.u_max must equal {_AMBIENT_PEAK_VELOCITY}; got {domain.u_max!r}.")
+    position = (float(particle_state.position[0].item()), float(particle_state.position[1].item()))
+    problems = (  # (problem domain, ambient peak velocity, particle velocity)
+        (domain, _AMBIENT_PEAK_VELOCITY, 0.0),
+        (dataclasses.replace(domain, u_max=0.0), 0.0, 1.0),
+    )
+    
+    def solve_one(problem: tuple[Domain, float, float]):
+        problem_domain, ambient, velocity = problem
+        coupling_config = TwoWayCouplingConfig(
+            particle_config=particle_config, particle_velocity=(0.0, velocity), particle_position=position,
+            n_surface_points=n_surface_points, particle_loss_weight=particle_loss_weight,
+            positivity_loss_weight_override=0.0,  # reversal near the sphere is physical
+            ambient_peak_velocity=ambient, core_strain_weight=core_strain_weight,
+        )
+        trained, history = train(
+            build_network(problem_domain), problem_domain, fluid_config=fluid_config,
+            training_config=training_config, coupling_config=coupling_config,
+        )
+        trained.eval()
+        force = surface_traction_force(
+            trained, particle_config=particle_config, particle_state=particle_state,
+            n_quadrature_points=n_quadrature_points,
+        ).item()
+        spread = shell_force_spread(
+            shell_force_profile(trained, particle_config, particle_state, shell_factors, n_quadrature_points)
+        )
+        return force, spread, trained, history
+    
+    (f_fixed, s_fixed, net_fixed, hist_fixed), (f_unit, s_unit, net_unit, hist_unit) = map(solve_one, problems)
+    return ResistanceResult(f_fixed, f_unit, s_fixed, s_unit, net_fixed, net_unit, hist_fixed, hist_unit)

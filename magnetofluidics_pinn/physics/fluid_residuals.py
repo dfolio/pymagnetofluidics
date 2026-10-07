@@ -58,7 +58,6 @@ from __future__ import annotations
 from typing import Callable, Literal, NamedTuple
 
 import torch
-from fontTools.misc import iftSparseBitSet
 
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 from magnetofluidics_pinn.config import DomainConfig, FluidConfig

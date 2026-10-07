@@ -195,7 +195,7 @@ def plot_training_history(
     - `ValueError`: If both Adam and L-BFGS histories are empty.
     """
     n_adam = len(history.adam.step)
-    n_lbfgs = len(history.lbfgs.step)
+    n_lbfgs = 0 if history.lbfgs is None else len(history.lbfgs.step)
     
     if n_adam == 0 and n_lbfgs == 0:
         raise ValueError("Cannot plot empty TrainingHistory: both phases contain zero steps.")
@@ -206,7 +206,7 @@ def plot_training_history(
     
     def merge_series(field: str) -> np.ndarray:
         adam_vals = getattr(history.adam, field)
-        lbfgs_vals = getattr(history.lbfgs, field)
+        lbfgs_vals = getattr(history.lbfgs, field) if n_lbfgs > 0 else ()
         return (
             np.concatenate([np.asarray(adam_vals), np.asarray(lbfgs_vals)])
             if n_lbfgs > 0 else np.asarray(adam_vals)
@@ -282,7 +282,7 @@ def plot_two_way_history(history: TrainingHistory, log_scale: bool = True) -> ma
     has_particle_term = getattr(history.adam, "particle", None) is not None
     component_names = LOSS_COMPONENT_NAMES + (("particle",) if has_particle_term else ())
     n_adam = len(history.adam.step)
-    n_lbfgs = len(history.lbfgs.step)
+    n_lbfgs = 0 if history.lbfgs is None else len(history.lbfgs.step)
     adam_steps = np.asarray(history.adam.step)
     lbfgs_steps = np.asarray(history.lbfgs.step) + n_adam
     steps = np.concatenate([adam_steps, lbfgs_steps]) if n_lbfgs else adam_steps
@@ -293,7 +293,7 @@ def plot_two_way_history(history: TrainingHistory, log_scale: bool = True) -> ma
     
     for field in component_names + ("total",):
         adam_vals = np.asarray(getattr(history.adam, field))
-        lbfgs_vals = np.asarray(getattr(history.lbfgs, field))
+        lbfgs_vals = np.asarray(getattr(history.lbfgs, field)) if n_lbfgs > 0 else ()
         vals = np.concatenate([adam_vals, lbfgs_vals]) if n_lbfgs else adam_vals
         style = dict(linewidth=2.0, linestyle="--", color="black") if field == "total" else dict(linewidth=1.0)
         ax.plot(steps, vals, label=field, **style)

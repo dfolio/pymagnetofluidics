@@ -1,5 +1,5 @@
 ---
-title: "Phase 1.5 — Diagnostic ladder for the stream-function two-way solver"
+title: "Phase 1.7 — Diagnostic ladder for the stream-function two-way solver"
 ---
 
 ## Purpose
@@ -20,6 +20,10 @@ for candidate in (Path.cwd(), Path.cwd().parent, Path.cwd().parent.parent):
         sys.path.insert(0, str(candidate))
         
 import magnetofluidics_pinn as mfp
+
+print(mfp.__file__, mfp.__version__)
+assert str(Path(mfp.__file__).resolve()).startswith(str(Path.cwd().resolve().parent)), \
+    "mfp is not being imported from the local repo — restart the kernel or check your install."
 ```
 
 ```{python}
@@ -60,6 +64,16 @@ checks += (mfp.evaluate_check(
     "Surface independence on exact field", "max relative spread over control radii",
     float(report.relative_deviation.max()), 1.0e-4),)
 report
+```
+
+
+```{python}
+#| label: exact-field-ok
+exact_field_ok = checks[0].passed and checks[1].passed
+if not exact_field_ok:
+    print("WARNING: the exact-field traction check failed. Every force number below is "
+          "measured with an unverified tool and must not be compared against the "
+          "Haberman-Sayre reference until this is fixed. See the diagnostic in the audit.")
 ```
 
 ## Stream-function training and resistance pair
@@ -162,8 +176,9 @@ sweep
 
 ```{python}
 #| label: global-momentum-balance
-balance = mfp.global_momentum_balance(solution.translation_network, ZP, A, R, section_offset=2.0)
-passive = mfp.force_balanced_velocity(pair, 0.0)
+balance = mfp.global_momentum_balance(sol2.translation_network, ZP, A, R, 
+                                      section_offset=2.0)
+passive = mfp.force_balanced_velocity(sol2.pair, 0.0)
 pd.Series({**balance, "U passive": passive, "Faxen reference": 1.0 - 2 * (A / R) ** 2 / 3})
 ```
 

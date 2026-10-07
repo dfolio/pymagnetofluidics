@@ -145,9 +145,6 @@ def sample_collocation_points(
             "Initial-time collocation sampling is scheduled for the "
             "unsteady (Navier-Stokes) phase of the roadmap."
         )
-    # NEW: validate and resolve the axis-clearance override independently of
-    # any caller (e.g. TrainingConfig) that might also validate it, since
-    # this function is public and directly callable on its own.
     if axis_clearance_fraction is not None and not (0.0 <= axis_clearance_fraction < 1.0):
         raise ValueError(
             "axis_clearance_fraction must be None, or lie in [0.0, 1.0); "
@@ -201,6 +198,63 @@ def sample_collocation_points(
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
     
     return CollocationPoints(interior=interior, boundary=boundary, initial=None)
+
+
+def _sample_particle_shell_points(
+        generator: torch.Generator,
+        n_points: int,
+        particle_radius: float,
+        axial_center: float,
+        shell_thickness: float,
+        channel_radius: float,
+        channel_length: float,
+        min_radius: float,
+        oversampling_factor: float,
+        device: torch.device,
+) -> torch.Tensor:
+    r"""Draw volume-uniform points in the spherical shell $a < \rho < a + \delta$ around the particle.
+
+    A 3-D volume-uniform draw has $\rho^3$ uniform on $[a^3, (a+\delta)^3]$ and $\cos\theta$ uniform on
+    $[-1, 1]$; projecting to $(r, z) = (\rho\sin\theta, z_c + \rho\cos\theta)$ keeps the $r\,\mathrm{d}r$
+    measure used by the global sampler. Candidates outside the channel, or closer to the axis than
+    `min_radius`, are rejected.
+
+    Args:
+    - `generator`: Seeded generator on `device`.
+    - `n_points`: Number of accepted points requested (`0` returns an empty `(0, 2)` tensor).
+    - `particle_radius`, `axial_center`, `shell_thickness`: Shell geometry $a$, $z_c$, $\delta$.
+    - `channel_radius`, `channel_length`: Domain bounds $R$, $L$.
+    - `min_radius`: Axis clearance, as in the other samplers.
+    - `oversampling_factor`: Candidates drawn per requested point; must exceed 1.
+    - `device`: Target device.
+
+    Returns:
+    - Tensor of shape `(n_points, 2)` with `(r, z)` rows.
+
+    Raises:
+    - `ValueError`: If `n_points` is negative or `oversampling_factor <= 1`.
+    - `RuntimeError`: If fewer than `n_points` candidates are accepted.
+    """
+    if n_points < 0:
+        raise ValueError(f"n_points must be non-negative; got {n_points!r}.")
+    if oversampling_factor <= 1.0:
+        raise ValueError(f"oversampling_factor must be strictly greater than 1.0; got {oversampling_factor!r}.")
+    if n_points == 0:
+        return torch.empty((0, 2), device=device)
+    n_candidates = math.ceil(oversampling_factor * n_points)
+    inner_cubed = particle_radius ** 3
+    outer_cubed = (particle_radius + shell_thickness) ** 3
+    distance = (inner_cubed + (outer_cubed - inner_cubed)
+                * torch.rand(n_candidates, 1, generator=generator, device=device)).pow(1.0 / 3.0)
+    cosine = 2.0 * torch.rand(n_candidates, 1, generator=generator, device=device) - 1.0
+    radial = distance * torch.sqrt(torch.clamp(1.0 - cosine.square(), min=0.0))
+    axial = axial_center + distance * cosine
+    admissible = ((radial >= min_radius) & (radial < channel_radius)
+                  & (axial > 0.0) & (axial < channel_length)).squeeze(1)
+    points = torch.cat([radial, axial], dim=1)[admissible][:n_points]
+    if points.shape[0] < n_points:
+        raise RuntimeError(f"Insufficient shell candidates survived: needed {n_points}, got {points.shape[0]}.")
+    return points
 
 
 def sample_collocation_points_with_particle(
@@ -311,8 +365,11 @@ def sample_collocation_points_with_particle(
     
     # 1. Budget Partition: Constriction Zone vs. Global Background
     n_constriction = int(n_interior * constriction_oversample_ratio)
-    n_global = n_interior - n_constriction
-    
+    n_shell = int(n_interior * boundary_layer_fraction)  # NEW
+    n_global = n_interior - n_constriction - n_shell
+    if n_global < 0:  # NEW
+        raise ValueError("constriction_oversample_ratio + boundary_layer_fraction must not exceed 1.")
+
     # 2. Constriction-Zone Collocation Sampling: |z - z_p| <= 1.5 * a, r in [a, R]
     z_gap_min = max(z_p - constriction_axial_factor * a, 0.0)
     z_gap_max = min(z_p + constriction_axial_factor * a, domain.length)
@@ -350,9 +407,13 @@ def sample_collocation_points_with_particle(
         )
     
     # Merge multizone coordinates
+    shell_points = _sample_particle_shell_points(                             # NEW
+          generator, n_shell, a, z_p, (boundary_layer_radius_factor - 1.0) * a,
+          domain.radius, domain.length, r_min, oversampling_factor, resolved_device)
     interior_r = torch.cat([surviving_gap_r, surviving_glob_r], dim=0)
     interior_z = torch.cat([surviving_gap_z, surviving_glob_z], dim=0)
-    interior = torch.stack([interior_r, interior_z], dim=1)
+    interior = torch.cat([torch.stack([interior_r, interior_z], dim=1),
+                          shell_points], dim=0)  # NEW: add shell points to interior
     
     # 4. Channel External Boundary Points (Wall, Inlet, Outlet)
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)

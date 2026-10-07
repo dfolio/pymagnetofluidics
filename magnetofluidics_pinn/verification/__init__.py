@@ -52,6 +52,14 @@ from magnetofluidics_pinn.verification.force_checks import (  # NEW
     surface_independence_report as surface_independence_report,
     residual_by_region as residual_by_region,
 )
+
+from magnetofluidics_pinn.verification.benchmarks import (
+    stokes_sphere_field as stokes_sphere_field,
+    haberman_sayre_factor as haberman_sayre_factor,
+    reference_resistances as reference_resistances,
+    shell_force_profile as shell_force_profile,
+    shell_force_spread as shell_force_spread,
+)
 __all__ = [
     # Analytical reference
     "hagen_poiseuille_velocity_field",
@@ -89,4 +97,10 @@ __all__ = [
     "sphere_traction_force",
     "surface_independence_report",
     "residual_by_region",
+    # Benchmarks
+    "stokes_sphere_field",
+    "haberman_sayre_factor",
+    "reference_resistances",
+    "shell_force_profile",
+    "shell_force_spread",
 ]

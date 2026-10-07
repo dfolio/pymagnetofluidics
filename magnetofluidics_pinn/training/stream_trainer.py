@@ -150,6 +150,7 @@ def train_stream_function_flow(
     resample_each_round: bool = True,  # NEW
     min_relative_improvement: float = 1.0e-2,  # NEW
     patience: int = 2,  # NEW
+    stagnation_probe_seed: int | None = None,
 ) -> tuple[nn.Module, StreamLossHistory]:
     """Train a stream-function network on a deep copy and return it.
 
@@ -201,13 +202,16 @@ def train_stream_function_flow(
         adam_records.append(_record(losses))
         if training_config.verbose and epoch % training_config.log_every == 0:
             print(f"Epoch {epoch:5d} | total {adam_records[-1][0]:.3e}")
-
+    
+    probe_seed = (
+        training_config.random_seed + 999_999 if stagnation_probe_seed is None else stagnation_probe_seed
+    )
+    probe_batch = batch(training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
+                        probe_seed)  # NEW: fixed across every round
+    
     lbfgs_records: list[tuple[float, ...]] = []
     if training_config.use_lbfgs_refinement:
-        # CHANGED: a new batch and a new optimizer per round. A fixed batch of ~4000 points is
-        # smaller than the parameter count, so L-BFGS can fit it without generalizing, and
-        # curvature pairs from an old batch are stale.
-        previous_loss: float | None = None
+        previous_probe_loss: float | None = None
         stalled_rounds = 0
         for round_index in range(training_config.lbfgs_rounds):
             seed = training_config.random_seed + 100_000 + (round_index if resample_each_round else 0)
@@ -221,21 +225,25 @@ def train_stream_function_flow(
             
             def closure(batch_=fixed, optimizer=lbfgs) -> torch.Tensor:
                 optimizer.zero_grad()
-                losses = _evaluate_losses(trained, batch_, fluid_config, training_config)
-                losses["total"].backward()
-                lbfgs_records.append(_record(losses))
-                return losses["total"]
+                _losses = _evaluate_losses(trained, batch_, fluid_config, training_config)
+                _losses["total"].backward()
+                lbfgs_records.append(_record(_losses))
+                return _losses["total"]
             
             lbfgs.step(closure)
-            current = lbfgs_records[-1][0]
+            # current = lbfgs_records[-1][0]
+            # with torch.no_grad():
+            probe_loss = _evaluate_losses(trained, probe_batch, fluid_config, training_config)["total"].item()
+            
             if training_config.verbose:
-                print(f"L-BFGS round {round_index + 1} | total {current:.3e}")
-            if previous_loss is not None:  # NEW: stop after `patience` stalled rounds
-                improvement = (previous_loss - current) / abs(previous_loss)
+                print(f"L-BFGS round {round_index + 1} | train {lbfgs_records[-1][0]:.3e} | probe {probe_loss:.3e}")
+            
+            if previous_probe_loss is not None:
+                improvement = (previous_probe_loss - probe_loss) / abs(previous_probe_loss)
                 stalled_rounds = stalled_rounds + 1 if improvement < min_relative_improvement else 0
                 if stalled_rounds >= patience:
                     break
-            previous_loss = current
+            previous_probe_loss = probe_loss
 
     return trained, StreamLossHistory(STREAM_LOSS_NAMES, tuple(adam_records), tuple(lbfgs_records))
 

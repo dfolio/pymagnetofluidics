@@ -440,6 +440,8 @@ class TwoWayCouplingConfig:
     n_surface_points: int = 200
     particle_loss_weight: float = DEFAULT_BOUNDARY_LOSS_WEIGHT
     positivity_loss_weight_override: float | None = None  # NEW
+    ambient_peak_velocity: float = 1.0  # NEW: peak of the ambient Poiseuille flow the problem is posed in.
+    core_strain_weight: float = 1.0  # NEW: weight of the zero-strain term inside the rigid core (0 disables it).
     
     def __post_init__(self) -> None:
         if not all(math.isfinite(component) for component in self.particle_velocity):
@@ -459,6 +461,8 @@ class TwoWayCouplingConfig:
                     "positivity_loss_weight_override must be None, or finite and non-negative; "
                     f"got {self.positivity_loss_weight_override!r}."
                 )
+        _check_if_finite_positive(self.ambient_peak_velocity, "ambient_peak_velocity")
+        _check_if_finite_positive(self.core_strain_weight, "core_strain_weight")
     
     @property
     def particle_velocity_magnitude(self) -> float:
