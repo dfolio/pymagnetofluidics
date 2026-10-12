@@ -14,10 +14,10 @@ import math
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.types import Domain
 from magnetofluidics_pinn.physics.stokes_sphere import (  # NEW
     stokes_reduced_stream_function, stokes_sphere_pressure,
 )
+from magnetofluidics_pinn.types import Domain
 
 
 def bump_function(q: torch.Tensor) -> torch.Tensor:
@@ -40,8 +40,8 @@ def bump_function(q: torch.Tensor) -> torch.Tensor:
 class StreamFunctionSphereFlow(nn.Module):
     r"""Flow around an on-axis sphere in a tube, from $\psi = s\,F(s, z)$ with $s = r^2$.
 
-    $$ u_r = r F_z,\qquad u_z = -2\,(F + s F_s),\qquad
-    F = F_P + T\,(F_g - F_P) + w\,d^2\,N(s/R^2, z/L). $$
+    $$u_r = r F_z,\qquad u_z = -2\,(F + s F_s),\qquad
+    F = F_P + T\,(F_g - F_P) + w\,d^2\,N(s/R^2, z/L).$$
 
     Constraints that hold for *every* weight value:
     - Continuity: $\div\mathbf u = 0$ identically.
@@ -49,6 +49,7 @@ class StreamFunctionSphereFlow(nn.Module):
     - Wall: $\mathbf u(R, z) = \mathbf 0$ ($w$ has a double zero, $T \equiv 0$ there).
     - Sphere: $\mathbf u = (0, U_p)$ on $\rho = a$ ($d$ vanishes, $T = 1$, $\nabla T = 0$).
     - Far field: $T \equiv 0$ at both ends, so the base flow is the Poiseuille profile.
+    - Flux: $Q(z) = -2\pi R^2 F(R^2, z) = \pi R^2 U_\text{amp}/2$ wherever $T = 0$.
 
     The inlet profile, outlet pressure and the PDE itself remain soft. Pressure is
     $p = p_P + p_\text{net} - p_\text{net}(0, L)$.
@@ -61,45 +62,54 @@ class StreamFunctionSphereFlow(nn.Module):
     - `particle_axial_velocity`: Sphere velocity $U_p$.
     - `flow_amplitude`: Undisturbed centerline velocity; defaults to `domain.u_max`.
       Use `0.0` for a sphere translating in still fluid.
-    - `taper_margin`: Fraction in $(0, 1)$ of the available clearance used as taper support.
+    - `taper_margin`: Multiple of $a^2$ setting the taper support in $\rho^2$ units;
+       the bump acts inside the ball of radius $a\sqrt{1 + \text{taper\_margin}}$ around the sphere, capped at $0.9$
+       times the available wall-and-end clearance. The default $8$ gives a taper ball of radius $3a$, so the lifting
+       is exact on the particle scale and the network learns the smooth remainder beyond it.
 
     Raises:
     - `ValueError`: If the sphere does not fit strictly inside the channel with a
       positive taper support, or an argument is invalid.
     """
-
+    
     def __init__(
-        self,
-        raw_network: nn.Module,
-        domain: Domain,
-        particle_axial_position: float,
-        particle_radius: float,
-        particle_axial_velocity: float = 0.0,
-        flow_amplitude: float | None = None,
-        taper_margin: float = 0.9,
+            self,
+            raw_network: nn.Module,
+            domain: Domain,
+            particle_axial_position: float,
+            particle_radius: float,
+            particle_axial_velocity: float = 0.0,
+            flow_amplitude: float | None = None,
+            taper_margin: float = 3,
+            # CHANGED: multiple of a^2 (taper ball radius a*sqrt(1+margin)), not a clearance fraction
     ) -> None:
         super().__init__()
         amplitude = domain.u_max if flow_amplitude is None else flow_amplitude
         scalars = (particle_axial_position, particle_radius, particle_axial_velocity, amplitude)
         if not all(math.isfinite(value) for value in scalars):
             raise ValueError("All scalar arguments must be finite.")
-        if not (0.0 < taper_margin < 1.0):
-            raise ValueError(f"taper_margin must lie in (0, 1); got {taper_margin!r}.")
+        # if not (0.0 < taper_margin < 1.0):
+        #    raise ValueError(f"taper_margin must lie in (0, 1); got {taper_margin!r}.")
+        if not (math.isfinite(
+                taper_margin) and taper_margin > 0.0):  # CHANGED: any positive multiple of a^2 is admissible
+            raise ValueError(f"taper_margin must be finite and strictly positive; got {taper_margin!r}.")
         if not (0.0 < particle_radius < domain.radius):
             raise ValueError("particle_radius must satisfy 0 < a < domain.radius.")
         clearance = min(
-            domain.radius**2 - particle_radius**2,
-            particle_axial_position**2 - particle_radius**2,
-            (domain.length - particle_axial_position) ** 2 - particle_radius**2,
+            domain.radius ** 2 - particle_radius ** 2,
+            particle_axial_position ** 2 - particle_radius ** 2,
+            (domain.length - particle_axial_position) ** 2 - particle_radius ** 2,
         )
         if clearance <= 0.0:
             raise ValueError("The sphere must lie strictly inside the channel, clear of both ends.")
         self.raw_network = raw_network
         for name, value in (
-            ("radius", domain.radius), ("length", domain.length),
-            ("particle_z", particle_axial_position), ("particle_a", particle_radius),
-            ("particle_u", particle_axial_velocity), ("amplitude", amplitude),
-            ("support", taper_margin * clearance),
+                ("radius", domain.radius), ("length", domain.length),
+                ("particle_z", particle_axial_position), ("particle_a", particle_radius),
+                ("particle_u", particle_axial_velocity), ("amplitude", amplitude),
+                # CHANGED: particle-relative support in rho^2 units, capped at 0.9 of the
+                # available clearance so the bump can never reach the wall or either end.
+                ("support", min(taper_margin * particle_radius ** 2, 0.9 * clearance)),
         ):
             # Buffers travel with `state_dict`, so a checkpoint carries the full constraint.
             self.register_buffer(name, torch.tensor(float(value)))
@@ -128,7 +138,7 @@ class StreamFunctionSphereFlow(nn.Module):
         - Tensor `(n, 1)` with $F$.
         """
         s, z = sz[:, 0:1], sz[:, 1:2]
-        radius_sq = self.radius**2
+        radius_sq = self.radius ** 2
         f_poiseuille = -self.amplitude * (0.5 - s / (4.0 * radius_sq))
         relative_velocity = self.particle_u - self.amplitude  # CHANGED: Stokes lifting uses U_s = U_p - U_max
         f_stokes = stokes_reduced_stream_function(s, z, self.particle_z, self.particle_a, relative_velocity)
@@ -139,8 +149,26 @@ class StreamFunctionSphereFlow(nn.Module):
         # O(1/a^2) amplification that produced the 1e9 initial loss.
         distance = (rho_sq - self.particle_a ** 2) / (rho_sq + self.particle_a ** 2)
         return (f_poiseuille + self._taper(s, z) * (f_stokes + f_shear)
-            + wall * distance.square() * raw_out[:, 0:1])
+                + wall * distance * raw_out[:, 0:1])
+    
+    def _evaluate_reduced(self, sz: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Evaluate the network and $F$ from a single tensor `sz`.
 
+        CHANGED: the network inputs are derived from `sz`, so differentiating $F$ with
+        respect to `sz` includes every path through the learned correction.
+
+        Args:
+        - `sz`: Tensor `(n, 2)` with columns $(s, z)$ that is part of the autograd graph.
+
+        Returns:
+        - The tuple `(F, raw_out)` with shapes `(n, 1)` and `(n, 2)`.
+        """
+        net_in = torch.cat(
+            [sz[:, 0:1] / self.radius ** 2, (sz[:, 1:2] - self.particle_z) / self.radius], dim=1
+        )
+        raw_out = self.raw_network(net_in)
+        return self._reduced_stream_function(sz, raw_out), raw_out
+    
     def forward(self, coordinates: torch.Tensor) -> torch.Tensor:
         """Map `(r, z)` to `(u_r, u_z, p)`.
 
@@ -165,9 +193,7 @@ class StreamFunctionSphereFlow(nn.Module):
             r, z = coords[:, 0:1], coords[:, 1:2]
             s = r.square()
             sz = torch.cat([s, z], dim=1)
-            # CHANGED: local axial input (z - z_p)/R instead of z/L, so the sphere spans O(1) of the input range.
-            net_in = torch.cat([s / self.radius ** 2, (z - self.particle_z) / self.radius], dim=1)
-            raw_out = self.raw_network(net_in)
+            f_value, raw_out = self._evaluate_reduced(sz)  # CHANGED: one path from `sz` to `F`
             f_value = self._reduced_stream_function(sz, raw_out)
             (grad_f,) = torch.autograd.grad(
                 f_value, sz, grad_outputs=torch.ones_like(f_value), create_graph=True
@@ -179,7 +205,7 @@ class StreamFunctionSphereFlow(nn.Module):
                 torch.zeros_like(self.radius), (self.length - self.particle_z) / self.radius
             ]).unsqueeze(0)
             p_ref = self.raw_network(gauge_in)[:, 1:2]
-            p_base = -4.0 * self.amplitude * (z - self.length) / self.radius**2
+            p_base = -4.0 * self.amplitude * (z - self.length) / self.radius ** 2
             # NEW: Stokes pressure lifting, tapered like the velocity lifting.
             p_stokes = self._taper(s, z) * stokes_sphere_pressure(
                 s, z, self.particle_z, self.particle_a, self.particle_u - self.amplitude)
@@ -189,13 +215,13 @@ class StreamFunctionSphereFlow(nn.Module):
 
 
 def apply_stream_function_constraint(
-    network: nn.Module,
-    domain: Domain,
-    particle_axial_position: float,
-    particle_radius: float,
-    particle_axial_velocity: float = 0.0,
-    flow_amplitude: float | None = None,
-    taper_margin: float = 0.9,
+        network: nn.Module,
+        domain: Domain,
+        particle_axial_position: float,
+        particle_radius: float,
+        particle_axial_velocity: float = 0.0,
+        flow_amplitude: float | None = None,
+        taper_margin: float = 3.0,
 ) -> nn.Module:
     """Wrap a 2-input, 2-output MLP as a [`StreamFunctionSphereFlow`][magnetofluidics_pinn.networks.stream_function.StreamFunctionSphereFlow].
 
