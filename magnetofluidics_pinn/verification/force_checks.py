@@ -259,8 +259,6 @@ def cross_section_momentum_force(
     wall_points = torch.stack([torch.full_like(z_grid, channel_radius), z_grid], dim=1)
     _, sigma_zr = _stress_components(network, wall_points)
     wall_force = torch.trapezoid(sigma_zr.squeeze(1) * 2.0 * math.pi * channel_radius, z_grid)
-    f_downstream = section_force(z_downstream)
-    f_upstream = section_force(z_upstream)
     return (section_force(z_downstream) - section_force(z_upstream) + wall_force).item()
 
 
@@ -381,3 +379,41 @@ def residual_by_region(
         rows[name] = {"count": int(mask.sum()), "rms_r": rms[0], "rms_z": rms[1],
                       "rms_continuity": rms[2], "force_error_bound": bound}
     return pd.DataFrame.from_dict(rows, orient="index")
+
+
+def traction_profile(
+    network: FlowField,
+    center_z: float,
+    radius: float,
+    n_quadrature_points: int = 361,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> pd.DataFrame:
+    r"""Evaluate the axial traction $t_z(\theta)$ at every quadrature angle, for inspection.
+
+    For a translating sphere in Stokes flow the traction vector is uniform over the *whole*
+    surface, not just at the pole and equator: $t_z(\theta) = -\tfrac{3U}{2a}$ for every
+    $\theta$. Exposing the per-angle value directly — rather than only the quadrature-integrated
+    total — turns a sign error in the stress assembly into a visibly non-flat or antisymmetric
+    curve, instead of a single number that a cancelling bug can hide inside.
+
+    Args:
+    - `network`: Flow field mapping `(r, z)` to `(u_r, u_z, p)`.
+    - `center_z`, `radius`: Sphere center and radius.
+    - `n_quadrature_points`: Polar-angle nodes.
+    - `device`, `dtype`: Placement overrides for plain callables.
+
+    Returns:
+    - A `DataFrame` with columns `theta`, `r`, `z`, `sigma_zz`, `sigma_zr`, `t_z`.
+    """
+    resolved_device, resolved_dtype = _resolve_placement(network, device, dtype)
+    theta = torch.linspace(0.0, math.pi, n_quadrature_points, device=resolved_device, dtype=resolved_dtype)
+    coordinates = torch.stack([radius * torch.sin(theta), center_z + radius * torch.cos(theta)], dim=1)
+    sigma_zz, sigma_zr = _stress_components(network, coordinates)
+    t_z = sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(theta)
+    return pd.DataFrame({
+        "theta": theta.cpu().numpy(),
+        "r": coordinates[:, 0].cpu().numpy(), "z": coordinates[:, 1].cpu().numpy(),
+        "sigma_zz": sigma_zz.squeeze(1).cpu().numpy(), "sigma_zr": sigma_zr.squeeze(1).cpu().numpy(),
+        "t_z": t_z.cpu().numpy(),
+    })

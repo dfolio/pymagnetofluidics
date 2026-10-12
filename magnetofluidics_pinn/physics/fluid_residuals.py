@@ -243,12 +243,17 @@ def compute_flow_derivatives(
     )
 
 
+def _axis_threshold(radius: torch.Tensor, eps: float | None) -> float:   # CHANGED (new helper)
+    """Axis switch radius: sqrt(machine epsilon) of the dtype unless given."""
+    return torch.finfo(radius.dtype).eps ** 0.5 if eps is None else eps
+
+
 # NEW: Shared axisymmetric vector Laplacian operator for cylindrical flow fields.
 def axisymmetric_vector_laplacian(
         derivs: FlowDerivatives,
         radius: torch.Tensor,
         residual_form: Literal["standard", "r_weighted"] = "standard",
-        axis_regularization_eps: float = 1.0e-7,
+        axis_regularization_eps: float| None = 1.0e-7,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""Evaluate the axisymmetric vector Laplacian $\nabla^2 \mathbf{u} = (\nabla_r^2 \mathbf{u}, \nabla_z^2 \mathbf{u})$.
 
@@ -288,10 +293,11 @@ def axisymmetric_vector_laplacian(
             "ensure compute_second_order=True in compute_flow_derivatives."
         )
     
+    axis_threshold = _axis_threshold(radius, axis_regularization_eps)  # CHANGED (float32 -> 3.5e-4, float64 -> 1.5e-8)
     if residual_form == "standard":
-        is_axis = radius < axis_regularization_eps
+        is_axis = radius < axis_threshold
         # Regularize divisor to avoid NaN in backward computation graph
-        safe_radius = torch.where(is_axis, torch.full_like(radius, axis_regularization_eps), radius)
+        safe_radius = torch.where(is_axis, torch.full_like(radius, axis_threshold), radius)
         
         # Standard off-axis computation
         lap_r_standard = (
