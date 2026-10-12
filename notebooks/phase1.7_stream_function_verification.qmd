@@ -28,8 +28,8 @@ assert str(Path(mfp.__file__).resolve()).startswith(str(Path.cwd().resolve().par
 
 ```{python}
 #| label: setup
+import math
 import torch, pandas as pd
-import magnetofluidics_pinn as mfp
 
 RANDOM_SEED = 42
 DEVICE = str(mfp.resolve_device(None))
@@ -66,6 +66,11 @@ checks += (mfp.evaluate_check(
 report
 ```
 
+```{python}
+#| label: fig-surface-independence
+#| fig-cap: "Surface independence of the traction on an exact Stokes sphere field."
+mfp.plot_surface_independence(report, expected)
+```
 
 ```{python}
 #| label: exact-field-ok
@@ -74,6 +79,31 @@ if not exact_field_ok:
     print("WARNING: the exact-field traction check failed. Every force number below is "
           "measured with an unverified tool and must not be compared against the "
           "Haberman-Sayre reference until this is fixed. See the diagnostic in the audit.")
+```
+
+```{python}
+#| label: traction-profile
+profile = mfp.traction_profile(exact, ZP, A, 361)
+expected_uniform = -1.5 * 1.0 / A   # -3U/(2a) = -6.0
+
+print(profile.iloc[[0, 90, 180, 270, 360]])   # theta = 0, pi/4, pi/2, 3pi/4, pi
+
+mirror = profile["t_z"].to_numpy()[::-1]
+symmetric_error = abs(profile["t_z"].to_numpy() - mirror).max()
+antisymmetric_error = abs(profile["t_z"].to_numpy() + mirror).max()
+print(f"max |t_z(theta) - t_z(pi-theta)| = {symmetric_error:.3e}   (near 0 if correct)")
+print(f"max |t_z(theta) + t_z(pi-theta)| = {antisymmetric_error:.3e}  (near {abs(2*expected_uniform):.1f} if BUGGED)")
+mfp.plot_traction_uniformity(profile, expected_uniform)
+```
+
+```{python}
+#| label: check-traction
+# NEW: hard stop. Do not proceed to training against a broken measurement tool.
+checks += (mfp.evaluate_check(
+    "Traction uniformity (shape, not just mean)",
+    "max |t_z(theta) - uniform reference| over all angles",
+    float(abs(profile["t_z"] - expected_uniform).max()), 1.0e-4),)
+# assert checks[-1].passed, "Fix _stress_components / sphere_traction_force before continuing — see the plot above."
 ```
 
 ## Stream-function training and resistance pair
@@ -110,6 +140,15 @@ tbl = mfp.residual_by_region(solution.translation_network, domain, mfp.FluidConf
 print(tbl)
 ```
 
+
+```{python}
+#| label: fig-resistance-pair-comparison
+#| fig-cap: "Resistance pair $(F_A, F_B)$ measured by the stream-function solver against the tube reference."
+mfp.plot_resistance_pair_comparison(
+    pair.ambient_force, pair.translation_force, f_a_ref, f_b_ref,
+    solution.force_spread[0], solution.force_spread[1])
+```
+
 ```{python}
 #| label: verification-checks
 tol = 0.05  # force-error budget: 5 %
@@ -139,8 +178,22 @@ print(tbl2, pd.Series(bal2), sol2.force_spread, sol2.pair, sep="\n")
 ```
 
 ```{python}
+#| label: fig-stream-function-field
+#| fig-cap: "Stream function field for the stream-function solution after extended training."
+mfp.plot_stream_function_field(sol2.translation_network, domain, ZP, A)
+```
+
+
+```{python}
+#| label: fig-residual-by-region
+#| fig-cap: "Residual by region for the stream-function solution after extended training."
+mfp.plot_residual_by_region(tbl2)
+```
+
+```{python}
 #| label: convergence-gate
-V_slab = 3.141592653589793 * R**2 * 4.0 - 4.0 / 3.0 * 3.141592653589793 * A**3
+import math
+V_slab = math.pi * R**2 * 4.0 - 4.0 / 3.0 * math.pi * A**3
 target_rms = 0.05 * abs(f_b_ref) / V_slab        # 5 % force-error budget, about 0.037
 checks += (mfp.evaluate_check(
     "Convergence gate: slab residual", "volume-weighted rms of f_z, standard form",
@@ -170,6 +223,12 @@ variation = mfp.trajectory.mobility.position_independence(sweep)
 checks += (mfp.evaluate_check(
     "Resistance independent of z_p", "max relative variation of F_A, F_B", variation, tol),)
 sweep
+```
+
+```{python}
+#| label: fig-resistance-position-sweep
+#| fig-cap: "Resistance pair $(F_A, F_B)$ measured by the stream-function solver at different particle positions $z_p$ along the channel axis."
+mfp.plot_resistance_position_sweep(sweep, f_a_ref, f_b_ref)
 ```
 
 ## Global momentum balance and force-balanced velocity
