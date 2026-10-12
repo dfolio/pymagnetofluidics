@@ -33,6 +33,7 @@ import copy
 import time
 from dataclasses import dataclass
 from typing import Callable, Literal
+import math
 
 import torch
 from torch import nn
@@ -1068,6 +1069,7 @@ def _run_lbfgs_phase(
         max_iter=training_config.lbfgs_iterations_per_round,
         history_size=100,
         line_search_fn="strong_wolfe",
+        tolerance_grad=1.0e-12, tolerance_change=1.0e-14,          # CHANGED: rounds 2-6 were no-ops
     )
     
     component_names = _component_names(coupling_config)
@@ -1089,11 +1091,16 @@ def _run_lbfgs_phase(
         return components.total
     
     round_width = len(str(training_config.lbfgs_rounds))
+    previous = math.inf                                              # CHANGED
     for round_index in range(training_config.lbfgs_rounds):
         optimizer.step(closure)
         if training_config.verbose:
             prefix = f"L-BFGS round {round_index + 1:{round_width}d}/{training_config.lbfgs_rounds}"
             last_values = {name: accumulator[name][-1] for name in ("total",) + component_names}
             print(_format_progress_line(prefix, last_values))
-    
+        current = accumulator["total"][-1]
+        if previous - current < 1.0e-6 * abs(previous):  # CHANGED: stop when a round gains nothing
+            break
+        previous = current
+        
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})
