@@ -58,7 +58,7 @@ def build_mlp(
         raise ValueError(f"Unsupported activation: {activation!r}.")
     
     resolved_device = resolve_device(training_config.device)
-    set_random_seed(training_config.random_seed)
+    # set_random_seed(training_config.random_seed)
     activation_cls = _ACTIVATION_LAYERS[activation]
     
     layers: list[nn.Module] = []
@@ -78,4 +78,4 @@ def build_mlp(
             nn.init.xavier_normal_(module.weight)
             nn.init.zeros_(module.bias)
     
-    return network.to(resolved_device)
+    return network.to(resolved_device, dtype=training_config.torch_dtype)
