@@ -28,7 +28,7 @@ from magnetofluidics_pinn.physics.hydrodynamic_drag import (
 from magnetofluidics_pinn.types import ParticleState
 
 
-def stokes_sphere_field(
+def stokes_sphere_field_polar(
         coordinates: torch.Tensor,
         particle_radius: float,
         axial_center: float,
@@ -39,10 +39,10 @@ def stokes_sphere_field(
     With $\rho$ the distance to the sphere centre, $s = a/\rho$,
     $\cos\theta = (z - z_c)/\rho$, $\sin\theta = r/\rho$ and $\mu = 1$:
 
-    $$ u_r = \tfrac{3}{4} U s \sin\theta\cos\theta\,(1 - s^2), \qquad
+    $$u_r = \tfrac{3}{4} U s \sin\theta\cos\theta\,(1 - s^2), \qquad
        u_z = U\left[\tfrac{3}{4} s (1 + \cos^2\theta)
              + \tfrac{1}{4} s^3 (1 - 3\cos^2\theta)\right], \qquad
-       p = \tfrac{3}{2} U \frac{s \cos\theta}{\rho}. $$
+       p = \tfrac{3}{2} U \frac{s \cos\theta}{\rho}.$$
 
     The fluid is at rest at infinity. The field satisfies
     $\mathbf{u} = (0, U)$ on $\rho = a$, and the force the fluid exerts on
