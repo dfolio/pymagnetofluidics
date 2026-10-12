@@ -13,9 +13,10 @@ from magnetofluidics_pinn.trajectory.two_way_coupling import (
     solve_force_balanced_velocity as solve_force_balanced_velocity,
     advance_particle_two_way as advance_particle_two_way,
     make_dipole_applied_force_fn as make_dipole_applied_force_fn,
-    force_balanced_velocity as force_balanced_velocity,
+    affine_force_balance as affine_force_balance,
     ResistanceResult as ResistanceResult,
     solve_resistance_problems as solve_resistance_problems,
+    solve_resistance_problems_stream as solve_resistance_problems_stream,  # NEW
 )
 from magnetofluidics_pinn.trajectory.mobility import (  # NEW
     ResistancePair as ResistancePair,
@@ -30,13 +31,13 @@ __all__ = [
     "solve_force_balanced_velocity",
     "advance_particle_two_way",
     "make_dipole_applied_force_fn",
-    "force_balanced_velocity",
+    "affine_force_balance",
     "ResistanceResult",
     "solve_resistance_problems",
     "ResistancePair",
     "advance_particle_resistance",
-    "force_balanced_velocity",
     "solve_resistance_pair",
+    "solve_resistance_problems_stream",
     "resistance_position_sweep",
     "position_independence",
 ]

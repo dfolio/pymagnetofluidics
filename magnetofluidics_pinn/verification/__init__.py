@@ -51,14 +51,24 @@ from magnetofluidics_pinn.verification.force_checks import (  # NEW
     sphere_traction_force as sphere_traction_force,
     surface_independence_report as surface_independence_report,
     residual_by_region as residual_by_region,
+    traction_profile as traction_profile,
 )
 
 from magnetofluidics_pinn.verification.benchmarks import (
-    stokes_sphere_field as stokes_sphere_field,
+    stokes_sphere_field_polar as stokes_sphere_field_polar,
     haberman_sayre_factor as haberman_sayre_factor,
     reference_resistances as reference_resistances,
     shell_force_profile as shell_force_profile,
     shell_force_spread as shell_force_spread,
+)
+from magnetofluidics_pinn.verification.physical_gates import (
+    divergence_probe as divergence_probe,
+    axis_pressure_jump as axis_pressure_jump,
+    pressure_drop_gate as pressure_drop_gate,
+    free_velocity_bounds_check as free_velocity_bounds_check,
+    generalization_gate as generalization_gate,
+    reference_tolerance as reference_tolerance,
+    momentum_balance_gate as momentum_balance_gate,
 )
 __all__ = [
     # Analytical reference
@@ -97,10 +107,19 @@ __all__ = [
     "sphere_traction_force",
     "surface_independence_report",
     "residual_by_region",
+    "traction_profile",
     # Benchmarks
-    "stokes_sphere_field",
+    "stokes_sphere_field_polar",
     "haberman_sayre_factor",
     "reference_resistances",
     "shell_force_profile",
     "shell_force_spread",
+    # Physical gates
+    "divergence_probe",
+    "axis_pressure_jump",
+    "pressure_drop_gate",
+    "free_velocity_bounds_check",
+    "generalization_gate",
+    "reference_tolerance",
+    "momentum_balance_gate",
 ]

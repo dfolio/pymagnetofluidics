@@ -91,6 +91,9 @@ from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force  # NEW
 from magnetofluidics_pinn.training.trainer import TrainingHistory, train
 from magnetofluidics_pinn.types import Domain, MagneticFieldSample, ParticleState
 from magnetofluidics_pinn.verification.benchmarks import shell_force_profile, shell_force_spread
+from magnetofluidics_pinn.networks.mlp import build_mlp  # NEW
+from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint  # NEW
+from magnetofluidics_pinn.training.stream_trainer import StreamLossHistory, train_stream_function_flow
 
 # CHANGED: ambient centreline velocity of the "fixed sphere in Poiseuille flow" problem.
 _AMBIENT_PEAK_VELOCITY = 1.0
@@ -453,7 +456,7 @@ def make_dipole_applied_force_fn(  # NEW
     return applied_force_fn
 
 
-def force_balanced_velocity(
+def affine_force_balance(
         force_fixed: float, force_unit_translation: float, applied_force_z: float = 0.0,
 ) -> float:
     r"""Solve the linear force balance $F_\text{app} + F_0 + U F_1 = 0$ for $U$.
@@ -506,12 +509,12 @@ class ResistanceResult:
     shell_spread_unit: float
     network_fixed: nn.Module
     network_unit: nn.Module
-    history_fixed: TrainingHistory
-    history_unit: TrainingHistory
+    history_fixed: TrainingHistory | StreamLossHistory  # CHANGED: the stream solver records StreamLossHistory
+    history_unit: TrainingHistory | StreamLossHistory  # CHANGED
     
     def balanced_velocity(self, applied_force_z: float = 0.0) -> float:
         """Force-balanced velocity for a given applied force; see `force_balanced_velocity`."""
-        return force_balanced_velocity(self.force_fixed, self.force_unit_translation, applied_force_z)
+        return affine_force_balance(self.force_fixed, self.force_unit_translation, applied_force_z)
 
 
 def solve_resistance_problems(
@@ -521,11 +524,11 @@ def solve_resistance_problems(
         particle_config: ParticleConfig,
         particle_state: ParticleState,
         training_config: TrainingConfig,
-        n_surface_points: int = 200,
+        hidden_layers: tuple[int, ...] = (64, 64, 64, 64),
+        activation: str = "tanh",
+        taper_margin: float = 0.9,
         n_quadrature_points: int = 181,
-        particle_loss_weight: float = 100.0,
-        core_strain_weight: float = 1.0,
-        shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5),
+        shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
 ) -> ResistanceResult:
     r"""Train the two linear problems that replace the `brentq` retraining loop.
 
@@ -587,4 +590,128 @@ def solve_resistance_problems(
         return force, spread, trained, history
     
     (f_fixed, s_fixed, net_fixed, hist_fixed), (f_unit, s_unit, net_unit, hist_unit) = map(solve_one, problems)
+    return ResistanceResult(f_fixed, f_unit, s_fixed, s_unit, net_fixed, net_unit, hist_fixed, hist_unit)
+
+
+def solve_resistance_problems_stream(
+        domain: Domain,
+        fluid_config: FluidConfig,
+        particle_config: ParticleConfig,
+        particle_state: ParticleState,
+        training_config: TrainingConfig,
+        hidden_layers: tuple[int, ...] = (64, 64, 64, 64),
+        activation: str = "tanh",
+        taper_margin: float = 0.9,
+        n_quadrature_points: int = 181,
+        shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
+        shell_fraction: float = 0.25,  # NEW: interior collocation shell (library patch L7)
+        shell_factor: float = 2.5,  # NEW: not to be confused with `shell_factors`, the traction control spheres
+) -> ResistanceResult:
+    r"""Train the two resistance problems with the exact-constraint stream-function ansatz.
+
+    Stokes flow is linear in the boundary data, so the axial force on an
+    on-axis sphere is affine in its velocity, $F(U_p) = F_0 + U_p\,F_1$. This
+    function obtains both coefficients with the stream-function formulation
+    ([`StreamFunctionSphereFlow`][magnetofluidics_pinn.networks.stream_function.StreamFunctionSphereFlow]),
+    which enforces incompressibility, the channel wall, the symmetry axis, the
+    rigid-body sphere condition, and the far-field profile identically. Only
+    the Stokes momentum residual, the inlet profile, and the outlet pressure
+    are learned, so the particle boundary never competes with a soft loss term:
+
+    1. *Fixed sphere*: $U_p = 0$ in the ambient Poiseuille flow of peak
+       `domain.u_max`, giving $F_0$.
+    2. *Unit translation*: $U_p = 1$ in fluid at rest, giving $F_1 < 0$.
+
+    Each reported force is the mean of the traction integral over the
+    enclosing shells `shell_factors` (the sphere surface itself when `1.0` is
+    included, plus control spheres). For an exact Stokes field the integral is
+    shell-independent, so the mean is unbiased; for a trained field it damps
+    surface-local stress errors, and the relative shell spread returned in
+    `shell_spread_fixed` and `shell_spread_unit` quantifies the violation of
+    shell invariance as an a-posteriori error bar.
+
+    Args:
+    - `domain`: Nondimensional channel; `domain.u_max` must equal 1, matching
+      the peak velocity the reference formulas assume.
+    - `fluid_config`: Fluid configuration with `regime == "stokes"`.
+    - `particle_config`: Particle whose `radius` $a$ defines the sphere and
+      every shell.
+    - `particle_state`: On-axis state supplying the axial centre $z_p$.
+    - `training_config`: Budget, device, dtype, and `residual_form` for both
+      trainings, honored end to end by
+      [`train_stream_function_flow`][magnetofluidics_pinn.training.stream_trainer.train_stream_function_flow].
+    - `hidden_layers`, `activation`: Architecture of the raw 2-input,
+      2-output MLP; the wrapper and the trainer are built internally, so the
+      network's `flow_amplitude` always matches `inlet_peak_velocity`.
+    - `taper_margin`: Taper support of the stream-function wrapper, in $(0, 1)$.
+    - `n_quadrature_points`: Polar nodes of each traction integral.
+    - `shell_factors`: Enclosing-sphere radii as multiples of $a$; every entry
+      must be at least 1, and the largest shell must fit strictly inside the
+      channel.
+    - `shell_fraction`, `shell_factor`: Interior collocation distribution forwarded
+      to `train_stream_function_flow` (library patch L7). Despite the name
+      similarity, these control the *sampling* shell around the sphere, not the
+      traction `shell_factors`.
+
+    Returns:
+    - A `ResistanceResult`; `balanced_velocity` then yields every
+      force-balanced velocity analytically, with no further training.
+
+    Raises:
+    - `ValueError`: If `domain.u_max` is not 1, if `shell_factors` is empty or
+      contains a value below 1, or if the largest shell does not fit strictly
+      inside the channel.
+    """
+    if not math.isclose(domain.u_max, _AMBIENT_PEAK_VELOCITY, rel_tol=1.0e-9):
+        raise ValueError(f"domain.u_max must equal {_AMBIENT_PEAK_VELOCITY}; got {domain.u_max!r}.")
+    if not shell_factors:
+        raise ValueError("shell_factors must contain at least one entry.")
+    if any(factor < 1.0 for factor in shell_factors):
+        raise ValueError(f"shell_factors must all be >= 1; got {shell_factors!r}.")
+    if any(factor < 1.0 for factor in shell_factors):
+        raise ValueError(f"shell_factors must all be >= 1; got {shell_factors!r}.")
+    if not (0.0 <= shell_fraction < 1.0):  # NEW
+        raise ValueError(f"shell_fraction must lie in [0, 1); got {shell_fraction!r}.")
+    if shell_factor <= 1.0:  # NEW
+        raise ValueError(f"shell_factor must exceed 1; got {shell_factor!r}.")
+    particle_axial_position = float(particle_state.position[1].item())
+    largest_shell_radius = max(shell_factors) * particle_config.radius
+    # Guard that shell_force_profile leaves to the caller: a truncated shell
+    # would silently bias the mean force toward an open-surface integral.
+    if largest_shell_radius >= min(
+            domain.radius, particle_axial_position, domain.length - particle_axial_position):
+        raise ValueError(
+            f"The largest shell of radius {largest_shell_radius!r} does not fit strictly "
+            "inside the channel; use smaller shell_factors."
+        )
+    problems = (  # (flow_amplitude, particle_axial_velocity)
+        (_AMBIENT_PEAK_VELOCITY, 0.0),
+        (0.0, 1.0),
+    )
+
+    def solve_one(problem: tuple[float, float]) -> tuple[float, float, nn.Module, StreamLossHistory]:
+        flow_amplitude, velocity = problem
+        raw_network = build_mlp(2, 2, hidden_layers, training_config=training_config,
+                                 activation=activation)
+        wrapped = apply_stream_function_constraint(
+            raw_network, domain, particle_axial_position, particle_config.radius,
+            particle_axial_velocity=velocity, flow_amplitude=flow_amplitude,
+            taper_margin=taper_margin,
+        )
+        trained, history = train_stream_function_flow(
+            wrapped, domain, fluid_config, training_config,
+            particle_axial_position, particle_config.radius,
+            inlet_peak_velocity=flow_amplitude,
+            shell_fraction=shell_fraction, shell_factor=shell_factor,  # NEW
+        )
+        trained.eval()
+        profile = shell_force_profile(
+            trained, particle_config, particle_state, shell_factors, n_quadrature_points
+        )
+        force = float(profile["force"].mean())
+        return force, shell_force_spread(profile), trained, history
+
+    (f_fixed, s_fixed, net_fixed, hist_fixed), (f_unit, s_unit, net_unit, hist_unit) = map(
+        solve_one, problems
+    )
     return ResistanceResult(f_fixed, f_unit, s_fixed, s_unit, net_fixed, net_unit, hist_fixed, hist_unit)
