@@ -9,9 +9,10 @@ from __future__ import annotations
 
 from typing import Any
 
+import math
 import matplotlib.figure
 import matplotlib.patches as patches
-# REMOVED: import matplotlib.pyplot as plt  <-- Avoid global state machine side effects
+import pandas as pd
 import numpy as np
 import torch
 from torch import nn
@@ -38,6 +39,31 @@ DEFAULT_GRID_ALPHA: float = 0.5
 DEFAULT_PARTICLE_FACECOLOR: str = "darkgrey"
 DEFAULT_PARTICLE_EDGECOLOR: str = "black"
 DEFAULT_STATION_COLOR: str = "crimson"
+
+
+def _uniform_plot_axis(extent: float, n: int) -> np.ndarray:
+    """Build a plain-NumPy, exactly-uniform axis for a `streamplot`/`pcolormesh` call.
+
+    `torch.linspace` on a CUDA device is only guaranteed uniform up to float32 rounding
+    (its kernel evaluates each point independently rather than by repeated addition), and
+    `Axes.streamplot` rejects a grid whose spacing isn't *exactly* uniform. Building the
+    plotted axis separately, on CPU with NumPy, sidesteps that entirely — the network is
+    still queried on whatever device/dtype it actually lives on; only the coordinate
+    array handed to matplotlib changes.
+
+    Args:
+    - `extent`: Upper bound of the axis; the lower bound is always `0.0`.
+    - `n`: Number of points.
+
+    Returns:
+    - A `(n,)` NumPy array, uniformly spaced to machine precision.
+
+    Raises:
+    - `ValueError`: If `n` is smaller than 2.
+    """
+    if n < 2:
+        raise ValueError(f"n must be at least 2; got {n!r}.")
+    return np.linspace(0.0, extent, n)
 
 
 def plot_streamlines(
@@ -85,6 +111,12 @@ def plot_streamlines(
     velocity_r = prediction[:, 0].reshape(resolution, resolution).cpu().numpy()
     velocity_z = prediction[:, 1].reshape(resolution, resolution).cpu().numpy()
     
+    # CHANGED: plot against a plain-NumPy axis instead of the converted device tensor
+    # (`axial_axis.cpu().numpy()`), which can fail streamplot's exact-uniform-spacing
+    # check when `axial_axis` was created with `device="cuda"`.
+    radial_axis_np = _uniform_plot_axis(domain.radius, resolution)
+    axial_axis_np = _uniform_plot_axis(domain.length, resolution)
+    
     # CHANGED: Use pure OO API instead of plt.subplots() to prevent global side-effects
     figure = matplotlib.figure.Figure(figsize=(8.0, 4.0))
     axes = figure.subplots()
@@ -96,8 +128,8 @@ def plot_streamlines(
     }
     effective_stream_opts = {**default_stream_opts, **streamplot_kwargs}
     axes.streamplot(
-        axial_axis.cpu().numpy(),
-        radial_axis.cpu().numpy(),
+        axial_axis_np,
+        radial_axis_np,
         velocity_z,
         velocity_r,
         **effective_stream_opts
@@ -615,8 +647,8 @@ def plot_residual_heatmap(
             f"got {tuple(residual_magnitude.shape)}."
         )
     residual_magnitude=residual_magnitude.detach().cpu().numpy()
-    v_min = np.min(residual_magnitude)
-    v_max = np.max(residual_magnitude)
+    v_min = np.nanmin(residual_magnitude)
+    v_max = np.nanmax(residual_magnitude)
     figure = matplotlib.figure.Figure(figsize=(7.0, 3.5))
     axes = figure.subplots()
     default_mesh_opts: dict[str, Any] = {
@@ -823,8 +855,11 @@ def plot_particle_flow_field(
     else:
         v_min, v_max = 0.0, 1.0
     
-    z_np = z_t.detach().cpu().numpy()
-    r_np = r_t.detach().cpu().numpy()
+    # CHANGED: z_np / r_np are now a plain-NumPy axis, not a converted device tensor
+    # (`z_t.detach().cpu().numpy()`), for the same reason as `plot_streamlines`. `rr`/`zz`
+    # (the torch grid used to query the network above) are unaffected.
+    z_np = _uniform_plot_axis(domain.length, resolution_z)
+    r_np = _uniform_plot_axis(domain.radius, resolution_r)
     
     # Dynamic figure dimensions maintaining physical proportions
     fig_width = 10.0
@@ -865,10 +900,7 @@ def plot_particle_flow_field(
         if np.nanmax(np.hypot(u_z_np, u_r_np)) > 1e-6:
             try:
                 axes.streamplot(
-                    z_np,
-                    r_np,
-                    u_z_np,
-                    u_r_np,
+                    z_np, r_np, u_z_np, u_r_np,
                     **effective_stream_opts
                 )
             except Exception:
@@ -998,5 +1030,215 @@ def plot_particle_residual_heatmap(
     axes.set_ylim(0.0, domain_radius)
     
     axes.legend(loc="upper right", fontsize=8, framealpha=0.9)
+    figure.tight_layout()
+    return figure
+
+
+def plot_traction_uniformity(
+    profile: pd.DataFrame, expected_value: float, **plot_kwargs: Any,
+) -> matplotlib.figure.Figure:
+    r"""Plot the per-angle axial traction $t_z(\theta)$ against its theoretical uniform value.
+
+    For a translating sphere in unbounded Stokes flow, $t_z(\theta)$ is exactly constant over
+    the whole surface. A curve that is not flat — especially one crossing zero near
+    $\theta=\pi/2$ instead of sitting on the reference line — is diagnostic of a sign error in
+    the stress assembly, independent of whatever field is being tested.
+
+    Args:
+    - `profile`: Output of `verification.force_checks.traction_profile`.
+    - `expected_value`: The theoretical uniform value, $-\tfrac{3U}{2a}$.
+    - `**plot_kwargs`: Forwarded to `Axes.plot` for the computed curve.
+
+    Returns:
+    - A `matplotlib.figure.Figure`.
+    """
+    figure = matplotlib.figure.Figure(figsize=(6.5, 4.0))
+    axes = figure.subplots()
+    default_opts: dict[str, Any] = {"color": "tab:blue", "linewidth": 1.6, "label": r"computed $t_z(\theta)$"}
+    axes.plot(profile["theta"], profile["t_z"], **{**default_opts, **plot_kwargs})
+    axes.axhline(expected_value, color="black", linestyle="--", linewidth=1.2,
+                 label=f"uniform reference ({expected_value:.3f})")
+    axes.axvline(math.pi / 2, color="gray", linestyle=":", linewidth=1.0, label=r"$\theta=\pi/2$")
+    axes.set_xlabel(r"Polar angle $\theta$")
+    axes.set_ylabel(r"Axial traction $t_z(\theta)$")
+    axes.set_title("Surface traction uniformity check")
+    axes.legend(fontsize=8)
+    axes.grid(True, linestyle=":", alpha=0.5)
+    figure.tight_layout()
+    return figure
+
+
+def plot_resistance_pair_comparison(
+    pair_a: float, pair_b: float, ref_a: float, ref_b: float,
+    spread_a: float = 0.0, spread_b: float = 0.0,
+) -> matplotlib.figure.Figure:
+    r"""Bar chart comparing the trained resistance pair $(F_A, F_B)$ against the tube reference.
+
+    Args:
+    - `pair_a`, `pair_b`: Trained $F_A$ (fixed sphere) and $F_B$ (unit translation).
+    - `ref_a`, `ref_b`: Reference values, e.g. from `tube_resistance_reference`.
+    - `spread_a`, `spread_b`: Relative surface-independence spread, shown as an error bar
+      fraction of $|F_A|$, $|F_B|$ — a measure of self-consistency, not of accuracy.
+
+    Returns:
+    - A `matplotlib.figure.Figure`.
+    """
+    figure = matplotlib.figure.Figure(figsize=(6.0, 4.0))
+    axes = figure.subplots()
+    labels = ["$F_A$ (fixed)", "$F_B$ (translation)"]
+    positions = np.arange(2)
+    width = 0.35
+    trained = [pair_a, pair_b]
+    reference = [ref_a, ref_b]
+    errors = [abs(pair_a) * spread_a, abs(pair_b) * spread_b]
+    axes.bar(positions - width / 2, trained, width, yerr=errors, capsize=4,
+             color="tab:blue", label="Trained (stream-function)")
+    axes.bar(positions + width / 2, reference, width, color="tab:orange", label="Tube reference")
+    axes.axhline(0.0, color="black", linewidth=0.75)
+    axes.set_xticks(positions)
+    axes.set_xticklabels(labels)
+    axes.set_ylabel("Force (dimensionless)")
+    axes.set_title("Resistance pair: trained vs. tube reference")
+    axes.legend(fontsize=8)
+    axes.grid(True, axis="y", linestyle=":", alpha=0.5)
+    figure.tight_layout()
+    return figure
+
+
+def plot_resistance_position_sweep(sweep: pd.DataFrame, ref_a: float, ref_b: float) -> matplotlib.figure.Figure:
+    r"""Plot $F_A(z_p)$ and $F_B(z_p)$ from a position sweep, against their reference values.
+
+    Args:
+    - `sweep`: Output of `trajectory.mobility.resistance_position_sweep`.
+    - `ref_a`, `ref_b`: Reference values, e.g. from `tube_resistance_reference`.
+
+    Returns:
+    - A `matplotlib.figure.Figure` with two panels.
+    """
+    figure = matplotlib.figure.Figure(figsize=(9.0, 3.6))
+    axes = figure.subplots(1, 2)
+    for ax, column, ref, title in zip(axes, ("F_A", "F_B"), (ref_a, ref_b), ("$F_A$", "$F_B$")):
+        ax.plot(sweep["z_p"], sweep[column], "o-", color="tab:blue", label="trained")
+        ax.axhline(ref, color="black", linestyle="--", linewidth=1.2, label="reference")
+        ax.set_xlabel("$z_p$")
+        ax.set_ylabel(title)
+        ax.set_title(f"{title} vs. axial position")
+        ax.legend(fontsize=8)
+        ax.grid(True, linestyle=":", alpha=0.5)
+    figure.tight_layout()
+    return figure
+
+
+def plot_residual_by_region(table: pd.DataFrame) -> matplotlib.figure.Figure:
+    r"""Bar chart of the volume-weighted RMS residual, by spatial region.
+
+    Args:
+    - `table`: Output of `verification.force_checks.residual_by_region`.
+
+    Returns:
+    - A `matplotlib.figure.Figure`.
+    """
+    figure = matplotlib.figure.Figure(figsize=(6.5, 4.0))
+    axes = figure.subplots()
+    regions = table.index.tolist()
+    positions = np.arange(len(regions))
+    width = 0.25
+    axes.bar(positions - width, table["rms_r"], width, label=r"$f_r$")
+    axes.bar(positions, table["rms_z"], width, label=r"$f_z$")
+    axes.bar(positions + width, table["rms_continuity"], width, label="continuity")
+    axes.set_yscale("log")
+    axes.set_xticks(positions)
+    axes.set_xticklabels(regions)
+    axes.set_ylabel("Volume-weighted RMS residual (log scale)")
+    axes.set_title("Held-out Stokes residual, by region")
+    axes.legend(fontsize=8)
+    axes.grid(True, axis="y", linestyle=":", alpha=0.5)
+    figure.tight_layout()
+    return figure
+
+
+def plot_surface_independence(report: pd.DataFrame, expected: float | None = None) -> matplotlib.figure.Figure:
+    r"""Plot the traction force against control-sphere radius, from `surface_independence_report`.
+
+    Args:
+    - `report`: Output of `verification.force_checks.surface_independence_report`.
+    - `expected`: Optional theoretical value to draw as a reference line.
+
+    Returns:
+    - A `matplotlib.figure.Figure`.
+    """
+    figure = matplotlib.figure.Figure(figsize=(6.0, 3.6))
+    axes = figure.subplots()
+    axes.plot(report["radius"], report["force"], "o-", color="tab:blue", label="control-sphere force")
+    if expected is not None:
+        axes.axhline(expected, color="black", linestyle="--", linewidth=1.2, label="theoretical")
+    axes.set_xlabel("Control-sphere radius")
+    axes.set_ylabel("$F_z$")
+    axes.set_title("Surface independence of the traction integral")
+    axes.legend(fontsize=8)
+    axes.grid(True, linestyle=":", alpha=0.5)
+    figure.tight_layout()
+    return figure
+
+
+def plot_stream_function_field(
+    network: nn.Module, domain: Domain, particle_axial_position: float, particle_radius: float,
+    resolution_r: int = 150, resolution_z: int = 300, cmap: str = DEFAULT_COLORMAP,
+) -> matplotlib.figure.Figure:
+    r"""Plot velocity magnitude and streamlines around the sphere for a stream-function network.
+
+    Unlike `plot_particle_flow_field` (built for the older immersed-core model, with its
+    coordinate-convention auto-detection), this assumes the stream-function network's fixed,
+    known `(r, z) -> (u_r, u_z, p)` convention directly — no guessing needed.
+
+    Args:
+    - `network`: A `StreamFunctionSphereFlow`-wrapped network.
+    - `domain`: Nondimensional channel geometry.
+    - `particle_axial_position`, `particle_radius`: Sphere center and radius.
+    - `resolution_r`, `resolution_z`: Grid resolution.
+    - `cmap`: Colormap for the velocity-magnitude heatmap.
+
+    Returns:
+    - A `matplotlib.figure.Figure`.
+
+    Raises:
+    - `ValueError`: If `resolution_r` or `resolution_z` is not strictly positive.
+    """
+    if resolution_r <= 0 or resolution_z <= 0:
+        raise ValueError("resolution_r and resolution_z must be strictly positive.")
+    device = resolve_module_device(network)
+    dtype = resolve_module_dtype(network)
+    r_grid = torch.linspace(0.0, domain.radius, resolution_r, device=device, dtype=dtype)
+    z_grid = torch.linspace(0.0, domain.length, resolution_z, device=device, dtype=dtype)
+    rr, zz = torch.meshgrid(r_grid, z_grid, indexing="ij")
+    with torch.no_grad():
+        prediction = network(torch.stack([rr.reshape(-1), zz.reshape(-1)], dim=1)).reshape(resolution_r, resolution_z, 3)
+    u_r, u_z = prediction[..., 0], prediction[..., 1]
+    speed = torch.hypot(u_r, u_z)
+    inside = (zz - particle_axial_position).square() + rr.square() < particle_radius**2
+    speed_masked = np.ma.array(speed.cpu().numpy(), mask=inside.cpu().numpy())
+    
+    # CHANGED: plain-NumPy axes for plotting, not the device-origin r_grid/z_grid tensors —
+    # see `_uniform_plot_axis`'s docstring for why `streamplot` needs this.
+    z_axis_np = _uniform_plot_axis(domain.length, resolution_z)
+    r_axis_np = _uniform_plot_axis(domain.radius, resolution_r)
+    
+    figure = matplotlib.figure.Figure(figsize=(9.0, 3.2))
+    axes = figure.subplots()
+    mesh = axes.pcolormesh(z_axis_np, r_axis_np, speed_masked,
+                           shading="auto", cmap=cmap)
+    figure.colorbar(mesh, ax=axes, label=r"$|\mathbf{u}^*|$")
+    u_z_np, u_r_np = u_z.cpu().numpy().copy(), u_r.cpu().numpy().copy()
+    u_z_np[inside.cpu().numpy()] = np.nan
+    u_r_np[inside.cpu().numpy()] = np.nan
+    axes.streamplot(z_axis_np, r_axis_np, u_z_np, u_r_np,
+                     density=DEFAULT_STREAMLINE_DENSITY, color=DEFAULT_PARTICLE_STREAMLINE_COLOR, linewidth=0.6, arrowsize=0.8)
+    axes.add_patch(patches.Circle((particle_axial_position, 0.0), radius=particle_radius,
+                                  facecolor="darkgrey", edgecolor="black", zorder=10))
+    axes.axhline(domain.radius, color="black", linewidth=1.5)
+    axes.axhline(0.0, color="black", linewidth=0.75, linestyle="--")
+    axes.set_xlabel(r"Axial position $z^*$")
+    axes.set_ylabel(r"Radial position $r^*$")
+    axes.set_title("Stream-function flow field around the sphere")
     figure.tight_layout()
     return figure
