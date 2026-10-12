@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import torch
-from sympy.physics.biomechanics import activation
 from torch import nn
 
 from magnetofluidics_pinn.config import (
