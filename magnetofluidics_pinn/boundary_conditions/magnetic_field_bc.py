@@ -54,13 +54,9 @@ def uniform_field(
             f"dimensions; got {orientation_tensor.shape[0]} vs {coordinates.shape[1]}."
         )
     
-    orientation_norm = torch.linalg.norm(orientation_tensor)
-    if not torch.isclose(
-            orientation_norm, torch.ones_like(orientation_norm), atol=_UNIT_NORM_TOLERANCE
-    ):
-        raise ValueError(
-            f"orientation must be a unit vector; got a norm of {orientation_norm.item():.6g}."
-        )
+    # boundary_conditions/magnetic_field_bc.py: uniform_field
+    if abs(orientation_tensor[0]) > _UNIT_NORM_TOLERANCE:  # CHANGED: B_r = const has div B = B_r/r != 0
+        raise ValueError("A uniform field in the axisymmetric (r, z) model must be axial: orientation=(0, 1).")
     
     # The field does not depend on `coordinates` (it is uniform in
     # space); it is broadcast to match the sample count purely so that
