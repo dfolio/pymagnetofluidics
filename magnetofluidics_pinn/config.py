@@ -32,9 +32,9 @@ _UNIT_NORM_TOLERANCE = 1.0e-6
 # are the same scales used in the original PINN paper [@raissi2019physics] to
 # keep the network's inputs and outputs near unit order despite the
 # microscale geometry (SI values around `1.0e-4` to `1.0e-3` would
-_DEFAULT_REFERENCE_LENGTH = 7.5e-4    # meter;
+_DEFAULT_REFERENCE_LENGTH = 7.5e-4  # meter;
 _DEFAULT_REFERENCE_VELOCITY = 1.0e-3  # meter/second
-_DEFAULT_REFERENCE_PRESSURE = 0.0     # pascal
+_DEFAULT_REFERENCE_PRESSURE = 0.0  # pascal
 # NEW: promoted out of `training.trainer` (previously a module-private
 # `_BOUNDARY_LOSS_WEIGHT`) so that `ObstacleConfig.obstacle_loss_weight`'s
 # default can reference it here, alongside every other config default,
@@ -132,8 +132,8 @@ class DomainConfig:
     radius: float = _DEFAULT_REFERENCE_LENGTH  # m
     branch_angle: float | None = None
     fluid: FluidConfig = FluidConfig()  # Fluid embedded by default
-    u_max: float= _DEFAULT_REFERENCE_VELOCITY
-    p_max: float= _DEFAULT_REFERENCE_PRESSURE
+    u_max: float = _DEFAULT_REFERENCE_VELOCITY
+    p_max: float = _DEFAULT_REFERENCE_PRESSURE
     
     def __post_init__(self) -> None:
         _check_if_finite_positive_strictly(self.length, "length")
@@ -181,7 +181,7 @@ class DomainConfig:
         """
         return ((self.fluid.density * self.reference_velocity * self.reference_length)
                 / self.fluid.dynamic_viscosity)
-
+    
     def reynolds_particle(self, particle_config: ParticleConfig, particle_state: ParticleState) -> float:
         r"""Particle Reynolds number of a particle relative to the flow, $Re_p = \rho \abs{U_p - U_\infty} a / \mu$.
         
@@ -200,40 +200,48 @@ class DomainConfig:
                 f"than domain.radius ({self.radius:.3e} m). Did you accidentally pass a dimensionless "
                 "ParticleConfig instead of particle_config_physical?"
             )
-        return ((self.fluid.density * abs(particle_state.speed-self.reference_velocity) * particle_config.radius)
+        return ((self.fluid.density * abs(particle_state.speed - self.reference_velocity) * particle_config.radius)
                 / self.fluid.dynamic_viscosity)
+
 
 @dataclass(frozen=True)
 class MagneticFieldConfig:
-    """Configuration of the prescribed magnetic field input.
+    r"""Configuration of the prescribed magnetic field input.
 
-    `magnitude` already follows the MKSA/SI convention (`tesla`); no further
-    normalization is required here; `scaling.compute_scales` re-expresses it
-    relative to `magnitude` itself, so the dimensionless field stays near
-    unit order.
+    The field magnitude follows the MKSA/SI convention ($\mathrm{T}$).
+    Dimensionless scalings are derived downstream via
+   `scaling.compute_scales`, mapping the reference magnitude to unit order.
 
     Args:
-    - `source`: Either `"uniform"`, `"gradient"`, or `"biot_savart"`,
-      selecting how the field-generating function is built.
-    - `magnitude`: Reference field magnitude, in `tesla`.
-    - `orientation`: Unit vector giving the field direction, used when
-      `source == "uniform"`.
-    - `time_dependent`: Whether the field varies with time.
-    
+    - `source`: Source formulation, one of `"uniform"`, `"gradient"`, or
+      `"biot_savart"`.
+    - `magnitude`: Reference magnetic flux density magnitude $B_0$, in tesla
+      ($\mathrm{T}$).
+    - `orientation`: Dimensionless unit vector $\hat{\mathbf{u}}$ specifying
+      the magnetic field orientation in 2-D $(u_r, u_z)$ or 3-D
+      $(u_x, u_y, u_z)$.
+    - `time_dependent`: Flag indicating whether the field varies with time.
+
     Raises:
-    - `ValueError`: If `magnitude` is not finite and strictly positive, or
-      if `orientation` is not (approximately) a unit vector.
-      
-    TODO: manage 2D/3D fields
-    """
+    - `ValueError`: If `magnitude` is non-finite or non-positive, if
+      `orientation` dimension is not 2 or 3, or if `orientation` is not a unit
+      vector within tolerance.
+     """
     
     source: Literal["uniform", "gradient", "biot_savart"] = "uniform"
     magnitude: float = 1.0e-2  # [T]
-    orientation: tuple[float, float] = (1.0, 0.0)
+    # CHANGED: Generalized tuple type annotation to support both 2-D and 3-D fields
+    orientation: tuple[float, ...] = (0.0, 1.0)
     time_dependent: bool = False
     
     def __post_init__(self) -> None:
-        _check_if_finite_positive_strictly(self.magnitude, "magnitude")   # CHANGED: was non-strict; compute_scales rejects 0
+        _check_if_finite_positive_strictly(self.magnitude, "magnitude")
+        # NEW: Validate dimensional consistency for 2-D and 3-D physical domains
+        if len(self.orientation) not in (2, 3):
+            raise ValueError(
+                "orientation must be a 2-D (r, z) or 3-D (x, y, z) vector; "
+                f"got length {len(self.orientation)}."
+            )
         if not all(math.isfinite(component) for component in self.orientation):
             raise ValueError(f"orientation components must be finite; got {self.orientation!r}.")
         orientation_norm = math.hypot(*self.orientation)
@@ -241,28 +249,234 @@ class MagneticFieldConfig:
             raise ValueError(
                 f"orientation must be a unit vector; got a norm of {orientation_norm:.6g}."
             )
+    
+    @property
+    def dimension(self) -> int:
+        """Return the spatial coordinate dimension of the field orientation.
+
+        Returns:
+        * Integer dimension, either 2 or 3.
+        """
+        # NEW: Spatial dimension inspector
+        return len(self.orientation)
+    
+    @property
+    def field_vector(self) -> tuple[float, ...]:
+        r"""Compute the directed physical magnetic flux density vector.
+
+        Evaluates:
+        $$
+        \mathbf{B} = B_0 \, \hat{\mathbf{u}} = \left( B_0 u_1, \, B_0 u_2, \, \dots, \, B_0 u_d \right) \quad [\mathrm{T}]
+        $$
+
+        Returns:
+        * Immutable tuple containing directed field components in tesla
+          ($\mathrm{T}$).
+        """
+        # NEW: Primary physical property representing the magnetic field vector B
+        return tuple(self.magnitude * component for component in self.orientation)
+
+
+# ==============================================================================
+# NEW: MagneticMomentConfig Container for Magnetic Dipole Characterization
+# ==============================================================================
+
+@dataclass(frozen=True)
+class MagneticMomentConfig:
+    r"""Configuration of the intrinsic magnetic dipole moment of a particle.
+
+    Defines the magnetic dipole strength and spatial orientation following the
+    MKSA/SI convention ($\mathrm{A \cdot m^2}$ or $\mathrm{J / T}$). In an external
+    magnetic flux density $\mathbf{B}$, the magnetic force acting on the particle
+    is governed by Kelvin's dipole law [@abbott2020magnetic]:
+    $$\mathbf{F}_{\mathrm{mag}} = (\mathbf{m} \cdot \nabla)\mathbf{B}.$$
+
+    Args:
+    - `magnitude`: Reference magnetic dipole moment magnitude $m_0 = \|\mathbf{m}\|_2$,
+      in ampere-square-meter ($\mathrm{A \cdot m^2}$).
+    - `orientation`: Dimensionless unit vector $\hat{\mathbf{u}}_m$ specifying
+      the dipole orientation in 2-D $(u_r, u_z)$ or 3-D $(u_x, u_y, u_z)$.
+    - `nature`: Dipole magnetization regime, either `"permanent"` (fixed moment)
+      or `"induced"` (field-aligned soft-magnetic response).
+
+    Raises:
+    - `ValueError`: If `magnitude` is non-finite or non-positive, if
+      `orientation` dimension is not 2 or 3, or if $\hat{\mathbf{u}}_m$ is not a
+      unit vector within numerical tolerance.
+    """
+    
+    magnitude: float = 1.0e-13  # [A m^2]
+    orientation: tuple[float, ...] = (0.0, 1.0)
+    nature: Literal["permanent", "induced"] = "permanent"
+    
+    def __post_init__(self) -> None:
+        """Validate magnitude positivity, spatial dimensionality, and unit normalization."""
+        _check_if_finite_positive_strictly(self.magnitude, "magnitude")
+        
+        # Validate spatial dimensionality for 2-D axisymmetric and 3-D Cartesian domains
+        if len(self.orientation) not in (2, 3):
+            raise ValueError("orientation must be a 2-D (r, z) or 3-D (x, y, z) vector; "
+                             f"got length {len(self.orientation)}.")
+        
+        if not all(math.isfinite(component) for component in self.orientation):
+            raise ValueError(f"orientation components must all be finite; got {self.orientation!r}.")
+        
+        orientation_norm = math.hypot(*self.orientation)
+        if abs(orientation_norm - 1.0) > _UNIT_NORM_TOLERANCE:
+            raise ValueError(f"orientation must be a unit vector; got a norm of {orientation_norm:.6g}.")
+
+    def __iter__(self):
+        r"""Iterate over directed components of the magnetic moment vector.
+
+        NEW: Enables drop-in sequence compatibility with PyTorch tensor factories
+        (e.g., `torch.as_tensor(config)`) and sequence unpacking (`m_r, m_z = config`).
+
+        Returns:
+        - Iterator over dipole moment vector components in ampere-square-meter ($\mathrm{A \cdot m^2}$).
+        """
+        return iter(self.moment_vector)
+
+    def __len__(self) -> int:
+        """Return the number of spatial components in the moment vector.
+
+        Returns:
+        - Integer spatial dimension (2 or 3).
+        """
+        return len(self.orientation)
+
+    def __getitem__(self, index: int) -> float:
+        r"""Access a directed moment component by coordinate index.
+
+        Args:
+        - `index`: Coordinate component index.
+
+        Returns:
+        - Dipole moment component at `index` in ampere-square-meter ($\mathrm{A \cdot m^2}$).
+        """
+        return self.moment_vector[index]
+    
+    @property
+    def dimension(self) -> int:
+        """Return the spatial coordinate dimension of the dipole orientation.
+
+        Returns:
+        - Spatial dimension, either 2 or 3.
+        """
+        return len(self.orientation)
+    
+    @property
+    def moment_vector(self) -> tuple[float, ...]:
+        r"""Compute the directed physical magnetic dipole moment vector.
+
+        Evaluates:
+        $$\mathbf{m} = m_0 \, \hat{\mathbf{u}}_m = \left( m_0 u_1, \, m_0 u_2, \, \dots, \, m_0 u_d \right) \quad [\mathrm{A \cdot m^2}]$$
+
+        Returns:
+        - Immutable tuple containing directed dipole moment components in
+          ampere-square-meter ($\mathrm{A \cdot m^2}$).
+        """
+        return tuple(self.magnitude * component for component in self.orientation)
+    
+    @classmethod
+    def from_vector(
+            cls,
+            vector: tuple[float, ...] | list[float],
+            nature: Literal["permanent", "induced"] = "permanent",
+    ) -> MagneticMomentConfig:
+        r"""Construct a `MagneticMomentConfig` directly from an arbitrary non-zero vector.
+
+        Decomposes $\mathbf{m} \in \mathbb{R}^d$ into magnitude $m_0 = \|\mathbf{m}\|_2$
+        and normalized unit orientation $\hat{\mathbf{u}}_m = \mathbf{m} / m_0$.
+
+        Args:
+        - `vector`: Raw directed moment components $(m_1, \dots, m_d)$ in $\mathrm{A \cdot m^2}$.
+        - `nature`: Magnetization regime (`"permanent"` or `"induced"`).
+
+        Returns:
+        - A normalized, immutable `MagneticMomentConfig` instance.
+
+        Raises:
+        - `ValueError`: If the vector is zero, non-finite, or has dimension other than 2 or 3.
+        """
+        if len(vector) not in (2, 3):
+            raise ValueError(f"vector must have length 2 or 3; got {len(vector)}.")
+        if not all(math.isfinite(comp) for comp in vector):
+            raise ValueError(f"All components in vector must be finite; got {vector!r}.")
+        
+        norm = math.hypot(*vector)
+        if norm <= 0.0:
+            raise ValueError("vector must be non-zero to establish a well-defined magnetic moment.")
+        
+        unit_orientation = tuple(comp / norm for comp in vector)
+        return cls(magnitude=norm, orientation=unit_orientation, nature=nature)
+    
+    @classmethod
+    def from_magnetization(
+            cls,
+            magnetization: tuple[float, ...] | list[float],
+            magnetic_volume: float,
+            nature: Literal["permanent", "induced"] = "permanent",
+    ) -> MagneticMomentConfig:
+        r"""Construct configuration from volume magnetization and magnetic material volume.
+
+        Computes the dipole moment via the volume integral:
+        $$\mathbf{m} = \int_{V_{\mathrm{mag}}} \mathbf{M} \, dV = \mathbf{M} \, V_{\mathrm{mag}} \quad [\mathrm{A \cdot m^2}],$$
+        where $\mathbf{M}$ is the volume magnetization in $\mathrm{A/m}$ and
+        $V_{\mathrm{mag}}$ is the volume of magnetic material in $\mathrm{m^3}$.
+
+        Args:
+        - `magnetization`: Volume magnetization vector $\mathbf{M}$, in $\mathrm{A/m}$.
+        - `magnetic_volume`: Volume occupied by magnetic material, in $\mathrm{m^3}$.
+        - `nature`: Magnetization regime (`"permanent"` or `"induced"`).
+
+        Returns:
+        - A normalized, immutable `MagneticMomentConfig` instance.
+
+        Raises:
+        - `ValueError`: If `magnetic_volume` is non-positive or `magnetization` is invalid.
+        """
+        _check_if_finite_positive_strictly(magnetic_volume, "magnetic_volume")
+        moment_components = tuple(comp * magnetic_volume for comp in magnetization)
+        return cls.from_vector(vector=moment_components, nature=nature)
+    
+    def with_magnitude(self, new_magnitude: float) -> MagneticMomentConfig:
+        r"""Pure functional updater returning a new instance with altered magnitude.
+
+        Args:
+        - `new_magnitude`: New physical magnitude $m_0 > 0$, in $\mathrm{A \cdot m^2}$.
+
+        Returns:
+        - New `MagneticMomentConfig` with updated magnitude, leaving the original unchanged.
+        """
+        _check_if_finite_positive_strictly(new_magnitude, "new_magnitude")
+        return replace(self, magnitude=new_magnitude)
+    
+    def with_orientation(self, new_orientation: tuple[float, ...]) -> MagneticMomentConfig:
+        r"""Pure functional updater returning a new instance with altered unit orientation.
+
+        Args:
+        - `new_orientation`: New unit direction vector $\hat{\mathbf{u}}_m \in \mathbb{R}^d$.
+
+        Returns:
+        - New `MagneticMomentConfig` with updated orientation, leaving the original unchanged.
+        """
+        return replace(self, orientation=new_orientation)
 
 
 @dataclass(frozen=True)
 class ParticleConfig:
-    """Physical properties of the single magnetic microrobot tracked in Phase 1.
+    r"""Physical properties of the single magnetic microrobot tracked in Phase 1.
 
-    All fields follow the MKSA/SI convention, matching `DomainConfig` and
-    `FluidConfig`. Neither is consumed directly by
-    [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]:
-    call
-    [`scaling.nondimensionalize_particle`][magnetofluidics_pinn.scaling.nondimensionalize_particle]
-    first to obtain the dimensionless radius that function's own
-    `particle_radius` argument expects — see that function's docstring for
-    why `magnetic_moment` is deliberately *not* handled the same way yet.
+    All physical fields follow the MKSA/SI convention ($\mathrm{m}$, $\mathrm{kg}$,
+    $\mathrm{s}$, $\mathrm{A}$, $\mathrm{A \cdot m^2}$). Geometric scales are converted
+    to dimensionless units downstream via
+     [`scaling.nondimensionalize_particle`][magnetofluidics_pinn.scaling.nondimensionalize_particle].
 
     Args:
     - `kind`: The shape of the particle, either "spherical", "swarms",
       "cylinder", or "spheroid".
     - `radius`: Particle radius for "spherical" or "swarms", in meter.
-      Used only for the Faxén-law finite-size correction to the ambient flow velocity
-      ([`physics.hydrodynamic_drag`][magnetofluidics_pinn.physics.hydrodynamic_drag]);
-      `0.0` recovers the exact point-particle limit.
+      A value of `0.0` recovers the point-particle limit.
     - `length`: Cylinder length, in meter. Only meaningful (and required to
       be strictly positive) when `kind == "cylinder"`; unused otherwise.
     - `aspect_ratio`: Length-to-diameter ratio, for a future spheroidal drag
@@ -277,24 +491,15 @@ class ParticleConfig:
       regardless of `initial_states`'s length, so a genuinely heterogeneous
       swarm is not yet supported (see that function's docstring).
     - `position`: Initial position of the particle, in meter (e.g., `(0.0, 0.0)` for the center of the domain).
-    - `magnetic_moment`: Magnetic dipole moment vector `(m_r, m_z)`, in
-      ampere-square-meter (`A m^2`), giving both the particle's magnetic
-      "strength" and its (fixed, for Phase 1) orientation. Passed to
-      [`trajectory.integrate_trajectory`][magnetofluidics_pinn.trajectory.integrator.integrate_trajectory]
-      as its `magnetic_moment` argument only once already expressed in the
-      dimensionless units that function's docstring describes — this
-      config field records the *physical* moment for bookkeeping, but does
-      not itself perform that conversion (see the caveat above).
-    - `magnetic_ratio`: volumic ratio of magnetic material.
+    - `magnetic_moment`: Intrinsic magnetic dipole moment specification, either as an
+       instance of `MagneticMomentConfig` or as a coordinate sequence $(m_1, \dots, m_d)$
+       in ampere-square-meter ($\mathrm{A \cdot m^2}$). Automatically normalized to
+       `MagneticMomentConfig`.
+    - `magnetic_ratio`: Volumetric ratio of magnetically active material ($V_{\mathrm{mag}} / V$).
 
     Raises:
-    - `ValueError`: If `radius` is not finite and non-negative, if either
-      component of `magnetic_moment` is not finite, if `magnetic_moment` is
-      the zero vector, if `kind == "swarms"` and `number` is not strictly
-      positive, or if `kind == "cylinder"` and `length` is not strictly
-      positive.
-      
-    Todo: manage 2D/3D particle
+    - `ValueError`: If dimensions, numbers, or ratios are non-finite or invalid.
+    - `TypeError`: If `magnetic_moment` is neither a `MagneticMomentConfig` nor a sequence.
     """
     
     kind: Literal["spherical", "swarms", "cylinder", "spheroid"] = "spherical"
@@ -302,7 +507,8 @@ class ParticleConfig:
     length: float = 0.0  # [m]
     aspect_ratio: float = 1.0
     number: int = 1
-    magnetic_moment: tuple[float, float] = (1.0e-13, 0.0)  # [A m^2]
+    # CHANGED: Accept MagneticMomentConfig or raw coordinate sequence, defaulting to MagneticMomentConfig
+    magnetic_moment: MagneticMomentConfig | tuple[float, ...] = MagneticMomentConfig()
     magnetic_ratio: float = 1.0
     
     def __post_init__(self) -> None:
@@ -311,12 +517,7 @@ class ParticleConfig:
         _check_if_finite_positive_strictly(self.aspect_ratio, "aspect_ratio")
         _check_if_finite_positive_strictly(self.number, "number")
         _check_if_finite_positive_strictly(self.magnetic_ratio, "magnetic_ratio")
-        if not all(math.isfinite(component) for component in self.magnetic_moment):
-            raise ValueError(f"magnetic_moment components must be finite; got {self.magnetic_moment!r}.")
-        if math.hypot(*self.magnetic_moment) <= 0.0:
-            raise ValueError("magnetic_moment must be non-zero.")
-        if self.kind in ("spherical", "swarms", "cylinder") and self.radius <= 0.0:  # NEW: avoids division by zero in
-            # `magnetization`
+        if self.kind in ("spherical", "swarms", "cylinder") and self.radius < 0.0:
             raise ValueError(f"radius must be strictly positive for kind={self.kind!r}.")
         if self.kind == "swarms" and self.number <= 0:
             raise ValueError(f"number of particles must be positive for swarms; got {self.number!r}.")
@@ -324,7 +525,17 @@ class ParticleConfig:
             raise ValueError(f"length of cylinder must be positive; got {self.length!r}.")
         if self.kind == "spheroid" and not (0 < self.aspect_ratio <= 1):
             raise ValueError(f"aspect_ratio of spheroid must be between 0 and 1; got {self.aspect_ratio!r}.")
-        
+        # CHANGED: Defensively normalize raw sequences into validated MagneticMomentConfig
+        if isinstance(self.magnetic_moment, (tuple, list)):
+            object.__setattr__(self, "magnetic_moment",
+                               MagneticMomentConfig.from_vector(self.magnetic_moment),
+            )
+        elif not isinstance(self.magnetic_moment, MagneticMomentConfig):
+            raise TypeError(
+                "magnetic_moment must be an instance of MagneticMomentConfig or a coordinate sequence; "
+                f"got {type(self.magnetic_moment).__name__}."
+            )
+    
     @property
     def max_surface_extension(self) -> float:
         """Returns the maximum radial extension from the centre of mass."""
@@ -352,14 +563,64 @@ class ParticleConfig:
     
     @property
     def magnetization(self) -> tuple[float | int, ...]:
-        """Returns the magnetization vector in A/m."""
-        return tuple(m / self.magnetic_volume for m in self.magnetic_moment)
+        r"""Compute the volume magnetization vector in ampere-per-meter ($\mathrm{A / m}$).
+
+        Evaluates:
+        $$\mathbf{M} = \frac{\mathbf{m}}{V_{\mathrm{mag}}} \quad [\mathrm{A / m}].$$
+
+        Returns:
+        - Immutable tuple of volume magnetization components in $\mathrm{A / m}$.
+
+        Raises:
+        - `ValueError`: If `magnetic_volume` is non-positive (e.g. for a point-particle
+          configuration where `radius == 0.0`).
+        """
+        magnetic_volume = self.magnetic_volume
+        if magnetic_volume <= 0.0:
+            raise ValueError(
+                "magnetization is undefined for non-positive magnetic_volume "
+                f"({magnetic_volume!r}); point particles (radius == 0.0) possess no "
+                "volume magnetization density."
+            )
+        return tuple(m / magnetic_volume for m in self.magnetic_moment)
     
-    def with_magnetization(self, magnetization: tuple[float | int, ...]) -> ParticleConfig:
-        """Pure functional updater replacing unsafe particle.__setattr__ mutations."""
-        mag_vol = self.volume * self.magnetic_ratio
-        new_moment = tuple(m * self.magnetic_volume for m in magnetization)
+    def with_magnetization(self, magnetization: tuple[float, ...] | list[float]) -> ParticleConfig:
+        r"""Pure functional updater returning a new configuration with updated magnetization.
+
+        Args:
+        - `magnetization`: Target volume magnetization vector $\mathbf{M}$ in $\mathrm{A / m}$.
+
+        Returns:
+        - New `ParticleConfig` instance with updated magnetic moment.
+        """
+        # CHANGED: Leverage MagneticMomentConfig.from_magnetization directly
+        new_moment = MagneticMomentConfig.from_magnetization(
+            magnetization=magnetization,
+            magnetic_volume=self.magnetic_volume,
+            nature=self.magnetic_moment.nature,
+        )
         return replace(self, magnetic_moment=new_moment)
+    
+    def with_magnetic_moment(
+            self, magnetic_moment: MagneticMomentConfig | tuple[float, ...] | list[float]
+    ) -> ParticleConfig:
+        """Pure functional updater returning a new configuration with updated magnetic moment.
+
+        NEW: Functional updater allowing direct assignment of either a `MagneticMomentConfig`
+        or a coordinate sequence.
+
+        Args:
+        - `magnetic_moment`: New dipole moment specification as `MagneticMomentConfig` or coordinate sequence.
+
+        Returns:
+        - New `ParticleConfig` instance with updated magnetic moment.
+        """
+        normalized_moment = (
+            magnetic_moment
+            if isinstance(magnetic_moment, MagneticMomentConfig)
+            else MagneticMomentConfig.from_vector(magnetic_moment)
+        )
+        return replace(self, magnetic_moment=normalized_moment)
 
 
 @dataclass(frozen=True)
@@ -480,7 +741,7 @@ class TwoWayCouplingConfig:
         return self.particle_velocity[0]
     
     @property
-    def particle_state(self)->ParticleState:
+    def particle_state(self) -> ParticleState:
         """Returns a ParticleState particle representing the particle's current state."""
         return ParticleState(
             position=torch.tensor(self.particle_position),
@@ -514,7 +775,7 @@ class TrainingConfig:
       regularity are currently enforced structurally instead, via
       `networks.apply_hard_wall_constraint`). Kept here so an eventual
       soft-axis-penalty alternative doesn't require a config schema change.
-    - `residual_form`: NEW. Which form of the interior PDE residual
+    - `residual_form`: Which form of the interior PDE residual
       `training.trainer` evaluates, passed straight through to
       [`stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.stokes_residual]
       / [`navier_stokes_residual`][magnetofluidics_pinn.physics.fluid_residuals.navier_stokes_residual].
@@ -527,7 +788,9 @@ class TrainingConfig:
       relative to near the wall (the multiplier itself shrinks the residual
       there, independent of accuracy) — see that function's docstring for
       the full derivation and this trade-off.
-    - `axis_clearance_fraction`: NEW. Overrides
+      "native" is only valid for `StreamFunctionSphereFlow`; it evaluates the unweighted
+      standard-form force densities in (s, z) without any 1/r term (see `stokes_residual_sz`).
+    - `axis_clearance_fraction`:  Overrides
       [`sampling.collocation._AXIS_CLEARANCE_FRACTION`]
       [magnetofluidics_pinn.sampling.collocation.sample_collocation_points]'s
       default clearance band (as a fraction of `domain.radius`) kept clear
@@ -577,7 +840,7 @@ class TrainingConfig:
     n_interior_points: int = 10_000
     n_boundary_points: int = 2_000
     n_axis_points: int = 512
-    residual_form: Literal["standard", "r_weighted"] = "standard"
+    residual_form: Literal["standard", "r_weighted", "native"] = "standard"
     axis_clearance_fraction: float | None = None
     learning_rate: float = 1.0e-3
     n_epochs: int = 20_000
@@ -623,7 +886,7 @@ class TrainingConfig:
                     "'standard' residual is singular at r=0. Either raise "
                     "axis_clearance_fraction above 0.0 or set residual_form='r_weighted'."
                 )
-        _check_if_finite_positive_strictly(self.learning_rate,"learning_rate")
+        _check_if_finite_positive_strictly(self.learning_rate, "learning_rate")
         if self.n_epochs <= 0:
             raise ValueError("n_epochs must be strictly positive.")
         for weight_name in (
