@@ -71,7 +71,7 @@ def gradient_field(
 ) -> MagneticFieldSample:
     r"""Evaluate the linear, Maxwell-consistent axisymmetric field with an axial gradient.
 
-    $$ B_r = g_r\,r,\qquad B_z = B_0 + g_z\,z,\qquad g_r = -\tfrac12 g_z. $$
+    $$B_r = g_r\,r,\qquad B_z = B_0 + g_z\,z,\qquad g_r = -\tfrac12 g_z.$$
 
     In a current-free region $\div\mathbf B = 2g_r + g_z = 0$ and
     $\curl\mathbf B = \mathbf 0$. An arbitrary pair $(g_r, g_z)$ would violate Gauss's law and
