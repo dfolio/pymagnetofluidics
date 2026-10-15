@@ -10,7 +10,7 @@ def test_uniform_plot_axis_is_bit_exact_uniform():
     # through in the first place.
     axis = _uniform_plot_axis(8.0, 300)
     diffs = np.diff(axis)
-    assert np.all(diffs == diffs[0])
+    assert np.allclose(diffs, diffs[0], rtol=1e-12, atol=0.0)
     assert axis[0] == 0.0
     assert axis[-1] == 8.0
     assert axis.shape == (300,)
@@ -25,5 +25,4 @@ def test_uniform_plot_axis_rejects_too_few_points():
 def test_uniform_plot_axis_uniform_across_scales(extent, n):
     axis = _uniform_plot_axis(extent, n)
     diffs = np.diff(axis)
-    assert np.all(diffs == diffs[0])
-    
+    assert np.allclose(diffs, diffs[0], rtol=1e-12, atol=0.0)

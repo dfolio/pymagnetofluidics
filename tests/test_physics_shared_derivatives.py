@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import re
 from typing import Callable
 
 import pytest
 import torch
-import torch.nn as nn
 
 import magnetofluidics_pinn as mfp
-from .conftest import make_poiseuille_network
+from magnetofluidics_pinn.config import ParticleConfig
+from magnetofluidics_pinn.device_utils import resolve_module_device
 from magnetofluidics_pinn.physics.fluid_residuals import (
     axisymmetric_vector_laplacian,
     compute_flow_derivatives,
@@ -20,9 +21,9 @@ from magnetofluidics_pinn.physics.hydrodynamic_drag import (
     faxen_corrected_velocity,
     surface_traction_force,
 )
-from magnetofluidics_pinn.config import ParticleConfig
 from magnetofluidics_pinn.types import ParticleState
-from magnetofluidics_pinn.device_utils import resolve_module_device
+from .conftest import make_poiseuille_network
+
 
 # ============================================================================
 # EXACT ANALYTICAL GROUND-TRUTH TESTS (VIA POISEUILLE NETWORK)
@@ -45,7 +46,7 @@ def test_poiseuille_axisymmetric_laplacian_exact(device: torch.device) -> None:
     radius = 1.5
     peak_velocity = 2.0
     poiseuille_net = make_poiseuille_network(radius=radius, peak_velocity=peak_velocity)
-
+    
     coords = torch.tensor(
         [[0.2, 1.0], [0.6, 2.5], [1.1, 0.5]],
         dtype=torch.float32,
@@ -53,14 +54,14 @@ def test_poiseuille_axisymmetric_laplacian_exact(device: torch.device) -> None:
         requires_grad=True,
     )
     derivs = compute_flow_derivatives(poiseuille_net, coords, compute_second_order=True)
-
+    
     lap_r, lap_z = axisymmetric_vector_laplacian(
         derivs=derivs, radius=coords[:, 0:1], residual_form="standard"
     )
-
+    
     expected_lap_r = torch.zeros_like(lap_r)
-    expected_lap_z = torch.full_like(lap_z, -4.0 * peak_velocity / (radius**2))
-
+    expected_lap_z = torch.full_like(lap_z, -4.0 * peak_velocity / (radius ** 2))
+    
     torch.testing.assert_close(lap_r, expected_lap_r, atol=1e-6, rtol=1e-5)
     torch.testing.assert_close(lap_z, expected_lap_z, atol=1e-6, rtol=1e-5)
 
@@ -80,24 +81,24 @@ def test_poiseuille_faxen_exact(device: torch.device) -> None:
     peak_velocity = 3.0
     particle_radius = 0.08
     poiseuille_net = make_poiseuille_network(radius=radius, peak_velocity=peak_velocity)
-
+    
     positions = torch.tensor([[0.3, 1.0], [0.7, 2.0]], dtype=torch.float32, device=device)
     corrected_velocity = faxen_corrected_velocity(
         flow_network=poiseuille_net,
         positions=positions,
         particle_radius=particle_radius,
     )
-
+    
     base_velocity = poiseuille_net(positions)[:, :2]
-    expected_delta_z = -(2.0 * (particle_radius**2) * peak_velocity) / (3.0 * (radius**2))
+    expected_delta_z = -(2.0 * (particle_radius ** 2) * peak_velocity) / (3.0 * (radius ** 2))
     expected_velocity = base_velocity.clone()
     expected_velocity[:, 1] += expected_delta_z
-
+    
     torch.testing.assert_close(corrected_velocity, expected_velocity, atol=1e-6, rtol=1e-5)
 
 
 def test_poiseuille_continuity_and_momentum_residuals(
-    fluid_config: mfp.FluidConfig, device: torch.device
+        fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     r"""Verify Poiseuille flow satisfies exact continuity $\nabla \cdot \mathbf{u} = 0$.
 
@@ -108,26 +109,26 @@ def test_poiseuille_continuity_and_momentum_residuals(
     radius = 1.3
     peak_velocity = 1.5
     poiseuille_net = make_poiseuille_network(radius=radius, peak_velocity=peak_velocity)
-
+    
     coords = torch.tensor(
         [[0.4, 0.5], [0.8, 1.2]], dtype=torch.float32, device=device, requires_grad=True
     )
     res = stokes_residual(poiseuille_net, coords, fluid_config, residual_form="standard")
-
+    
     # Column 2 is continuity: \nabla \cdot u = 0
     continuity_residual = res[:, 2:3]
     torch.testing.assert_close(
         continuity_residual, torch.zeros_like(continuity_residual), atol=1e-6, rtol=1e-5
     )
-
+    
     # Column 0 is radial momentum: -dp/dr + lap_r = 0
     momentum_r_residual = res[:, 0:1]
     torch.testing.assert_close(
         momentum_r_residual, torch.zeros_like(momentum_r_residual), atol=1e-6, rtol=1e-5
     )
-
+    
     # Column 1 is axial momentum: -dp/dz + lap_z = -4 * U0 / R^2 (since p = 0 in poiseuille_net)
-    expected_momentum_z = torch.full_like(res[:, 1:2], -4.0 * peak_velocity / (radius**2))
+    expected_momentum_z = torch.full_like(res[:, 1:2], -4.0 * peak_velocity / (radius ** 2))
     torch.testing.assert_close(res[:, 1:2], expected_momentum_z, atol=1e-6, rtol=1e-5)
 
 
@@ -137,7 +138,7 @@ def test_poiseuille_continuity_and_momentum_residuals(
 
 
 def test_stokes_residual_with_mlp(
-    raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
+        raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     """Validate `stokes_residual` on a genuine MLP module transferred to the active device.
 
@@ -150,7 +151,7 @@ def test_stokes_residual_with_mlp(
     coords = torch.tensor(
         [[0.3, 1.0], [0.7, 2.0]], dtype=torch.float32, device=device, requires_grad=True
     )
-
+    
     res = stokes_residual(net, coords, fluid_config, residual_form="standard")
     assert res.shape == (2, 3)
     assert not torch.isnan(res).any()
@@ -158,7 +159,7 @@ def test_stokes_residual_with_mlp(
 
 
 def test_surface_traction_with_constrained_mlp(
-    constrained_network: torch.nn.Module, device: torch.device
+        constrained_network: torch.nn.Module, device: torch.device
 ) -> None:
     """Validate `surface_traction_force` on the wall-constrained MLP architecture.
 
@@ -176,7 +177,7 @@ def test_surface_traction_with_constrained_mlp(
     )
     force_z = surface_traction_force(net, particle_config=particle_config, particle_state=particule_state,
                                      n_quadrature_points=45)
-
+    
     assert force_z.numel() == 1
     assert not torch.isnan(force_z)
 
@@ -187,7 +188,7 @@ def test_surface_traction_with_constrained_mlp(
 
 
 def test_compute_flow_derivatives_order_selection(
-    raw_network: torch.nn.Module, device: torch.device
+        raw_network: torch.nn.Module, device: torch.device
 ) -> None:
     """Verify `compute_second_order=False` bypasses second autodiff pass on MLP.
 
@@ -197,13 +198,13 @@ def test_compute_flow_derivatives_order_selection(
     """
     net = raw_network.to(device)
     coords = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=True)
-
+    
     # 1st-order only: 2nd-order fields must be None
     derivs_first = compute_flow_derivatives(net, coords, compute_second_order=False)
     assert derivs_first.d2_velocity_r_dr2 is None
     assert derivs_first.d2_velocity_z_dz2 is None
     assert derivs_first.d_velocity_r_dr is not None
-
+    
     # Full 2nd-order evaluation
     derivs_full = compute_flow_derivatives(net, coords, compute_second_order=True)
     assert derivs_full.d2_velocity_r_dr2 is not None
@@ -218,13 +219,13 @@ def test_compute_flow_derivatives_invalid_columns(device: torch.device) -> None:
     """
     invalid_net: Callable[[torch.Tensor], torch.Tensor] = lambda x: x[:, :2]
     coords = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=True)
-
+    
     with pytest.raises(ValueError, match="network must map coordinates to \\(u_r, u_z, p\\)"):
         compute_flow_derivatives(invalid_net, coords)
 
 
 def test_axisymmetric_vector_laplacian_missing_second_order(
-    raw_network: torch.nn.Module, device: torch.device
+        raw_network: torch.nn.Module, device: torch.device
 ) -> None:
     """Verify `axisymmetric_vector_laplacian` raises ValueError when 2nd-order grads are missing.
 
@@ -235,7 +236,7 @@ def test_axisymmetric_vector_laplacian_missing_second_order(
     net = raw_network.to(device)
     coords = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=True)
     derivs = compute_flow_derivatives(net, coords, compute_second_order=False)
-
+    
     with pytest.raises(ValueError, match="requires second-order derivatives"):
         axisymmetric_vector_laplacian(derivs, coords[:, 0:1], residual_form="standard")
 
@@ -247,10 +248,10 @@ def test_axisymmetric_vector_laplacian_missing_second_order(
 
 @pytest.mark.parametrize("residual_form", ["standard", "r_weighted"])
 def test_stokes_residual_forms_scaling(
-    raw_network: torch.nn.Module,
-    fluid_config: mfp.FluidConfig,
-    device: torch.device,
-    residual_form: str,
+        raw_network: torch.nn.Module,
+        fluid_config: mfp.FluidConfig,
+        device: torch.device,
+        residual_form: str,
 ) -> None:
     r"""Verify mathematical scaling relation between standard and r-weighted residuals.
 
@@ -269,7 +270,7 @@ def test_stokes_residual_forms_scaling(
     )
     res = stokes_residual(net, coords, fluid_config, residual_form=residual_form)  # type: ignore[arg-type]
     assert res.shape == (2, 3)
-
+    
     if residual_form == "r_weighted":
         res_std = stokes_residual(net, coords, fluid_config, residual_form="standard")
         r = coords[:, 0:1]
@@ -281,16 +282,17 @@ def test_stokes_residual_forms_scaling(
 @pytest.mark.parametrize(
     "coords_val,form,error_match",
     [
-        ([[-0.2, 1.0]], "r_weighted", "stokes_residual received negative radial coordinates; $r$ must be non-negative."),
+        ([[-0.2, 1.0]], "r_weighted",
+         "stokes_residual received negative radial coordinates; $r$ must be non-negative."),
     ],
 )
 def test_stokes_residual_radial_boundary_rejection(
-    raw_network: torch.nn.Module,
-    fluid_config: mfp.FluidConfig,
-    device: torch.device,
-    coords_val: list[list[float]],
-    form: str,
-    error_match: str,
+        raw_network: torch.nn.Module,
+        fluid_config: mfp.FluidConfig,
+        device: torch.device,
+        coords_val: list[list[float]],
+        form: str,
+        error_match: str,
 ) -> None:
     """Validate axis boundary rejection across residual forms.
 
@@ -304,12 +306,12 @@ def test_stokes_residual_radial_boundary_rejection(
     """
     net = raw_network.to(device)
     coords = torch.tensor(coords_val, dtype=torch.float32, device=device, requires_grad=True)
-    with pytest.raises(ValueError, match=error_match):
+    with pytest.raises(ValueError, match=re.escape(error_match)):
         stokes_residual(net, coords, fluid_config, residual_form=form)  # type: ignore[arg-type]
 
 
 def test_stokes_residual_accepts_axis_in_r_weighted(
-    raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
+        raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     """Verify r=0 is accepted as a regular point under r_weighted form.
 
@@ -326,7 +328,7 @@ def test_stokes_residual_accepts_axis_in_r_weighted(
 
 
 def test_stokes_residual_requires_grad_validation(
-    raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
+        raw_network: torch.nn.Module, fluid_config: mfp.FluidConfig, device: torch.device
 ) -> None:
     """Verify coordinates without requires_grad=True are rejected.
 
@@ -342,7 +344,7 @@ def test_stokes_residual_requires_grad_validation(
 
 
 def test_stokes_residual_wrong_regime(
-    raw_network: torch.nn.Module, navier_stokes_domain_config: mfp.DomainConfig, device: torch.device
+        raw_network: torch.nn.Module, navier_stokes_domain_config: mfp.DomainConfig, device: torch.device
 ) -> None:
     """Verify `stokes_residual` rejects non-Stokes configurations.
 
@@ -363,9 +365,9 @@ def test_stokes_residual_wrong_regime(
 
 
 def test_navier_stokes_residual_nominal(
-    unsteady_network: torch.nn.Module,
-    navier_stokes_domain_config: mfp.DomainConfig,
-    device: torch.device,
+        unsteady_network: torch.nn.Module,
+        navier_stokes_domain_config: mfp.DomainConfig,
+        device: torch.device,
 ) -> None:
     """Validate unsteady convective Navier-Stokes residual computation.
 
@@ -386,16 +388,16 @@ def test_navier_stokes_residual_nominal(
         requires_grad=True,
     )
     res = navier_stokes_residual(net, coords, navier_stokes_domain_config, residual_form="standard")
-
+    
     assert res.shape == (2, 3)
     assert not torch.isnan(res).any()
     assert res.device == coords.device
 
 
 def test_navier_stokes_residual_dimension_rejection(
-    unsteady_network: torch.nn.Module,
-    navier_stokes_domain_config: mfp.DomainConfig,
-    device: torch.device,
+        unsteady_network: torch.nn.Module,
+        navier_stokes_domain_config: mfp.DomainConfig,
+        device: torch.device,
 ) -> None:
     """Verify `navier_stokes_residual` rejects 2D (r, z) coordinates lacking time t.
 
@@ -406,9 +408,10 @@ def test_navier_stokes_residual_dimension_rejection(
     """
     net = unsteady_network.to(device)
     coords_2d = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device, requires_grad=True)
-
-    with pytest.raises(ValueError, match=f"navier_stokes_residual requires shape \\(n_points, 3\\) for (r, z, "
-                                         f"t); got {coords_2d.shape}"):
+    
+    expected_message = ("navier_stokes_residual requires shape (n_points, 3) for (r, z, t); "
+                        f"got {tuple(coords_2d.shape)}.")
+    with pytest.raises(ValueError, match=re.escape(expected_message)):
         navier_stokes_residual(net, coords_2d, navier_stokes_domain_config)
 
 
@@ -427,7 +430,7 @@ def test_faxen_zero_radius_bypass(raw_network: torch.nn.Module, device: torch.de
     net = raw_network.to(device)
     pos = torch.tensor([[0.5, 1.0]], dtype=torch.float32, device=device)
     u_point = faxen_corrected_velocity(net, pos, particle_radius=0.0)
-
+    
     expected_u = net(pos)[:, :2]
     torch.testing.assert_close(u_point, expected_u)
 
@@ -447,4 +450,5 @@ def test_surface_traction_invalid_quadrature_points(raw_network: torch.nn.Module
         position=torch.tensor([0.0, 2.0], device=device), velocity=torch.zeros(2, device=device), time=0.0,
     )
     with pytest.raises(ValueError, match="n_quadrature_points must be at least 2"):
-        surface_traction_force(raw_network, particle_config=particle_config, particle_state=particule_state, n_quadrature_points=1)
+        surface_traction_force(raw_network, particle_config=particle_config, particle_state=particule_state,
+                               n_quadrature_points=1)

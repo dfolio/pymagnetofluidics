@@ -15,7 +15,7 @@ import magnetofluidics_pinn as mfp
 
 
 def _uniform_field_fn(coordinates: torch.Tensor) -> mfp.MagneticFieldSample:  # FIXED: was mfp.FieldSample
-    return mfp.uniform_field(coordinates, magnitude=1.0, orientation=(1.0, 0.0))
+    return mfp.uniform_field(coordinates, magnitude=1.0, orientation=(0.0, 1.0))
 
 
 class TestOnAxisFaxenValidation:
