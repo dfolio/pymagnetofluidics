@@ -344,16 +344,16 @@ def sample_collocation_points_with_particle(
             "axis_clearance_fraction must be None, or lie in [0.0, 1.0); "
             f"got {axis_clearance_fraction!r}."
         )
-
-    # obstacle_z_min = particle_state.axial_position - particle_config.radius
-    # obstacle_z_max = particle_state.axial_position + particle_config.radius
-    # if not (0.0 < obstacle_z_min and obstacle_z_max < domain.length):
-    #     raise ValueError(
-    #         "obstacle must fit strictly inside the channel's axial extent (0, domain.length); "
-    #         f"got axial span [{obstacle_z_min!r}, {obstacle_z_max!r}] against domain.length="
-    #         f"{domain.length!r}."
-    #     )
+    # FIXED: restored — this validation was accidentally left commented out,
+    # so a particle extending past the inlet/outlet was silently accepted
+    # and clipped during constriction-zone sampling instead of raising.
+    obstacle_z_min = particle_state.axial_position - particle_config.radius
+    obstacle_z_max = particle_state.axial_position + particle_config.radius
     
+    if not (0.0 < obstacle_z_min and obstacle_z_max < domain.length):
+        raise ValueError("obstacle must fit strictly inside the channel's axial extent (0, domain.length); "
+                         f"got axial span [{obstacle_z_min!r}, {obstacle_z_max!r}] against domain.length="
+                         f"{domain.length!r}." )
     resolved_axis_clearance_fraction = (
         _AXIS_CLEARANCE_FRACTION if axis_clearance_fraction is None else axis_clearance_fraction
     )
