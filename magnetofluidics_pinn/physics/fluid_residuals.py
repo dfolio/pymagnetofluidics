@@ -1,4 +1,4 @@
-"""Physics residuals of the viscous flow equations.
+r"""Physics residuals of the viscous flow equations.
 
 Each residual function takes the network (mapping coordinates to velocity
 and pressure) and a set of coordinates, and returns the pointwise PDE
@@ -35,7 +35,7 @@ that, selected via `residual_form`:
   singularity analytically — every term above becomes a regular (if,
   towards $r=0$, vanishing) function of $r$ — so `r = 0` is an admissible
   collocation point. This is not a strict improvement over `"standard"`:
-  because the loss minimizes $\\mathbb{E}[(r \\cdot \\text{residual})^2]$
+  because the loss minimizes $\mathbb{E}[(r \cdot \text{residual})^2]$
   (or $r^2$), the multiplier itself shrinks the residual towards the axis
   independent of how well the underlying, unmultiplied equation is
   actually satisfied there, i.e. the PDE is enforced with *less relative
@@ -47,7 +47,7 @@ Neither strategy substitutes for
 [`networks.apply_hard_wall_constraint`][magnetofluidics_pinn.networks.constraints.apply_hard_wall_constraint]:
 that wrapper enforces the axis and wall *boundary conditions*
 ($u_r(0,z)=u_r(R,z)=0$,
-$\\partial u_z/\\partial r|_{r=0}=0$) structurally, by construction of the
+$\partial u_z/\partial r|_{r=0}=0$) structurally, by construction of the
 network itself; `residual_form` only concerns how safely the *interior* PDE
 residual can be *evaluated* close to the axis. The two are complementary
 and are expected to be used together.
@@ -65,7 +65,7 @@ from magnetofluidics_pinn.config import DomainConfig, FluidConfig
 # The two supported interior-residual singularity treatments; shared between
 # `stokes_residual` and `navier_stokes_residual` so both validate and
 # document the option identically rather than drifting apart.
-_RESIDUAL_FORMS = ("standard", "r_weighted")
+_RESIDUAL_FORMS = ("standard", "r_weighted", "native")
 
 
 class FlowDerivatives(NamedTuple):

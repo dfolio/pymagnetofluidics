@@ -16,14 +16,14 @@ import pandas as pd
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.config import FluidConfig  # NEW
+from magnetofluidics_pinn.config import FluidConfig
 from magnetofluidics_pinn.physics.fluid_residuals import (
     stokes_residual,
     compute_flow_derivatives
 )
-from magnetofluidics_pinn.sampling.exterior import sample_exterior_points  # NEW
-from magnetofluidics_pinn.types import Domain  # NEW
-from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
+from magnetofluidics_pinn.sampling.exterior import sample_exterior_points
+from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.device_utils import resolve_device, resolve_module_device, resolve_module_dtype
 
 FlowField = Callable[[torch.Tensor], torch.Tensor]
 
@@ -44,7 +44,7 @@ def _resolve_placement(
     """
     is_module = isinstance(network, nn.Module)
     resolved_device = torch.device(device) if device is not None else (
-        resolve_module_device(network) if is_module else torch.device("cuda"))
+        resolve_module_device(network) if is_module else resolve_device(None))
     resolved_dtype = dtype if dtype is not None else (
         resolve_module_dtype(network) if is_module else torch.float64)
     return resolved_device, resolved_dtype
@@ -354,8 +354,12 @@ def residual_by_region(
         domain, particle_axial_position, particle_radius, n_points, random_seed,
         shell_fraction=0.0, device=resolved_device, dtype=resolved_dtype,
     ).requires_grad_(True)
-    with torch.enable_grad():
-        residual = stokes_residual(network, points, fluid_config, residual_form=residual_form).detach()
+    if residual_form == "native":  # CHANGED
+        residual = network.stokes_residual_sz(points).detach()
+    else:
+        with torch.enable_grad():
+            residual = stokes_residual(network, points, fluid_config, residual_form=residual_form).detach()
+    # evaluate_held_out_residual / evaluate_residual_grid: the same two-branch pattern.
     r, z = points[:, 0].detach(), points[:, 1].detach()
     rho = torch.hypot(r, z - particle_axial_position)
     masks = {"all": torch.ones_like(r, dtype=torch.bool),

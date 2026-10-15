@@ -1,4 +1,4 @@
-"""Particle trajectory integration.
+r"""Particle trajectory integration.
 
 Integrates the equation of motion of one or several magnetic particles,
 combining the trained flow velocity field with the magnetic dipole force
@@ -496,7 +496,7 @@ def integrate_trajectory(
     particle_radius_nd = nondimensionalize_particle(particle_config, scales)
     
     magnetic_moment = torch.as_tensor(
-        particle_config.magnetic_moment, device=network_device, dtype=network_dtype
+        particle_config.magnetic_moment.moment_vector, device=network_device, dtype=network_dtype
     )
     mobility_tensor = mobility_tensor.to(device=network_device, dtype=network_dtype, non_blocking=True)
     

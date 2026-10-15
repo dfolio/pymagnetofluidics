@@ -354,7 +354,7 @@ def plot_two_way_history(history: TrainingHistory, log_scale: bool = True) -> ma
 
 def plot_velocity_profile_comparison(profile_evaluation: ProfileEvaluation,
                                      **plot_kwargs: Any,) -> matplotlib.figure.Figure:
-    """Plot predicted axial-velocity profiles against the analytical Hagen-Poiseuille profile.
+    r"""Plot predicted axial-velocity profiles against the analytical Hagen-Poiseuille profile.
 
     Renders $u_z^*(r^*)$ at discrete axial stations $z_k^*$ alongside the reference curve:
     $$u_{z,\mathrm{analytical}}^*(r^*) = U_{\mathrm{max}}^* \left(1 - \frac{r^{*2}}{R^{*2}}\right)$$
