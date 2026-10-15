@@ -604,8 +604,10 @@ def solve_resistance_problems_stream(
         taper_margin: float = 0.9,
         n_quadrature_points: int = 181,
         shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
-        shell_fraction: float = 0.25,  # NEW: interior collocation shell (library patch L7)
-        shell_factor: float = 2.5,  # NEW: not to be confused with `shell_factors`, the traction control spheres
+        shell_fraction: float = 0.25,
+        shell_factor: float = 2.5,
+        band_fraction: float = 0.0,  # NEW: near-surface collocation band (library patch L10)
+        band_factor: float = 1.5,  # NEW
 ) -> ResistanceResult:
     r"""Train the two resistance problems with the exact-constraint stream-function ansatz.
 
@@ -652,6 +654,10 @@ def solve_resistance_problems_stream(
       to `train_stream_function_flow` (library patch L7). Despite the name
       similarity, these control the *sampling* shell around the sphere, not the
       traction `shell_factors`.
+    - `band_fraction`, `band_factor`: Near-surface collocation band forwarded to
+      `train_stream_function_flow` (library patch L10). The band densifies the
+      $[a, \mathrm{band\_factor}\,a]$ annulus where the traction control spheres
+      of `shell_factors` read the learned field.
 
     Returns:
     - A `ResistanceResult`; `balanced_velocity` then yields every
@@ -674,6 +680,13 @@ def solve_resistance_problems_stream(
         raise ValueError(f"shell_fraction must lie in [0, 1); got {shell_fraction!r}.")
     if shell_factor <= 1.0:  # NEW
         raise ValueError(f"shell_factor must exceed 1; got {shell_factor!r}.")
+    if not (0.0 <= band_fraction < 1.0):  # NEW
+        raise ValueError(f"band_fraction must lie in [0, 1); got {band_fraction!r}.")
+    if band_factor <= 1.0:  # NEW
+        raise ValueError(f"band_factor must exceed 1; got {band_factor!r}.")
+    if band_factor > shell_factor:  # NEW: the band lives inside the taper ball
+        raise ValueError(
+            f"band_factor must not exceed shell_factor; got {band_factor!r} > {shell_factor!r}.")
     particle_axial_position = float(particle_state.position[1].item())
     largest_shell_radius = max(shell_factors) * particle_config.radius
     # Guard that shell_force_profile leaves to the caller: a truncated shell
@@ -702,7 +715,8 @@ def solve_resistance_problems_stream(
             wrapped, domain, fluid_config, training_config,
             particle_axial_position, particle_config.radius,
             inlet_peak_velocity=flow_amplitude,
-            shell_fraction=shell_fraction, shell_factor=shell_factor,  # NEW
+            shell_fraction=shell_fraction, shell_factor=shell_factor,
+            band_fraction=band_fraction, band_factor=band_factor,  # NEW
         )
         trained.eval()
         profile = shell_force_profile(
