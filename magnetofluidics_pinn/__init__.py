@@ -31,7 +31,9 @@ from magnetofluidics_pinn.boundary_conditions import (
 # entry point, the latter promoted out of training.trainer as its default.
 from magnetofluidics_pinn.config import (DEFAULT_BOUNDARY_LOSS_WEIGHT as DEFAULT_BOUNDARY_LOSS_WEIGHT,
                                          DomainConfig as DomainConfig, FluidConfig as FluidConfig,
-                                         MagneticFieldConfig as MagneticFieldConfig, ParticleConfig as ParticleConfig,
+                                         MagneticFieldConfig as MagneticFieldConfig,
+                                         MagneticMomentConfig as MagneticMomentConfig,
+                                         ParticleConfig as ParticleConfig,
                                          set_random_seed as set_random_seed, TrainingConfig as TrainingConfig,
                                          TwoWayCouplingConfig as TwoWayCouplingConfig)
 from magnetofluidics_pinn.device_utils import (configure_cuda_matmul_precision as configure_cuda_matmul_precision,
@@ -182,6 +184,7 @@ __all__ = [
     "DomainConfig",
     "FluidConfig",
     "MagneticFieldConfig",
+    "MagneticMomentConfig",
     "ParticleConfig",
     "TwoWayCouplingConfig",
     "TrainingConfig",

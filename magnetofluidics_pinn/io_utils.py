@@ -32,6 +32,7 @@ from torch import nn
 from magnetofluidics_pinn.config import (
     DomainConfig,
     MagneticFieldConfig,
+    MagneticMomentConfig,  # NEW
     FluidConfig,
     ParticleConfig,
     TrainingConfig,
@@ -70,6 +71,7 @@ _SAFE_CHECKPOINT_GLOBALS: list[type] = [
     MagneticFieldConfig,
     ParticleConfig,
     TrainingConfig,
+    MagneticMomentConfig,  # NEW
 ]
 
 
