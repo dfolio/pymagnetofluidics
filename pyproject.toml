@@ -51,3 +51,4 @@ version = {attr = "magnetofluidics_pinn.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["magnetofluidics_pinn"]

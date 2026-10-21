@@ -282,9 +282,9 @@ def nondimensionalize_particle(particle_config: ParticleConfig, scales: Scales) 
 
 
 def compute_mobility_scale(domain_config: DomainConfig) -> float:
-    """Calculates the characteristic hydrodynamic mobility scale (SI).
+    r"""Calculates the characteristic hydrodynamic mobility scale (SI).
 
-    $$M_{ref} = 1 / (6 * \\pi * \\mu * L_{ref})$$
+    $U_c/F_c = 1/(\mu L_c)$ with $F_c=\mu U_c L_c$
     """
     return 1.0 / (6.0 * np.pi * domain_config.fluid.dynamic_viscosity * domain_config.reference_length)
 
@@ -324,7 +324,7 @@ def nondimensionalize_mobility(particle_config: ParticleConfig, fluid_config: Do
     if kind in ["sphere", "spherical"]:
         # Adimensional isotropic Stroke mobility
         mobility_scalar = 1.0 / (6.0*torch.pi*a_nd)
-        return torch.diag(torch.tensor([mobility_scalar, mobility_scalar]))
+        torch.eye(2, device=device, dtype=dtype) * mobility_scalar
     
     # elif kind == "spheroid":
         # aspect_ratio = particle_config.aspect_ratio  # ex: longueur / diamètre

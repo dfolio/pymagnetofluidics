@@ -115,10 +115,7 @@ def hagen_poiseuille_velocity_field(
 ) -> torch.Tensor:
     r"""Evaluate the closed-form Hagen-Poiseuille $(u_r, u_z, p)$ field.
 
-    Reuses
-    [`inlet_velocity_condition`][magnetofluidics_pinn.boundary_conditions.flow_bc.inlet_velocity_condition]
-    for the velocity components — the profile is $z$-independent, so
-    evaluating it away from the inlet is exactly as valid — and appends the
+    Evaluates the exact parabolic velocity profile and appends the linear
     pressure field from
     [`hagen_poiseuille_pressure`][magnetofluidics_pinn.verification.analytical.hagen_poiseuille_pressure].
     Exposed with the `(n_points, 2) -> (n_points, 3)` calling convention a
@@ -140,11 +137,22 @@ def hagen_poiseuille_velocity_field(
     - Tensor of shape `(n_points, 3)` with columns $(u_r^*, u_z^*, p^*)$.
 
     Raises:
-    - `ValueError`: If `coordinates` does not have shape `(n_points, 2)`.
+    - `ValueError`: If `coordinates` does not have shape `(n_points, 2)`
+      or if `peak_velocity` or `reference_pressure` is not finite.
     """
     if coordinates.ndim != 2 or coordinates.shape[1] != 2:
         raise ValueError(f"coordinates must have shape (n_points, 2); got {tuple(coordinates.shape)}.")
-    velocity = inlet_velocity_condition(domain, coordinates, peak_velocity)
+    if not math.isfinite(peak_velocity):
+        raise ValueError(f"peak_velocity must be finite; got {peak_velocity!r}.")
+    if not math.isfinite(reference_pressure):
+        raise ValueError(f"reference_pressure must be finite; got {reference_pressure!r}.")
+
+    # velocity = inlet_velocity_condition(domain, coordinates, peak_velocity)
+    r = coordinates[:, 0:1]
+    u_r = torch.zeros_like(r)
+    u_z = peak_velocity * (1.0 - (r / domain.radius).square())
+    velocity = torch.cat([u_r, u_z], dim=1)
+    
     axial_position = coordinates[:, 1:2]
     pressure = hagen_poiseuille_pressure(
         axial_position, domain.radius, peak_velocity, domain.length, reference_pressure

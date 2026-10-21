@@ -20,6 +20,12 @@ from magnetofluidics_pinn.visualization.plotting import (
     plot_velocity_profile_comparison as plot_velocity_profile_comparison,  # NEW
     plot_particle_flow_field as plot_particle_flow_field,
     plot_particle_residual_heatmap as plot_particle_residual_heatmap,
+    plot_traction_uniformity as plot_traction_uniformity,
+    plot_resistance_pair_comparison as plot_resistance_pair_comparison,
+    plot_resistance_position_sweep as plot_resistance_position_sweep,
+    plot_residual_by_region as plot_residual_by_region,
+    plot_surface_independence as plot_surface_independence,
+    plot_stream_function_field as plot_stream_function_field,
 )
 
 __all__ = [
@@ -36,4 +42,10 @@ __all__ = [
     "plot_residual_heatmap",
     "plot_particle_flow_field",
     "plot_particle_residual_heatmap",
+    "plot_traction_uniformity",
+    "plot_resistance_pair_comparison",
+    "plot_resistance_position_sweep",
+    "plot_residual_by_region",
+    "plot_surface_independence",
+    "plot_stream_function_field"
 ]

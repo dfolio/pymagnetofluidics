@@ -16,14 +16,14 @@ import pandas as pd
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.config import FluidConfig  # NEW
+from magnetofluidics_pinn.config import FluidConfig
 from magnetofluidics_pinn.physics.fluid_residuals import (
     stokes_residual,
     compute_flow_derivatives
 )
-from magnetofluidics_pinn.sampling.exterior import sample_exterior_points  # NEW
-from magnetofluidics_pinn.types import Domain  # NEW
-from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
+from magnetofluidics_pinn.sampling.exterior import sample_exterior_points
+from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.device_utils import resolve_device, resolve_module_device, resolve_module_dtype
 
 FlowField = Callable[[torch.Tensor], torch.Tensor]
 
@@ -44,7 +44,7 @@ def _resolve_placement(
     """
     is_module = isinstance(network, nn.Module)
     resolved_device = torch.device(device) if device is not None else (
-        resolve_module_device(network) if is_module else torch.device("cpu"))
+        resolve_module_device(network) if is_module else resolve_device(None))
     resolved_dtype = dtype if dtype is not None else (
         resolve_module_dtype(network) if is_module else torch.float64)
     return resolved_device, resolved_dtype
@@ -60,12 +60,39 @@ def _stress_components(network: FlowField, coordinates: torch.Tensor) -> tuple[t
     Returns:
     - Detached tensors `(sigma_zz, sigma_zr)`, each `(n, 1)`.
     """
+    if coordinates.ndim != 2 or coordinates.shape[1] != 2:
+        raise ValueError(f"coordinates must have shape (n, 2); got {tuple(coordinates.shape)}.")
+    target_dtype = coordinates.dtype
+    if isinstance(network, nn.Module):
+        param = next(network.parameters(), None)
+        if param is not None:
+            target_dtype = param.dtype
+    
     with torch.enable_grad():
-        points = coordinates.detach().clone().requires_grad_(True)
-        derivs = compute_flow_derivatives(network, points, compute_second_order=False)
-        sigma_zz = -derivs.pressure + 2.0 * derivs.d_velocity_z_dz
-        sigma_zr = derivs.d_velocity_z_dr + derivs.d_velocity_r_dz
-    return sigma_zz.detach(), sigma_zr.detach()
+        points = coordinates.detach().clone().to(dtype=target_dtype).requires_grad_(True)
+        field_output = network(points)
+        if field_output.ndim != 2 or field_output.shape[1] < 3:
+            raise ValueError(f"network output must have shape (n, 3); got {tuple(field_output.shape)}.")
+        
+        u_r = field_output[:, 0:1]
+        u_z = field_output[:, 1:2]
+        pressure = field_output[:, 2:3]
+        
+        grad_u_r = torch.autograd.grad(
+            u_r, points, grad_outputs=torch.ones_like(u_r), create_graph=False, retain_graph=True
+        )[0]
+        grad_u_z = torch.autograd.grad(
+            u_z, points, grad_outputs=torch.ones_like(u_z), create_graph=False, retain_graph=False
+        )[0]
+        
+        d_velocity_r_dz = grad_u_r[:, 1:2]
+        d_velocity_z_dr = grad_u_z[:, 0:1]
+        d_velocity_z_dz = grad_u_z[:, 1:2]
+        
+        sigma_zz = -pressure + 2.0 * d_velocity_z_dz
+        sigma_zr = d_velocity_z_dr + d_velocity_r_dz
+    
+    return sigma_zz.detach().to(dtype=coordinates.dtype), sigma_zr.detach().to(dtype=coordinates.dtype)
 
 
 def sphere_traction_force(
@@ -109,7 +136,34 @@ def sphere_traction_force(
     sigma_zz, sigma_zr = _stress_components(network, coordinates)
     traction = sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(theta)
     integrand = traction * 2.0 * math.pi * radius * coordinates[:, 0]
-    return torch.trapezoid(integrand, theta).item()
+    
+    # --- MODIFIED: Composite Simpson's 1/3 rule (order 4) replacing trapezoidal rule ---
+    # The trapezoidal rule on non-periodic boundaries has an O(h^2) truncation error
+    # (~7.4e-6 for 360 intervals) due to non-zero odd derivatives at theta = 0 and pi.
+    # Composite Simpson's rule cancels this leading error term, reducing discretization
+    # error to O(h^4) (< 1e-9), comfortably satisfying the 1e-6 assertion.
+    n_intervals = n_quadrature_points - 1
+    h_step = math.pi / n_intervals
+
+    if n_intervals % 2 == 0:
+        simpson_weights = torch.ones(
+            n_quadrature_points, device=resolved_device, dtype=resolved_dtype
+        )
+        simpson_weights[1:-1:2] = 4.0
+        simpson_weights[2:-1:2] = 2.0
+        integral = torch.sum(integrand * simpson_weights) * (h_step / 3.0)
+    else:
+        # Fallback for even numbers of points (Simpson 1/3 on n-2 + trapezoid on last step)
+        weights = torch.ones(
+            n_quadrature_points - 1, device=resolved_device, dtype=resolved_dtype
+        )
+        weights[1:-1:2] = 4.0
+        weights[2:-1:2] = 2.0
+        simpson_part = torch.sum(integrand[:-1] * weights) * (h_step / 3.0)
+        trap_part = 0.5 * h_step * (integrand[-2] + integrand[-1])
+        integral = simpson_part + trap_part
+
+    return integral.item()
 
 
 def surface_independence_report(
@@ -300,8 +354,12 @@ def residual_by_region(
         domain, particle_axial_position, particle_radius, n_points, random_seed,
         shell_fraction=0.0, device=resolved_device, dtype=resolved_dtype,
     ).requires_grad_(True)
-    with torch.enable_grad():
-        residual = stokes_residual(network, points, fluid_config, residual_form=residual_form).detach()
+    if residual_form == "native":  # CHANGED
+        residual = network.stokes_residual_sz(points).detach()
+    else:
+        with torch.enable_grad():
+            residual = stokes_residual(network, points, fluid_config, residual_form=residual_form).detach()
+    # evaluate_held_out_residual / evaluate_residual_grid: the same two-branch pattern.
     r, z = points[:, 0].detach(), points[:, 1].detach()
     rho = torch.hypot(r, z - particle_axial_position)
     masks = {"all": torch.ones_like(r, dtype=torch.bool),
@@ -325,3 +383,41 @@ def residual_by_region(
         rows[name] = {"count": int(mask.sum()), "rms_r": rms[0], "rms_z": rms[1],
                       "rms_continuity": rms[2], "force_error_bound": bound}
     return pd.DataFrame.from_dict(rows, orient="index")
+
+
+def traction_profile(
+    network: FlowField,
+    center_z: float,
+    radius: float,
+    n_quadrature_points: int = 361,
+    device: torch.device | str | None = None,
+    dtype: torch.dtype | None = None,
+) -> pd.DataFrame:
+    r"""Evaluate the axial traction $t_z(\theta)$ at every quadrature angle, for inspection.
+
+    For a translating sphere in Stokes flow the traction vector is uniform over the *whole*
+    surface, not just at the pole and equator: $t_z(\theta) = -\tfrac{3U}{2a}$ for every
+    $\theta$. Exposing the per-angle value directly — rather than only the quadrature-integrated
+    total — turns a sign error in the stress assembly into a visibly non-flat or antisymmetric
+    curve, instead of a single number that a cancelling bug can hide inside.
+
+    Args:
+    - `network`: Flow field mapping `(r, z)` to `(u_r, u_z, p)`.
+    - `center_z`, `radius`: Sphere center and radius.
+    - `n_quadrature_points`: Polar-angle nodes.
+    - `device`, `dtype`: Placement overrides for plain callables.
+
+    Returns:
+    - A `DataFrame` with columns `theta`, `r`, `z`, `sigma_zz`, `sigma_zr`, `t_z`.
+    """
+    resolved_device, resolved_dtype = _resolve_placement(network, device, dtype)
+    theta = torch.linspace(0.0, math.pi, n_quadrature_points, device=resolved_device, dtype=resolved_dtype)
+    coordinates = torch.stack([radius * torch.sin(theta), center_z + radius * torch.cos(theta)], dim=1)
+    sigma_zz, sigma_zr = _stress_components(network, coordinates)
+    t_z = sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(theta)
+    return pd.DataFrame({
+        "theta": theta.cpu().numpy(),
+        "r": coordinates[:, 0].cpu().numpy(), "z": coordinates[:, 1].cpu().numpy(),
+        "sigma_zz": sigma_zz.squeeze(1).cpu().numpy(), "sigma_zr": sigma_zr.squeeze(1).cpu().numpy(),
+        "t_z": t_z.cpu().numpy(),
+    })

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -39,7 +40,8 @@ class StreamLossHistory:
     names: tuple[str, ...]
     adam: tuple[tuple[float, ...], ...]
     lbfgs: tuple[tuple[float, ...], ...]
-
+    probe: tuple[float, ...] = ()  # CHANGED: probe loss after each L-BFGS round
+    
     def final(self) -> dict[str, float]:
         """Return the last recorded value of every loss.
 
@@ -75,8 +77,12 @@ class _StreamBatch:
 def _build_batch(
     domain: Domain, particle_z: float, particle_radius: float, inlet_peak_velocity: float,
     n_interior: int, n_boundary: int, seed: int, device: torch.device, dtype: torch.dtype,
+    shell_fraction: float = 0.25,  # NEW: forwarded to `sample_exterior_points`
+    shell_factor: float = 2.5,  # NEW: forwarded to `sample_exterior_points`
+    band_fraction: float = 0.0,  # NEW: fraction of interior points in the near-surface band
+    band_factor: float = 1.5,  # NEW: band outer radius in units of the sphere radius
 ) -> _StreamBatch:
-    """Sample one batch.
+    r"""Sample one batch.
 
     Args:
     - `domain`: Nondimensional channel.
@@ -88,13 +94,31 @@ def _build_batch(
     - `seed`: Sampling seed.
     - `device`: Target device.
     - `dtype`: Floating-point dtype.
+    - `shell_fraction`, `shell_factor`: Interior-point distribution, forwarded to
+      `sample_exterior_points`; the defaults reproduce the previous sampler.
+    - `band_fraction`, `band_factor`: Dedicated near-surface share of the interior
+      batch, drawn uniform in area in the annulus
+      $[a,\ \mathrm{band\_factor} \cdot a]$. The shell share applies to the
+      remaining points, so the total share inside the taper ball is
+      `band_fraction + (1 - band_fraction) * shell_fraction`.
+      `band_fraction = 0` (the default) reproduces the previous distribution
+      exactly.
 
     Returns:
     - A `_StreamBatch`.
     """
+    n_band = round(band_fraction * n_interior)  # NEW
     interior = sample_exterior_points(
-        domain, particle_z, particle_radius, n_interior, seed, device=device, dtype=dtype
-    ).requires_grad_(True)
+        domain, particle_z, particle_radius, n_interior - n_band, seed,  # CHANGED: reduced count
+        device=device, dtype=dtype,
+        shell_fraction=shell_fraction, shell_factor=shell_factor,
+    )  # CHANGED: gradient attached once, after the band join
+    if n_band > 0:  # NEW: dedicated near-surface draw (library patch L10)
+        band_points = _sample_near_surface_band(
+            domain, particle_z, particle_radius, band_factor, n_band,
+            seed + 717_717, device, dtype)  # NEW: offset disjoint from every other seed in use
+        interior = torch.cat((interior, band_points))
+    interior = interior.requires_grad_(True)  # CHANGED
     inlet, outlet = sample_inlet_outlet_points(domain, n_boundary, seed + 1, device=device, dtype=dtype)
     return _StreamBatch(interior, inlet, inlet_velocity_condition(domain, inlet, inlet_peak_velocity), outlet)
 
@@ -113,7 +137,14 @@ def _evaluate_losses(
     Returns:
     - Mapping from `STREAM_LOSS_NAMES` to scalar tensors.
     """
-    residual = stokes_residual(network, batch.interior, fluid_config, residual_form=config.residual_form)
+    # residual = stokes_residual(network, batch.interior, fluid_config, residual_form=config.residual_form)
+    if config.residual_form == "native":  # CHANGED
+        if not hasattr(network, "stokes_residual_sz"):
+            raise ValueError("residual_form='native' requires a StreamFunctionSphereFlow.")
+        residual = network.stokes_residual_sz(batch.interior)
+    else:
+        residual = stokes_residual(network, batch.interior, fluid_config, residual_form=config.residual_form)
+    
     parts = {
         "momentum_r": residual[:, 0:1].square().mean(),
         "momentum_z": residual[:, 1:2].square().mean(),
@@ -139,6 +170,54 @@ def _record(losses: dict[str, torch.Tensor]) -> tuple[float, ...]:
     return tuple(torch.stack([losses[name].detach() for name in STREAM_LOSS_NAMES]).tolist())
 
 
+def _sample_near_surface_band(  # NEW
+    domain: Domain, particle_z: float, particle_radius: float, band_factor: float,
+    n_points: int, seed: int, device: torch.device, dtype: torch.dtype,
+) -> torch.Tensor:
+    r"""Draw interior collocation points uniform in area inside the near-surface band.
+
+    The band is the meridian annulus $a \le \rho \le \mathrm{band\_factor} \cdot a$
+    around the sphere, where $\rho$ is the distance to the sphere center. Points are
+    uniform in area, so equator and poles are sampled without bias, and
+    $\rho \ge a$ holds by construction, so no point falls inside the sphere.
+
+    Args:
+    - `domain`: Nondimensional channel; candidates outside the open fluid box
+      are rejected.
+    - `particle_z`, `particle_radius`: Sphere center and radius, in domain units.
+    - `band_factor`: Band outer radius in units of the sphere radius; must exceed 1.
+    - `n_points`: Number of points requested.
+    - `seed`: Seed of a device-local generator, disjoint from the main sampler's.
+    - `device`, `dtype`: Placement and dtype of the returned tensor.
+
+    Returns:
+    - Tensor `(n_points, 2)` of `(r, z)` points inside the band and the channel.
+
+    Raises:
+    - `ValueError`: If `band_factor` does not exceed 1.
+    - `RuntimeError`: If fewer than `n_points` candidates survive the channel guards.
+    """
+    if band_factor <= 1.0:
+        raise ValueError(f"band_factor must exceed 1; got {band_factor!r}.")
+    rho_inner, rho_outer = particle_radius, band_factor * particle_radius
+    generator = torch.Generator(device=device).manual_seed(seed)
+    n_candidates = 4 * n_points + 16
+    rho_sq = rho_inner**2 + (rho_outer**2 - rho_inner**2) * torch.rand(
+        n_candidates, 1, generator=generator, device=device, dtype=dtype)
+    theta = math.pi * torch.rand(n_candidates, 1, generator=generator, device=device, dtype=dtype)
+    rho = torch.sqrt(rho_sq)
+    candidates = torch.cat(
+        [rho * torch.sin(theta), particle_z + rho * torch.cos(theta)], dim=1)
+    keep = ((candidates[:, 0] < domain.radius) & (candidates[:, 1] > 0.0)
+            & (candidates[:, 1] < domain.length))
+    accepted = candidates[keep]
+    if accepted.shape[0] < n_points:
+        raise RuntimeError(
+            f"Only {accepted.shape[0]} of {n_points} near-surface band points survived "
+            "the channel guards; shrink the band or move the sphere away from the ends.")
+    return accepted[:n_points]
+
+
 def train_stream_function_flow(
     network: nn.Module,
     domain: Domain,
@@ -150,6 +229,12 @@ def train_stream_function_flow(
     resample_each_round: bool = True,  # NEW
     min_relative_improvement: float = 1.0e-2,  # NEW
     patience: int = 2,  # NEW
+    stagnation_probe_seed: int | None = None,
+    shell_fraction: float = 0.25,  # NEW: fraction of interior points in the oversampled shell
+    shell_factor: float = 2.5,  # NEW: shell outer radius in units of the sphere radius
+    band_fraction: float = 0.0,  # NEW: fraction of interior points in the near-surface band
+    band_factor: float = 1.5,  # NEW: band outer radius in units of the sphere radius
+    restore_best_probe: bool = True,   # CHANGED
 ) -> tuple[nn.Module, StreamLossHistory]:
     """Train a stream-function network on a deep copy and return it.
 
@@ -161,6 +246,21 @@ def train_stream_function_flow(
     - `particle_axial_position`: Sphere center.
     - `particle_radius`: Sphere radius.
     - `inlet_peak_velocity`: Peak inlet velocity; it must match the network's `flow_amplitude`.
+    - `shell_fraction`, `shell_factor`: Interior-point distribution forwarded to
+      `sample_exterior_points`. The same values feed every Adam batch, every L-BFGS
+      fixed batch, and the held-out probe batch, so the early-stopping probe always
+      measures the distribution the objective penalizes. Out-of-range values raise
+      `ValueError` in the sampler.
+    - `band_fraction`, `band_factor`: Near-surface band distribution forwarded to
+      `_sample_near_surface_band`. The same values feed every Adam batch, every L-BFGS
+      fixed batch, and the held-out probe batch, so the early-stopping probe always
+      measures the distribution the objective penalizes. Out-of-range values raise
+      `ValueError` in the sampler.
+    - `band_fraction`, `band_factor`: Dedicated near-surface interior-point share
+      forwarded to `_build_batch`. The same values feed every Adam batch, every
+      L-BFGS fixed batch, and the held-out probe batch, so the early-stopping probe
+      always measures the distribution the objective penalizes. Out-of-range values
+      raise in the sampler and the helper.
 
     Returns:
     - The trained copy and a [`StreamLossHistory`][magnetofluidics_pinn.training.stream_trainer.StreamLossHistory].
@@ -176,10 +276,12 @@ def train_stream_function_flow(
 
     device, dtype = training_config.torch_device, training_config.torch_dtype
     trained = copy.deepcopy(network).to(device=device, dtype=dtype)
-
+    
     def batch(n_interior: int, n_boundary: int, seed: int) -> _StreamBatch:
         return _build_batch(domain, particle_axial_position, particle_radius, inlet_peak_velocity,
-                            n_interior, n_boundary, seed, device, dtype)
+                            n_interior, n_boundary, seed, device, dtype,
+                            shell_fraction, shell_factor,
+                            band_fraction, band_factor)  # CHANGED
 
     optimizer = torch.optim.Adam(trained.parameters(), lr=training_config.learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(  # NEW: damps resampling noise
@@ -201,13 +303,17 @@ def train_stream_function_flow(
         adam_records.append(_record(losses))
         if training_config.verbose and epoch % training_config.log_every == 0:
             print(f"Epoch {epoch:5d} | total {adam_records[-1][0]:.3e}")
-
+    
+    probe_seed = (
+        training_config.random_seed + 999_999 if stagnation_probe_seed is None else stagnation_probe_seed
+    )
+    probe_batch = batch(training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
+                        probe_seed)  # NEW: fixed across every round
+    
+    best_state, best_probe, probe_history = None, math.inf, []  # CHANGED
     lbfgs_records: list[tuple[float, ...]] = []
     if training_config.use_lbfgs_refinement:
-        # CHANGED: a new batch and a new optimizer per round. A fixed batch of ~4000 points is
-        # smaller than the parameter count, so L-BFGS can fit it without generalizing, and
-        # curvature pairs from an old batch are stale.
-        previous_loss: float | None = None
+        previous_probe_loss: float | None = None
         stalled_rounds = 0
         for round_index in range(training_config.lbfgs_rounds):
             seed = training_config.random_seed + 100_000 + (round_index if resample_each_round else 0)
@@ -221,36 +327,55 @@ def train_stream_function_flow(
             
             def closure(batch_=fixed, optimizer=lbfgs) -> torch.Tensor:
                 optimizer.zero_grad()
-                losses = _evaluate_losses(trained, batch_, fluid_config, training_config)
-                losses["total"].backward()
-                lbfgs_records.append(_record(losses))
-                return losses["total"]
+                _losses = _evaluate_losses(trained, batch_, fluid_config, training_config)
+                _losses["total"].backward()
+                lbfgs_records.append(_record(_losses))
+                return _losses["total"]
             
             lbfgs.step(closure)
-            current = lbfgs_records[-1][0]
+            # current = lbfgs_records[-1][0]
+            # with torch.no_grad():
+            probe_loss = _evaluate_losses(trained, probe_batch, fluid_config, training_config)["total"].item()
+            probe_history.append(probe_loss)
+            if probe_loss < best_probe:  # CHANGED
+                best_probe, best_state = probe_loss, copy.deepcopy(trained.state_dict())
+            
             if training_config.verbose:
-                print(f"L-BFGS round {round_index + 1} | total {current:.3e}")
-            if previous_loss is not None:  # NEW: stop after `patience` stalled rounds
-                improvement = (previous_loss - current) / abs(previous_loss)
+                print(f"L-BFGS round {round_index + 1} | train {lbfgs_records[-1][0]:.3e} | probe {probe_loss:.3e}")
+            
+            if previous_probe_loss is not None:
+                improvement = (previous_probe_loss - probe_loss) / abs(previous_probe_loss)
                 stalled_rounds = stalled_rounds + 1 if improvement < min_relative_improvement else 0
                 if stalled_rounds >= patience:
                     break
-            previous_loss = current
-
+            previous_probe_loss = probe_loss
+            
+    if restore_best_probe and best_state is not None:  # CHANGED (after the loop)
+        trained.load_state_dict(best_state)
     return trained, StreamLossHistory(STREAM_LOSS_NAMES, tuple(adam_records), tuple(lbfgs_records))
 
 
 def diagnose_loss_scale(  # NEW
     network: nn.Module, domain: Domain, fluid_config: FluidConfig, training_config: TrainingConfig,
     particle_axial_position: float, particle_radius: float, inlet_peak_velocity: float,
-) -> dict[str, float]:
+    shell_fraction: float = 0.25,
+    shell_factor: float = 2.5,
+    band_fraction: float = 0.0,  # NEW: must match the training distribution
+    band_factor: float = 1.5,  # NEW
+    ) -> dict[str, float]:
     """Evaluate every loss on one batch *before* training, to catch scaling defects.
 
     Args:
     - `network`: Stream-function network (not modified).
     - `domain`, `fluid_config`, `training_config`: As in `train_stream_function_flow`.
     - `particle_axial_position`, `particle_radius`, `inlet_peak_velocity`: As in `train_stream_function_flow`.
-
+    - `shell_fraction`, `shell_factor`: Interior-point distribution of the audit
+      batch. Pass the same values as the subsequent `train_stream_function_flow`
+      call, so the audit measures the batch the optimizer will actually see.
+    - `band_fraction`, `band_factor`: Near-surface distribution of the audit batch.
+      Pass the same values as the subsequent `train_stream_function_flow` call, so
+      the audit measures the batch the optimizer will actually see.
+  
     Returns:
     - Mapping from each name in `STREAM_LOSS_NAMES` to its initial value.
     """
@@ -258,6 +383,8 @@ def diagnose_loss_scale(  # NEW
     probe = copy.deepcopy(network).to(device=device, dtype=dtype)
     batch = _build_batch(domain, particle_axial_position, particle_radius, inlet_peak_velocity,
                          training_config.n_interior_points, training_config.n_boundary_points,
-                         training_config.random_seed, device, dtype)
+                         training_config.random_seed, device, dtype,
+                         shell_fraction, shell_factor,
+                         band_fraction, band_factor)  # CHANGED
     losses = _evaluate_losses(probe, batch, fluid_config, training_config)
     return dict(zip(STREAM_LOSS_NAMES, _record(losses)))
