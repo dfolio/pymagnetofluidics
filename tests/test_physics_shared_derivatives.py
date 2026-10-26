@@ -21,7 +21,7 @@ from magnetofluidics_pinn.physics.hydrodynamic_drag import (
     faxen_corrected_velocity,
     surface_traction_force,
 )
-from magnetofluidics_pinn.types import ParticleState
+from magnetofluidics_pinn.data_types import ParticleState
 from .conftest import make_poiseuille_network
 
 

@@ -1,3 +1,6 @@
+"""Random-weight tests of the structural claims of `StreamFunctionSphereFlow`."""
+import math
+
 import pytest
 import torch
 from torch import nn
@@ -8,7 +11,7 @@ from magnetofluidics_pinn.networks.stream_function import apply_stream_function_
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.exterior import sample_exterior_points, sample_inlet_outlet_points
 from magnetofluidics_pinn.training.stream_trainer import train_stream_function_flow
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 DOM = Domain(kind="channel", length=8.0, radius=1.0, u_max=1.0)
 A, ZP, UP = 0.25, 4.0, 0.7
@@ -26,6 +29,8 @@ def _grid(n: int = 400, seed: int = 0) -> torch.Tensor:
 def _network(seed: int) -> nn.Module:
     torch.manual_seed(seed)
     raw = nn.Sequential(nn.Linear(2, 24), nn.Tanh(), nn.Linear(24, 24), nn.Tanh(), nn.Linear(24, 2)).double()
+    for p in raw.parameters():  # large weights: any dropped autograd path would show
+        nn.init.normal_(p, std=1.0)
     return apply_stream_function_constraint(raw, DOM, 4.0, 0.25, 0.3, 1.0, 8.0)
 
 

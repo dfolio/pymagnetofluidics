@@ -55,7 +55,7 @@ from magnetofluidics_pinn.physics.fluid_residuals import (
     compute_flow_derivatives,
 )
 from magnetofluidics_pinn.config import ParticleConfig
-from magnetofluidics_pinn.types import ParticleState
+from magnetofluidics_pinn.data_types import ParticleState
 
 
 # CHANGED: Refactored to leverage compute_flow_derivatives and axisymmetric_vector_laplacian.

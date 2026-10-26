@@ -89,7 +89,7 @@ from magnetofluidics_pinn.config import (
 from magnetofluidics_pinn.physics.hydrodynamic_drag import surface_traction_force
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force  # NEW
 from magnetofluidics_pinn.training.trainer import TrainingHistory, train
-from magnetofluidics_pinn.types import Domain, MagneticFieldSample, ParticleState
+from magnetofluidics_pinn.data_types import Domain, MagneticFieldSample, ParticleState
 from magnetofluidics_pinn.verification.benchmarks import shell_force_profile, shell_force_spread
 from magnetofluidics_pinn.networks.mlp import build_mlp  # NEW
 from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint  # NEW

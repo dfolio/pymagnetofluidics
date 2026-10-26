@@ -37,9 +37,17 @@ from magnetofluidics_pinn.config import (DEFAULT_BOUNDARY_LOSS_WEIGHT as DEFAULT
                                          set_random_seed as set_random_seed, TrainingConfig as TrainingConfig,
                                          TwoWayCouplingConfig as TwoWayCouplingConfig)
 from magnetofluidics_pinn.device_utils import (configure_cuda_matmul_precision as configure_cuda_matmul_precision,
-                                               resolve_device as resolve_device,
+                                               resolve_device as resolve_device, resolve_dtype as resolve_dtype,
                                                resolve_module_device as resolve_module_device,
                                                resolve_module_dtype as resolve_module_dtype)
+from magnetofluidics_pinn.io_stream import (StreamFlowArchitecture as StreamFlowArchitecture,
+                                            CheckpointProvenance as CheckpointProvenance,
+                                            architecture_from_network as architecture_from_network,
+                                            make_provenance as make_provenance,
+                                            state_checksum as state_checksum,
+                                            save_stream_checkpoint as save_stream_checkpoint,
+                                            load_stream_checkpoint as load_stream_checkpoint,
+                                            )
 from magnetofluidics_pinn.geometry import (
     build_bifurcation_domain as build_bifurcation_domain,
     build_channel_domain as build_channel_domain,
@@ -47,7 +55,10 @@ from magnetofluidics_pinn.geometry import (
 from magnetofluidics_pinn.networks import (apply_hard_particle_constraint as apply_hard_particle_constraint,
                                            apply_hard_wall_constraint as apply_hard_wall_constraint,
                                            apply_stream_function_constraint as apply_stream_function_constraint,
-                                           build_mlp as build_mlp)  # NEW
+                                           build_mlp as build_mlp,
+                                           transfer_raw_weights as transfer_raw_weights,
+                                           rebuild_for_geometry as rebuild_for_geometry
+                                           )
 from magnetofluidics_pinn.physics import (annular_flow_rate as annular_flow_rate,
                                           axial_dipole_force_si as axial_dipole_force_si,
                                           axial_flow_rate as axial_flow_rate,
@@ -99,7 +110,7 @@ from magnetofluidics_pinn.trajectory import (advance_particle_resistance as adva
                                              solve_resistance_pair as solve_resistance_pair,
                                              solve_resistance_problems_stream as solve_resistance_problems_stream,  # NEW
                                              )
-from magnetofluidics_pinn.types import (
+from magnetofluidics_pinn.data_types import (
     CollocationPoints as CollocationPoints,
     Domain as Domain,
     MagneticFieldSample as MagneticFieldSample,
@@ -153,6 +164,8 @@ from magnetofluidics_pinn.verification import (analytical_pressure_gradient as a
                                                generalization_gate as generalization_gate,
                                                reference_tolerance as reference_tolerance,
                                                momentum_balance_gate as momentum_balance_gate,
+                                               warm_start_cost_ratio as warm_start_cost_ratio,
+                                               warm_start_equivalence_gate as warm_start_equivalence_gate
                                                )
 from magnetofluidics_pinn.visualization import (plot_flow_rate_deviation as plot_flow_rate_deviation,
                                                 plot_particle_flow_field as plot_particle_flow_field,
@@ -194,6 +207,27 @@ __all__ = [
     "CollocationPoints",
     "MagneticFieldSample",
     "ParticleState",
+    # Scaling
+    "Scales",
+    "compute_scales",
+    "nondimensionalize_domain",
+    "redimensionalize_domain",
+    "nondimensionalize_particle",
+    "nondimensionalize_mobility",  # NEW: was previously only reachable via the `scaling` submodule directly.
+    # Device management
+    "resolve_device",
+    "resolve_dtype",
+    "resolve_module_device",
+    "resolve_module_dtype",
+    "configure_cuda_matmul_precision",
+    # Save/load checkpoint
+    "StreamFlowArchitecture",
+    "CheckpointProvenance",
+    "architecture_from_network",
+    "make_provenance",
+    "state_checksum",
+    "save_stream_checkpoint",
+    "load_stream_checkpoint",
     # Geometry
     "build_channel_domain",
     "build_bifurcation_domain",
@@ -236,6 +270,8 @@ __all__ = [
     "apply_hard_wall_constraint",
     "apply_hard_particle_constraint",
     "apply_stream_function_constraint",
+    "transfer_raw_weights",
+    "rebuild_for_geometry",
     # Training
     "compose_loss",
     "train",
@@ -277,18 +313,6 @@ __all__ = [
     "plot_residual_by_region",
     "plot_surface_independence",
     "plot_stream_function_field",
-    # Scaling
-    "Scales",
-    "compute_scales",
-    "nondimensionalize_domain",
-    "redimensionalize_domain",
-    "nondimensionalize_particle",
-    "nondimensionalize_mobility",  # NEW: was previously only reachable via the `scaling` submodule directly.
-    # Device management
-    "resolve_device",
-    "resolve_module_device",
-    "resolve_module_dtype",
-    "configure_cuda_matmul_precision",
     # Verification
     "ProfileEvaluation",
     "summarize_residual",
@@ -335,4 +359,6 @@ __all__ = [
     "generalization_gate",
     "reference_tolerance",
     "momentum_balance_gate",
+    "warm_start_cost_ratio",
+    "warm_start_equivalence_gate"
 ]

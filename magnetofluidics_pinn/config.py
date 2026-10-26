@@ -19,8 +19,8 @@ from typing import Literal
 
 import torch
 
-from magnetofluidics_pinn.device_utils import resolve_device
-from magnetofluidics_pinn.types import ParticleState
+from magnetofluidics_pinn.device_utils import resolve_device, resolve_dtype
+from magnetofluidics_pinn.data_types import ParticleState
 
 # Numerical tolerance for "is this vector a unit vector" checks; loose
 # enough to tolerate float rounding, tight enough to catch a genuinely
@@ -703,6 +703,8 @@ class TwoWayCouplingConfig:
     positivity_loss_weight_override: float | None = None  # NEW
     ambient_peak_velocity: float = 1.0  # NEW: peak of the ambient Poiseuille flow the problem is posed in.
     core_strain_weight: float = 1.0  # NEW: weight of the zero-strain term inside the rigid core (0 disables it).
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype: str = "float32"
     
     def __post_init__(self) -> None:
         if not all(math.isfinite(component) for component in self.particle_velocity):
@@ -724,6 +726,9 @@ class TwoWayCouplingConfig:
                 )
         _check_if_finite_positive(self.ambient_peak_velocity, "ambient_peak_velocity")
         _check_if_finite_positive(self.core_strain_weight, "core_strain_weight")
+
+        if self.device.split(":")[0] not in ("cuda", "cpu"):  # CHANGED: accepts "cuda:0" as documented
+            raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
     
     @property
     def particle_velocity_magnitude(self) -> float:
@@ -743,9 +748,12 @@ class TwoWayCouplingConfig:
     @property
     def particle_state(self) -> ParticleState:
         """Returns a ParticleState particle representing the particle's current state."""
+        
+        resolved_device = resolve_device(self.device)
+        resolved_dtype = resolve_dtype(self.dtype)  # CHANGED
         return ParticleState(
-            position=torch.tensor(self.particle_position),
-            velocity=torch.tensor(self.particle_velocity),
+            position=torch.tensor(self.particle_position, device=resolved_device, dtype=resolved_dtype),
+            velocity=torch.tensor(self.particle_velocity, device=resolved_device, dtype=resolved_dtype),
             time=self.time
         )
 

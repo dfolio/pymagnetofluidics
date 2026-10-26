@@ -47,7 +47,7 @@ from magnetofluidics_pinn.boundary_conditions.flow_bc import (
 from magnetofluidics_pinn.config import (DEFAULT_BOUNDARY_LOSS_WEIGHT, FluidConfig, MagneticFieldConfig, ParticleConfig,
                                          TrainingConfig,
                                          TwoWayCouplingConfig)  # NEW — promoted from this module's own _BOUNDARY_LOSS_WEIGHT; see config.py.; NEW
-from magnetofluidics_pinn.device_utils import resolve_device
+from magnetofluidics_pinn.device_utils import resolve_device, resolve_dtype
 from magnetofluidics_pinn.physics.conservation import annular_flow_rate, axial_flow_rate, poiseuille_reference_flow_rate
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.collocation import (
@@ -56,7 +56,7 @@ from magnetofluidics_pinn.sampling.collocation import (
     sample_collocation_points_with_particle,
 )
 from magnetofluidics_pinn.training.losses import compose_loss
-from magnetofluidics_pinn.types import Domain, ParticleState
+from magnetofluidics_pinn.data_types import Domain, ParticleState
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 
 # Boundary-condition terms are weighted more heavily than the interior PDE
@@ -117,7 +117,7 @@ def _reference_flow_rate(radius: float, peak_velocity: float) -> float:  # NEW: 
 
 def _stokes_residual_losses(
         network: nn.Module, coordinates: torch.Tensor, fluid_config: FluidConfig,
-        residual_form: Literal["standard", "r_weighted"] = "standard",  # NEW
+        residual_form: Literal["standard", "r_weighted","native"] = "standard",  # NEW
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Mean-squared Stokes residual, decomposed by governing equation.
 
@@ -181,6 +181,7 @@ def _conservation_loss(
         n_stations: int,
         n_quadrature_points: int,
         device: torch.device,
+        dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     r"""Mean-squared deviation of the network's flow rate from its analytic reference.
 
@@ -210,7 +211,7 @@ def _conservation_loss(
     - Scalar tensor: mean-squared deviation of the predicted $Q(z)$ from
       $Q_\mathrm{ref}$, over the requested stations.
     """
-    axial_positions = torch.linspace(0.0, domain.length, n_stations, device=device)
+    axial_positions = torch.linspace(0.0, domain.length, n_stations, device=device, dtype=dtype)
     predicted_flow_rate = axial_flow_rate(network, domain.radius, axial_positions, n_quadrature_points)
     reference_flow_rate = _reference_flow_rate(domain.radius, peak_velocity)
     return torch.mean((predicted_flow_rate - reference_flow_rate).square())
@@ -291,6 +292,7 @@ def _particle_conservation_loss(
         n_stations: int,
         n_quadrature_points: int,
         device: torch.device,
+        dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     r"""Mass-conservation loss, restricted to full-bore cross-sections away from particle.
  
@@ -326,11 +328,11 @@ def _particle_conservation_loss(
     n_zone = max(n_stations // 3, 6)
     
     upstream_stations = torch.linspace(0.05 * domain.length, max(z_p - 1.2 * a, 0.02 * domain.length), n_zone,
-                                       device=device)
+                                       device=device, dtype=dtype)
     # Constriction stations spanning the sphere diameter
-    constriction_stations = torch.linspace(z_p - 0.95 * a, z_p + 0.95 * a, n_zone, device=device)
+    constriction_stations = torch.linspace(z_p - 0.95 * a, z_p + 0.95 * a, n_zone, device=device, dtype=dtype)
     downstream_stations = torch.linspace(min(z_p + 1.2 * a, 0.90 * domain.length), 0.95 * domain.length, n_zone,
-                                         device=device)
+                                         device=device, dtype=dtype)
     
     all_stations = torch.cat([upstream_stations, constriction_stations, downstream_stations])
     
@@ -435,6 +437,7 @@ def _build_training_batch(
         random_seed: int,
         axis_clearance_fraction: float | None,
         device: torch.device,
+        dtype: torch.dtype,
 ) -> _TrainingBatch:
     """Sample and label one interior/boundary batch, ready for loss evaluation.
 
@@ -468,7 +471,7 @@ def _build_training_batch(
         collocation = sample_collocation_points(
             domain=domain, n_interior=n_interior, n_boundary=n_boundary,
             random_seed=random_seed, axis_clearance_fraction=axis_clearance_fraction,
-            device=device,
+            device=device, dtype=dtype,
         )
         particle_points = None
         particle_target = None
@@ -476,14 +479,14 @@ def _build_training_batch(
     else:
         collocation = sample_collocation_points_with_particle(
             domain=domain,
-            particle_state=coupling_config.particle_state.to(device=device),
+            particle_state=coupling_config.particle_state.to(device=device, dtype=dtype),
             particle_config=coupling_config.particle_config,
             n_interior=n_interior,
             n_boundary=n_boundary,
             n_surface_points=coupling_config.n_surface_points,
             random_seed=random_seed,
             axis_clearance_fraction=axis_clearance_fraction,
-            device=device,
+            device=device, dtype=dtype,
         )
         particle_points = collocation.particle_surface
         particle_target = rigid_body_velocity_condition(
@@ -496,7 +499,7 @@ def _build_training_batch(
             particle_radius=coupling_config.particle_config.radius,
             n_points=n_core,
             device=device,
-            dtype=collocation.interior.dtype,
+            dtype=dtype,
         )
     
     # `.clone()` guarantees a tensor distinct from the one `collocation`
@@ -908,14 +911,16 @@ def train(
     del field_config
     
     resolved_device = resolve_device(training_config.device)
+    resolved_dtype=resolve_dtype(training_config.torch_dtype)  # CHANGED
     
     # Never mutate the network handed in by the caller: train a private
     # copy and return it, per this module's stated contract.
-    trained_network = copy.deepcopy(network).to(resolved_device)
+    trained_network = copy.deepcopy(network).to(device=resolved_device,
+                                                dtype=resolved_dtype)  # CHANGED
     
     adam_start_time = time.perf_counter()
     adam_history = _run_adam_phase(
-        trained_network, domain, fluid_config, training_config, coupling_config, resolved_device
+        trained_network, domain, fluid_config, training_config, coupling_config, resolved_device, resolved_dtype
     )
     if training_config.verbose:
         print(
@@ -930,7 +935,7 @@ def train(
     lbfgs_history = LossHistory(**{name: () for name in empty_history_fields})
     if training_config.use_lbfgs_refinement:
         lbfgs_history = _run_lbfgs_phase(
-            trained_network, domain, fluid_config, training_config, coupling_config, resolved_device
+            trained_network, domain, fluid_config, training_config, coupling_config, resolved_device, resolved_dtype,
         )
     
     if training_config.verbose:
@@ -952,6 +957,7 @@ def _run_adam_phase(
         training_config: TrainingConfig,
         coupling_config: TwoWayCouplingConfig | None,  # NEW — replaces the former separate _run_particle_adam_phase.
         resolved_device: torch.device,
+        resolved_dtype: torch.dtype,
 ) -> LossHistory:
     """First-order, stochastic-collocation phase: fast, global exploration.
 
@@ -993,6 +999,7 @@ def _run_adam_phase(
             training_config.random_seed + epoch,
             axis_clearance_fraction=training_config.axis_clearance_fraction,
             device=resolved_device,
+            dtype=resolved_dtype
         )
         components = _evaluate_loss_components(
             trained_network, batch, domain, fluid_config, training_config, coupling_config
@@ -1030,6 +1037,7 @@ def _run_lbfgs_phase(
         training_config: TrainingConfig,
         coupling_config: TwoWayCouplingConfig | None,  # NEW
         resolved_device: torch.device,
+        resolved_dtype: torch.dtype,
 ) -> LossHistory:
     """Second-order, fixed-batch refinement phase, run after Adam.
 
@@ -1061,7 +1069,7 @@ def _run_lbfgs_phase(
         domain, coupling_config, training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
         training_config.random_seed - 1,
         axis_clearance_fraction=training_config.axis_clearance_fraction,
-        device=resolved_device,
+        device=resolved_device, dtype=resolved_dtype,
     )
     optimizer = torch.optim.LBFGS(
         trained_network.parameters(),

@@ -45,7 +45,7 @@ from magnetofluidics_pinn.boundary_conditions import rigid_body_velocity_conditi
 from magnetofluidics_pinn.physics.conservation import axial_flow_rate
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.collocation import sample_collocation_points
-from magnetofluidics_pinn.types import Domain, ParticleState
+from magnetofluidics_pinn.data_types import Domain, ParticleState
 from magnetofluidics_pinn.verification.analytical import (
     analytical_pressure_gradient,
     analytical_tracer_streamline,

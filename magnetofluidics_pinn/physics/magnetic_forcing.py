@@ -14,7 +14,7 @@ from typing import Callable
 import torch
 
 from magnetofluidics_pinn.config import MagneticMomentConfig  # NEW
-from magnetofluidics_pinn.types import MagneticFieldSample
+from magnetofluidics_pinn.data_types import MagneticFieldSample
 from magnetofluidics_pinn.scaling import Scales  # NEW
 
 

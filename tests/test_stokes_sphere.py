@@ -65,7 +65,7 @@ def test_tube_resistance_reference_matches_faxen_limit():
 
 
 def test_poiseuille_has_zero_momentum_force():
-    from magnetofluidics_pinn.types import Domain
+    from magnetofluidics_pinn.data_types import Domain
     from magnetofluidics_pinn.verification.analytical import hagen_poiseuille_velocity_field
     dom = Domain(kind="channel", length=10.0, radius=1.0, u_max=1.0)
     field = lambda x: hagen_poiseuille_velocity_field(x, dom, 1.0, 0.0)

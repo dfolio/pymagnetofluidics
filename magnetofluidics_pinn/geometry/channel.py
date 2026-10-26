@@ -7,7 +7,7 @@ constant radius.
 from __future__ import annotations
 
 from magnetofluidics_pinn.config import DomainConfig
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 
 def build_channel_domain(domain_config: DomainConfig) -> Domain:

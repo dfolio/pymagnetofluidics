@@ -40,7 +40,7 @@ from magnetofluidics_pinn.config import (
 from magnetofluidics_pinn.device_utils import resolve_device
 from magnetofluidics_pinn.networks.constraints import apply_hard_wall_constraint
 from magnetofluidics_pinn.networks.mlp import build_mlp
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 # Bumped whenever the *shape* of a checkpoint's payload changes (new/renamed
 # keys, a different meaning for an existing key) - not for ordinary model

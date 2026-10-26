@@ -131,7 +131,7 @@ from scipy.integrate import solve_ivp
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.physics.hydrodynamic_drag import faxen_corrected_velocity
 from magnetofluidics_pinn.physics.magnetic_forcing import dipole_force
-from magnetofluidics_pinn.types import MagneticFieldSample, ParticleState, Domain
+from magnetofluidics_pinn.data_types import MagneticFieldSample, ParticleState, Domain
 from magnetofluidics_pinn.config import ParticleConfig
 from magnetofluidics_pinn.scaling import Scales, nondimensionalize_particle
 

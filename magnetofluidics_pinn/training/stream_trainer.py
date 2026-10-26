@@ -21,7 +21,7 @@ from magnetofluidics_pinn.config import DEFAULT_BOUNDARY_LOSS_WEIGHT, FluidConfi
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.exterior import sample_exterior_points, sample_inlet_outlet_points
 from magnetofluidics_pinn.training.losses import compose_loss
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 # Ordered names of the recorded losses; "total" is recorded first.
 STREAM_LOSS_NAMES: tuple[str, ...] = ("total", "momentum_r", "momentum_z", "continuity", "inlet", "outlet")
@@ -352,7 +352,10 @@ def train_stream_function_flow(
             
     if restore_best_probe and best_state is not None:  # CHANGED (after the loop)
         trained.load_state_dict(best_state)
-    return trained, StreamLossHistory(STREAM_LOSS_NAMES, tuple(adam_records), tuple(lbfgs_records))
+    return trained, StreamLossHistory(STREAM_LOSS_NAMES,
+                                      tuple(adam_records), tuple(lbfgs_records),
+                                      tuple(probe_history),  # CHANGED: probe was computed but never returned
+                                      )
 
 
 def diagnose_loss_scale(  # NEW

@@ -31,7 +31,7 @@ import numpy as np
 import torch
 
 from magnetofluidics_pinn.boundary_conditions.flow_bc import inlet_velocity_condition
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 
 def analytical_pressure_gradient(radius: float, peak_velocity: float) -> float:

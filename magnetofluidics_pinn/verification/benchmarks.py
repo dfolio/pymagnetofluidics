@@ -25,7 +25,7 @@ from magnetofluidics_pinn.physics.hydrodynamic_drag import (
     brenner_poiseuille_wall_factor,
     surface_traction_force,
 )
-from magnetofluidics_pinn.types import ParticleState
+from magnetofluidics_pinn.data_types import ParticleState
 
 
 def stokes_sphere_field_polar(

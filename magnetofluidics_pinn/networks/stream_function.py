@@ -5,6 +5,14 @@ from a Stokes stream function, so continuity holds identically, and the axis, wa
 and sphere conditions are imposed by construction (see the class docstring).
 The idea follows the exact-imposition technique of [@sukumar2022exact] and
 [@lu2021physics].
+
+The reduced stream function $F$ depends on $(s, z)$ both
+explicitly (the analytic liftings) and through the learned correction $N$. The
+previous `forward` fed the network with inputs built from $(r, z)$ but
+differentiated $F$ with respect to a *separate* tensor `sz`, so the paths through
+$N$ were silently dropped and $\div\mathbf u = 0$ was **not** satisfied. The
+network inputs are now computed from `sz` itself, so a single autograd path carries
+the complete derivative $\partial F / \partial (s, z)$.
 """
 
 from __future__ import annotations
@@ -17,7 +25,7 @@ from torch import nn
 from magnetofluidics_pinn.physics.stokes_sphere import (  # NEW
     stokes_reduced_stream_function, stokes_sphere_pressure,
 )
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 
 def bump_function(q: torch.Tensor) -> torch.Tensor:
@@ -81,17 +89,13 @@ class StreamFunctionSphereFlow(nn.Module):
             particle_axial_velocity: float = 0.0,
             flow_amplitude: float | None = None,
             taper_margin: float = 3,
-            # CHANGED: multiple of a^2 (taper ball radius a*sqrt(1+margin)), not a clearance fraction
     ) -> None:
         super().__init__()
         amplitude = domain.u_max if flow_amplitude is None else flow_amplitude
         scalars = (particle_axial_position, particle_radius, particle_axial_velocity, amplitude)
         if not all(math.isfinite(value) for value in scalars):
             raise ValueError("All scalar arguments must be finite.")
-        # if not (0.0 < taper_margin < 1.0):
-        #    raise ValueError(f"taper_margin must lie in (0, 1); got {taper_margin!r}.")
-        if not (math.isfinite(
-                taper_margin) and taper_margin > 0.0):  # CHANGED: any positive multiple of a^2 is admissible
+        if not (math.isfinite(taper_margin) and taper_margin > 0.0):
             raise ValueError(f"taper_margin must be finite and strictly positive; got {taper_margin!r}.")
         if not (0.0 < particle_radius < domain.radius):
             raise ValueError("particle_radius must satisfy 0 < a < domain.radius.")
@@ -107,8 +111,6 @@ class StreamFunctionSphereFlow(nn.Module):
                 ("radius", domain.radius), ("length", domain.length),
                 ("particle_z", particle_axial_position), ("particle_a", particle_radius),
                 ("particle_u", particle_axial_velocity), ("amplitude", amplitude),
-                # CHANGED: particle-relative support in rho^2 units, capped at 0.9 of the
-                # available clearance so the bump can never reach the wall or either end.
                 ("support", min(taper_margin * particle_radius ** 2, 0.9 * clearance)),
         ):
             # Buffers travel with `state_dict`, so a checkpoint carries the full constraint.
@@ -145,10 +147,6 @@ class StreamFunctionSphereFlow(nn.Module):
         f_shear = -self.amplitude * s / (4.0 * radius_sq)  # CHANGED: curvature part of the rigid-body mismatch
         rho_sq = s + (z - self.particle_z).square()
         wall = (1.0 - s / radius_sq).square()
-        # CHANGED: bounded distance in [0, 1); squaring restores the double zero on
-        # the sphere. A single zero violates the rigid-body surface velocity at O(N)
-        # through grad d while the squared form keeps u = (0, U_p) exact and still
-        # leaves the surface stress network-dependent through the second derivatives of d^2.
         distance = (rho_sq - self.particle_a ** 2) / (rho_sq + self.particle_a ** 2)
         return (f_poiseuille + self._taper(s, z) * (f_stokes + f_shear)
                 + wall * distance.square() * raw_out[:, 0:1])
@@ -201,12 +199,12 @@ class StreamFunctionSphereFlow(nn.Module):
     def stokes_residual_sz(self, coordinates: torch.Tensor) -> torch.Tensor:
         r"""Evaluate the unweighted axisymmetric Stokes residual without any $1/r$ term.
 
-        NEW. With $u_r = r\,g$, $g = F_z$, and $u_z = h = -2(F + sF_s)$, every singular term of the
+        With $u_r = r\,g$, $g = F_z$, and $u_z = h = -2(F + sF_s)$, every singular term of the
         cylindrical operator cancels analytically. Differentiating with respect to $(s, z)$ gives
 
-        $$ f_r = r\,\big(-2p_s + 4s\,g_{ss} + 8g_s + g_{zz}\big), \qquad
+        $$f_r = r\,\big(-2p_s + 4s\,g_{ss} + 8g_s + g_{zz}\big), \qquad
            f_z = -p_z + 4s\,h_{ss} + 4h_s + h_{zz}, \qquad
-           \div\mathbf u = 2g + 2s\,g_s + h_z \equiv 0. $$
+           \div\mathbf u = 2g + 2s\,g_s + h_z \equiv 0.$$
 
         These are exactly the columns of `stokes_residual(..., residual_form="standard")`
         (checked symbolically), but they are finite on the axis, need no switching threshold, and
@@ -278,13 +276,12 @@ class StreamFunctionSphereFlow(nn.Module):
             r, z = coords[:, 0:1], coords[:, 1:2]
             s = r.square()
             sz = torch.cat([s, z], dim=1)
-            f_value, raw_out = self._evaluate_reduced(sz)  # CHANGED: one path from `sz` to `F`
+            f_value, raw_out = self._evaluate_reduced(sz)
             (grad_f,) = torch.autograd.grad(
                 f_value, sz, grad_outputs=torch.ones_like(f_value), create_graph=True
             )
             u_r = r * grad_f[:, 1:2]
             u_z = -2.0 * (f_value + s * grad_f[:, 0:1])
-            # CHANGED: pressure and gauge share the helpers used by `stokes_residual_sz`.
             pressure = self._pressure(sz, raw_out) - self._gauge_pressure()
             output = torch.cat([u_r, u_z, pressure], dim=1)
         return output if grad_enabled else output.detach()

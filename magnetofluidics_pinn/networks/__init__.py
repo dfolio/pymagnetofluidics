@@ -12,10 +12,15 @@ from magnetofluidics_pinn.networks.constraints import (
 )
 from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint as apply_stream_function_constraint  # NEW
 from magnetofluidics_pinn.networks.mlp import build_mlp as build_mlp
+from magnetofluidics_pinn.networks.warm_start import (transfer_raw_weights as transfer_raw_weights,
+                                                      rebuild_for_geometry as rebuild_for_geometry)
+
 
 __all__ = [
     "build_mlp",
     "apply_hard_wall_constraint",
     "apply_hard_particle_constraint",
     "apply_stream_function_constraint",
+    "transfer_raw_weights",
+    "rebuild_for_geometry",
 ]

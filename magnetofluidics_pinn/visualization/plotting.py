@@ -20,7 +20,7 @@ from torch import nn
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
 from magnetofluidics_pinn.training.trainer import (LOSS_COMPONENT_NAMES as LOSS_COMPONENT_NAMES,
                                                    TrainingHistory as TrainingHistory)
-from magnetofluidics_pinn.types import Domain, ParticleState
+from magnetofluidics_pinn.data_types import Domain, ParticleState
 # NEW: verification-metrics plotting functions consume `ProfileEvaluation`,
 # the shared data container `verification.metrics.evaluate_velocity_profiles`
 # produces, so that a trained network is evaluated on the profile grid once

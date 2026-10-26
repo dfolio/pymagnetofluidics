@@ -44,7 +44,7 @@ import warnings  # NEW
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 
 class _HardWallConstrainedFlow(nn.Module):

@@ -13,7 +13,7 @@ import math
 import torch
 
 from magnetofluidics_pinn.device_utils import resolve_device
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 # Candidate oversampling used by rejection sampling.
 _OVERSAMPLING = 2.0

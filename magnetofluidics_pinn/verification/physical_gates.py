@@ -20,7 +20,7 @@ import torch
 from torch import nn
 
 from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 from magnetofluidics_pinn.verification.force_checks import global_momentum_balance, sphere_traction_force
 from magnetofluidics_pinn.verification.reporting import VerificationCheck, evaluate_check
 

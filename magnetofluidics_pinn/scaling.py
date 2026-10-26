@@ -26,7 +26,7 @@ import numpy as np
 import torch
 
 from magnetofluidics_pinn.config import DomainConfig, MagneticFieldConfig, ParticleConfig
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 
 @dataclass(frozen=True)
@@ -324,7 +324,7 @@ def nondimensionalize_mobility(particle_config: ParticleConfig, fluid_config: Do
     if kind in ["sphere", "spherical"]:
         # Adimensional isotropic Stroke mobility
         mobility_scalar = 1.0 / (6.0*torch.pi*a_nd)
-        torch.eye(2, device=device, dtype=dtype) * mobility_scalar
+        return torch.eye(2, device=device, dtype=dtype) * mobility_scalar
     
     # elif kind == "spheroid":
         # aspect_ratio = particle_config.aspect_ratio  # ex: longueur / diamètre

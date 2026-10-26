@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import torch
 
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 
 
 def inlet_velocity_condition(

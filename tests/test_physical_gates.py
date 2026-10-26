@@ -4,7 +4,7 @@ import math
 import pytest
 import torch
 
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 from magnetofluidics_pinn.verification import physical_gates as pg
 
 DOMAIN = Domain(kind="channel", length=8.0, radius=1.0, u_max=1.0)

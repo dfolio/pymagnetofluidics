@@ -1,0 +1,5 @@
+[flake8]
+# Require block comments to begin with "# ", as enforced by E265.
+extend-select = E265
+# Tell pycodestyle to allow '#' followed by '|' as a valid token
+block-comment-indexes = |

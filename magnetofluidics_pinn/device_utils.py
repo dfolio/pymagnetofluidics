@@ -83,6 +83,44 @@ def resolve_device(device: str | torch.device | None) -> torch.device:
     return resolved
 
 
+def resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
+    """Resolve a requested dtype to a concrete, available `torch.dtype`.
+
+    Args:
+    - `dtype`: `None` to auto-select (`"float32"` if CUDA available, else
+      `"float64"`), a dtype string accepted by `torch.dtype` (e.g. `"float32"`,
+      `"float64"`), or an already-constructed `torch.dtype`.
+
+    Returns:
+    - A `torch.dtype` guaranteed to be constructible and available.
+
+    Raises:
+    - `TypeError`: If `dtype` is neither `None`, a `str`, nor a
+      `torch.dtype`.
+    - `ValueError`: If `dtype` is a `str` that `torch.dtype` cannot parse
+      (e.g. a typo such as `"float16"`).
+    """
+    if dtype is None:
+        return torch.float32 if torch.cuda.is_available() else torch.float64
+
+    if isinstance(dtype, torch.dtype):
+        resolved = dtype
+    elif isinstance(dtype, str):
+        try:
+            resolved = torch.dtype(dtype)
+        except TypeError as error:
+            raise ValueError(
+                "dtype must be a valid torch dtype string (e.g. 'float32', "
+                f"'float64'); got {dtype!r}."
+            ) from error
+    else:
+        raise TypeError(
+            f"dtype must be None, a str, or a torch.dtype; got {type(dtype).__name__}."
+        )
+
+    return resolved
+
+
 def resolve_module_device(module: nn.Module) -> torch.device:
     """Infer the device a module's parameters currently live on.
 

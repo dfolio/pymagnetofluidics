@@ -153,7 +153,7 @@ quarto render notebooks/phase1.4_verification.qmd --to html
 ├── device_utils.py       # Centralized torch.device & dtype management
 ├── io_utils.py           # Safe checkpointing & architecture descriptors
 ├── scaling.py            # SI <-> Dimensionless unit conversion engine
-├── types.py              # Immutable data containers (Domain, CollocationPoints, ParticleState)
+├── data_types.py              # Immutable data containers (Domain, CollocationPoints, ParticleState)
 ├── geometry/             # Vessel builders (straight channel, bifurcations)
 ├── boundary_conditions/  # Flow profiles & prescribed magnetic fields
 ├── physics/              # Stokes residuals, dipole forcing, Faxén law

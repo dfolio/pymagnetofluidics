@@ -12,7 +12,7 @@ from __future__ import annotations
 import math  # NEW
 import torch
 
-from magnetofluidics_pinn.types import MagneticFieldSample
+from magnetofluidics_pinn.data_types import MagneticFieldSample
 
 # Numerical tolerance used to check that `orientation` is (approximately) a
 # unit vector; loose enough to tolerate float32 rounding, tight enough to

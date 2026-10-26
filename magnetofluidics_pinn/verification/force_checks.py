@@ -22,7 +22,7 @@ from magnetofluidics_pinn.physics.fluid_residuals import (
     compute_flow_derivatives
 )
 from magnetofluidics_pinn.sampling.exterior import sample_exterior_points
-from magnetofluidics_pinn.types import Domain
+from magnetofluidics_pinn.data_types import Domain
 from magnetofluidics_pinn.device_utils import resolve_device, resolve_module_device, resolve_module_dtype
 
 FlowField = Callable[[torch.Tensor], torch.Tensor]

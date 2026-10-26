@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from itertools import accumulate
-from typing import Callable
+from typing import Callable, Literal
 
 import torch
 from torch import nn
@@ -25,8 +25,9 @@ import pandas as pd  # NEW
 from magnetofluidics_pinn.config import FluidConfig, TrainingConfig
 from magnetofluidics_pinn.networks.mlp import build_mlp
 from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint
+from magnetofluidics_pinn.networks.warm_start import scaled_training_config, transfer_raw_weights
 from magnetofluidics_pinn.training.stream_trainer import StreamLossHistory, train_stream_function_flow
-from magnetofluidics_pinn.types import Domain, ParticleState
+from magnetofluidics_pinn.data_types import Domain, ParticleState
 from magnetofluidics_pinn.verification.force_checks import sphere_traction_force
 
 
@@ -127,6 +128,8 @@ def solve_resistance_pair(
     activation: str = "tanh",
     control_radius_factors: tuple[float, ...] = (1.25, 1.5, 2.0),
     n_quadrature_points: int = 361,
+    initial_networks: tuple[nn.Module | None, nn.Module | None] = (None, None),  # NEW: (ambient, translation)
+    warm_training_config: TrainingConfig | None = None,  # NEW: budget used when a start network is given
 ) -> ResistanceSolution:
     """Train the ambient and translation problems and extract $(F_A, F_B)$.
 
@@ -147,21 +150,29 @@ def solve_resistance_pair(
     Raises:
     - `ValueError`: If no control radius fits inside the domain.
     """
+    if len(initial_networks) != 2:  # NEW
+        raise ValueError("initial_networks must hold exactly (ambient, translation).")
+    if any(n is not None for n in initial_networks) and warm_training_config is None:  # NEW
+        raise ValueError("warm_training_config is required when an initial network is given.")
+    
     room = 0.95 * min(domain.radius, particle_axial_position, domain.length - particle_axial_position)
     radii = tuple(f * particle_radius for f in control_radius_factors if f > 1.0 and f * particle_radius < room)
     if not radii:
         raise ValueError("No control radius fits inside the domain; use smaller factors.")
 
-    def solve(u_particle: float, amplitude: float) -> tuple[nn.Module, StreamLossHistory]:
+    def solve(u_particle: float, amplitude: float, initial: nn.Module | None) -> tuple[nn.Module, StreamLossHistory]:
         raw = build_mlp(2, 2, hidden_layers, training_config=training_config, activation=activation)
         wrapped = apply_stream_function_constraint(
             raw, domain, particle_axial_position, particle_radius, u_particle, amplitude)
+        start = wrapped if initial is None else transfer_raw_weights(initial, wrapped)  # NEW
+        config = training_config if initial is None else warm_training_config  # NEW
         return train_stream_function_flow(
-            wrapped, domain, fluid_config, training_config,
+            start, domain, fluid_config, config,
             particle_axial_position, particle_radius, amplitude)
-
-    ambient_net, ambient_hist = solve(0.0, domain.u_max)
-    translation_net, translation_hist = solve(1.0, 0.0)
+    
+    ambient_net, ambient_hist = solve(0.0, domain.u_max, initial_networks[0])  # CHANGED
+    translation_net, translation_hist = solve(1.0, 0.0, initial_networks[1])  # CHANGED
+    
     f_a, spread_a = _averaged_force(ambient_net, particle_axial_position, radii, n_quadrature_points)
     f_b, spread_b = _averaged_force(translation_net, particle_axial_position, radii, n_quadrature_points)
     return ResistanceSolution(ResistancePair(f_a, f_b), ambient_net, translation_net,
@@ -229,6 +240,8 @@ def resistance_position_sweep(
     particle_radius: float,
     positions: tuple[float, ...],
     training_config: TrainingConfig,
+    warm_start: Literal["none", "previous_position"] = "none",  # NEW
+    refinement_config: TrainingConfig | None = None,  # NEW
     **solver_kwargs,
 ) -> pd.DataFrame:
     """Solve the resistance pair at several axial positions.
@@ -242,6 +255,8 @@ def resistance_position_sweep(
     - `particle_radius`: Sphere radius.
     - `positions`: Sphere centers to test (at least two).
     - `training_config`: Budget, device and dtype for each solve.
+    - `warm_start`: Strategy for warm-starting the solver.
+    - `refinement_config`: Configuration for refining the solution.
     - `**solver_kwargs`: Forwarded to `solve_resistance_pair`.
 
     Returns:
@@ -252,10 +267,20 @@ def resistance_position_sweep(
     """
     if len(positions) < 2:
         raise ValueError("At least two positions are required for a sweep.")
-    solutions = tuple(
-        solve_resistance_pair(domain, fluid_config, particle_radius, z, training_config, **solver_kwargs)
-        for z in positions
-    )
+    if warm_start not in ("none", "previous_position"):  # NEW
+        raise ValueError(f"warm_start must be 'none' or 'previous_position'; got {warm_start!r}.")
+    warm_config = refinement_config or scaled_training_config(training_config)  # NEW
+    warm = warm_start == "previous_position"
+    
+    def step(previous: ResistanceSolution | None, z: float) -> ResistanceSolution:  # NEW: carries state
+        initial = ((previous.ambient_network, previous.translation_network)
+                   if warm and previous is not None else (None, None))
+        return solve_resistance_pair(domain, fluid_config, particle_radius, z, training_config,
+                                     initial_networks=initial, warm_training_config=warm_config,
+                                     **solver_kwargs)
+    
+    solutions = tuple(accumulate(positions, step, initial=None))[1:]  # NEW: drop the seed entry
+    
     return pd.DataFrame({
         "z_p": positions,
         "F_A": [s.pair.ambient_force for s in solutions],
@@ -263,6 +288,7 @@ def resistance_position_sweep(
         "spread_A": [s.force_spread[0] for s in solutions],
         "spread_B": [s.force_spread[1] for s in solutions],
         "U_free": [s.pair.free_velocity for s in solutions],
+        "warm_started": [False] + [warm] * (len(positions) - 1),  # NEW
     })
 
 

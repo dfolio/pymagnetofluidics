@@ -8,7 +8,7 @@ import torch
 from magnetofluidics_pinn.config import ParticleConfig, TwoWayCouplingConfig
 from magnetofluidics_pinn.physics.hydrodynamic_drag import surface_traction_force
 from magnetofluidics_pinn.trajectory.two_way_coupling import affine_force_balance
-from magnetofluidics_pinn.types import ParticleState
+from magnetofluidics_pinn.data_types import ParticleState
 from magnetofluidics_pinn.verification.benchmarks import (
     haberman_sayre_factor, reference_resistances, shell_force_profile, shell_force_spread, stokes_sphere_field_polar,
 )
