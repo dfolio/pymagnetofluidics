@@ -154,7 +154,7 @@ def solve_resistance_pair(
         raise ValueError("initial_networks must hold exactly (ambient, translation).")
     if any(n is not None for n in initial_networks) and warm_training_config is None:  # NEW
         raise ValueError("warm_training_config is required when an initial network is given.")
-    
+
     room = 0.95 * min(domain.radius, particle_axial_position, domain.length - particle_axial_position)
     radii = tuple(f * particle_radius for f in control_radius_factors if f > 1.0 and f * particle_radius < room)
     if not radii:
@@ -165,14 +165,18 @@ def solve_resistance_pair(
         wrapped = apply_stream_function_constraint(
             raw, domain, particle_axial_position, particle_radius, u_particle, amplitude)
         start = wrapped if initial is None else transfer_raw_weights(initial, wrapped)  # NEW
-        config = training_config if initial is None else warm_training_config  # NEW
+        config: TrainingConfig = (
+            warm_training_config
+            if (initial is not None and warm_training_config is not None)
+            else training_config
+        )
         return train_stream_function_flow(
             start, domain, fluid_config, config,
             particle_axial_position, particle_radius, amplitude)
-    
+
     ambient_net, ambient_hist = solve(0.0, domain.u_max, initial_networks[0])  # CHANGED
     translation_net, translation_hist = solve(1.0, 0.0, initial_networks[1])  # CHANGED
-    
+
     f_a, spread_a = _averaged_force(ambient_net, particle_axial_position, radii, n_quadrature_points)
     f_b, spread_b = _averaged_force(translation_net, particle_axial_position, radii, n_quadrature_points)
     return ResistanceSolution(ResistancePair(f_a, f_b), ambient_net, translation_net,
@@ -271,16 +275,16 @@ def resistance_position_sweep(
         raise ValueError(f"warm_start must be 'none' or 'previous_position'; got {warm_start!r}.")
     warm_config = refinement_config or scaled_training_config(training_config)  # NEW
     warm = warm_start == "previous_position"
-    
+
     def step(previous: ResistanceSolution | None, z: float) -> ResistanceSolution:  # NEW: carries state
         initial = ((previous.ambient_network, previous.translation_network)
                    if warm and previous is not None else (None, None))
         return solve_resistance_pair(domain, fluid_config, particle_radius, z, training_config,
                                      initial_networks=initial, warm_training_config=warm_config,
                                      **solver_kwargs)
-    
+
     solutions = tuple(accumulate(positions, step, initial=None))[1:]  # NEW: drop the seed entry
-    
+
     return pd.DataFrame({
         "z_p": positions,
         "F_A": [s.pair.ambient_force for s in solutions],

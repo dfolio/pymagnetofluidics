@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import math
 import pickle
+from typing import Any
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -97,8 +98,7 @@ class CheckpointProvenance:
     parent_checksum: str | None = None
 
 
-_SAFE_GLOBALS: list[type] = [StreamFlowArchitecture, CheckpointProvenance, TrainingConfig, StreamLossHistory]
-
+_SAFE_GLOBALS: list[Any] = [StreamFlowArchitecture, CheckpointProvenance, TrainingConfig, StreamLossHistory]  # CHANGED: annotation `list[type[Any]]` -> `list[Any]`
 
 def architecture_from_network(network: nn.Module) -> StreamFlowArchitecture:
     """Read the architecture back from a `StreamFunctionSphereFlow`.
@@ -119,13 +119,15 @@ def architecture_from_network(network: nn.Module) -> StreamFlowArchitecture:
     if not isinstance(network, StreamFunctionSphereFlow):
         raise TypeError(f"network must be a StreamFunctionSphereFlow; got {type(network).__name__}.")
     hidden_layers, activation = infer_mlp_layout(network.raw_network)
-    value = lambda name: float(getattr(network, name))  # noqa: E731
     return StreamFlowArchitecture(
         hidden_layers=hidden_layers, activation=activation,
-        domain_length=value("length"), domain_radius=value("radius"),
-        particle_axial_position=value("particle_z"), particle_radius=value("particle_a"),
-        particle_axial_velocity=value("particle_u"), flow_amplitude=value("amplitude"),
-        taper_margin=value("support") / value("particle_a") ** 2,
+        domain_length=float(network.length),
+        domain_radius=float(network.radius),
+        particle_axial_position=network.particle_axial_position,  # CHANGED: property, not raw buffer arithmetic
+        particle_radius=network.a,                                # CHANGED: `a` property (buffer `particle_radius`)
+        particle_axial_velocity=network.particle_axial_velocity,  # CHANGED: property (buffer `particle_u`)
+        flow_amplitude=network.u_peak,                            # CHANGED: `u_peak` property (buffer `flow_amplitude`)
+        taper_margin=network.taper_margin,                       # CHANGED: constructor value, not support / a**2
         dtype="float64" if network.radius.dtype == torch.float64 else "float32",
     )
 
@@ -219,11 +221,19 @@ def save_stream_checkpoint(
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as error:
         raise OSError(f"Could not create the checkpoint directory {checkpoint_path.parent!s}.") from error
+    # CHANGED: atomic save. The payload is first written to a temporary
+    # sibling, then moved into place with `os.replace`, which is atomic on
+    # POSIX and Windows alike. An interrupted save therefore leaves either
+    # the old checkpoint or no checkpoint, never a truncated file that
+    # `load_stream_checkpoint` would have to reject by checksum.
+    tmp_path = checkpoint_path.with_name(checkpoint_path.name + ".tmp")
     torch.save({
-        "schema": _STREAM_SCHEMA, "architecture": architecture, "state_dict": network.state_dict(),
-        "checksum": state_checksum(network), "training_config": training_config,
+        "schema"    : _STREAM_SCHEMA, "architecture": architecture,
+        "state_dict": network.state_dict(),
+        "checksum"  : state_checksum(network), "training_config": training_config,
         "provenance": provenance, "history": history,
-    }, checkpoint_path)
+    }, tmp_path)
+    tmp_path.replace(checkpoint_path)
 
 
 def load_stream_checkpoint(

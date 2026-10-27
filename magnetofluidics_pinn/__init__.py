@@ -57,7 +57,8 @@ from magnetofluidics_pinn.networks import (apply_hard_particle_constraint as app
                                            apply_stream_function_constraint as apply_stream_function_constraint,
                                            build_mlp as build_mlp,
                                            transfer_raw_weights as transfer_raw_weights,
-                                           rebuild_for_geometry as rebuild_for_geometry
+                                           rebuild_for_geometry as rebuild_for_geometry,
+                                           scaled_training_config as scaled_training_config,
                                            )
 from magnetofluidics_pinn.physics import (annular_flow_rate as annular_flow_rate,
                                           axial_dipole_force_si as axial_dipole_force_si,
@@ -272,6 +273,7 @@ __all__ = [
     "apply_stream_function_constraint",
     "transfer_raw_weights",
     "rebuild_for_geometry",
+    "scaled_training_config",
     # Training
     "compose_loss",
     "train",

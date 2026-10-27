@@ -33,6 +33,30 @@ class WarmStartError(ValueError):
     """Raised when a weight transfer is impossible or would corrupt the target."""
 
 
+def _extract_raw_network(module: nn.Module) -> nn.Module:
+    """Extract and validate the wrapped raw_network attribute from a flow model.
+
+    Suppresses PyTorch type-stub fallback where `module.__getattr__` is inferred
+    as `Union[Tensor, Module]`.
+
+    Args:
+    - `module`: Stream-function flow model wrapping an underlying MLP.
+
+    Returns:
+    - The underlying `nn.Module` representing the raw multi-layer perceptron.
+
+    Raises:
+    - `WarmStartError`: If `module` does not expose an `nn.Module` named 'raw_network'.
+    """
+    raw = getattr(module, "raw_network", None)
+    if not isinstance(raw, nn.Module):
+        raise WarmStartError(
+            f"Module {type(module).__name__} must expose an nn.Module attribute 'raw_network'; "
+            f"got {type(raw).__name__}."
+        )
+    return raw
+
+
 def infer_mlp_layout(raw_network: nn.Module) -> tuple[tuple[int, ...], str]:
     """Read the hidden widths and the activation name of a `build_mlp(2, 2, ...)` network.
 
@@ -49,16 +73,40 @@ def infer_mlp_layout(raw_network: nn.Module) -> tuple[tuple[int, ...], str]:
     """
     if not isinstance(raw_network, nn.Sequential):
         raise WarmStartError(f"raw network must be an nn.Sequential; got {type(raw_network).__name__}.")
+
     layers = list(raw_network)
-    linears, activations = layers[0::2], layers[1::2]
-    if len(layers) < 3 or len(layers) % 2 == 0 or not all(isinstance(m, nn.Linear) for m in linears):
+    if len(layers) < 3 or len(layers) % 2 == 0:
         raise WarmStartError("raw network must alternate Linear and activation layers, ending on a Linear layer.")
-    names = {_ACTIVATION_NAMES.get(type(m)) for m in activations}
-    if len(names) != 1 or None in names:
-        raise WarmStartError("raw network must use one supported activation (tanh, silu or relu).")
+
+    # CHANGED: Strongly type linears to list[nn.Linear] so out_features is statically typed as int
+    linears: list[nn.Linear] = []
+    activations: list[nn.Module] = []
+    for index, layer in enumerate(layers):
+        if index % 2 == 0:
+            if not isinstance(layer, nn.Linear):
+                raise WarmStartError(
+                    "raw network must alternate Linear and activation layers.")
+            linears.append(layer)
+        else:
+            activations.append(layer)
+
+    act_names: set[str] = set()
+    for act in activations:
+        act_type = type(act)
+        if act_type not in _ACTIVATION_NAMES:
+            raise WarmStartError("raw network must use one supported activation (tanh, silu or relu).")
+        act_names.add(_ACTIVATION_NAMES[act_type])
+
+    if len(act_names) != 1:
+        raise WarmStartError("raw network must use a single supported activation type.")
+
     if linears[0].in_features != 2 or linears[-1].out_features != 2:
         raise WarmStartError("raw network must map 2 inputs to 2 outputs.")
-    return tuple(m.out_features for m in linears[:-1]), names.pop()
+
+    # CHANGED: Guaranteed tuple[int, ...] and non-optional str
+    hidden_widths: tuple[int, ...] = tuple(layer.out_features for layer in linears[:-1])
+    activation_name: str = next(iter(act_names))
+    return hidden_widths, activation_name
 
 
 def is_transferable(source: nn.Module, target: nn.Module) -> tuple[bool, str]:
@@ -72,7 +120,9 @@ def is_transferable(source: nn.Module, target: nn.Module) -> tuple[bool, str]:
       in device or dtype are allowed; they are resolved by the transfer.
     """
     try:
-        layouts = tuple(infer_mlp_layout(module.raw_network) for module in (source, target))
+        raw_source = _extract_raw_network(source)
+        raw_target = _extract_raw_network(target)
+        layouts = (infer_mlp_layout(raw_source), infer_mlp_layout(raw_target))
     except AttributeError:
         return False, "both networks must expose a `raw_network` attribute."
     except WarmStartError as error:
@@ -102,15 +152,19 @@ def transfer_raw_weights(source: nn.Module, target: nn.Module) -> nn.Module:
     transferable, reason = is_transferable(source, target)
     if not transferable:
         raise WarmStartError(reason)
-    reference = next(target.raw_network.parameters())
+    raw_source = _extract_raw_network(source)
+    result = copy.deepcopy(target)
+    raw_target = _extract_raw_network(result)
+
+    reference = next(raw_target.parameters())
     state = {
         key: value.detach().clone().to(device=reference.device, dtype=reference.dtype)
-        for key, value in source.raw_network.state_dict().items()
+        for key, value in raw_source.state_dict().items()
     }
     if not all(bool(torch.isfinite(value).all()) for value in state.values()):
         raise WarmStartError("source weights contain NaN or Inf values.")
-    result = copy.deepcopy(target)
-    result.raw_network.load_state_dict(state)
+
+    raw_target.load_state_dict(state)
     return result
 
 
@@ -140,6 +194,7 @@ def rebuild_for_geometry(
     Raises:
     - `WarmStartError`: If `source` has an unsupported layout.
     """
+    # pyrefly: ignore[bad-argument-type]
     hidden_layers, activation = infer_mlp_layout(source.raw_network)
     raw = build_mlp(2, 2, hidden_layers, training_config=training_config, activation=activation)
     fresh = apply_stream_function_constraint(

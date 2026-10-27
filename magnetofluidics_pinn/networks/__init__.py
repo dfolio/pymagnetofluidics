@@ -10,17 +10,25 @@ from magnetofluidics_pinn.networks.constraints import (
     apply_hard_wall_constraint as apply_hard_wall_constraint,
     apply_hard_particle_constraint as apply_hard_particle_constraint,
 )
-from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint as apply_stream_function_constraint  # NEW
+from magnetofluidics_pinn.networks.stream_function import (
+    apply_stream_function_constraint as apply_stream_function_constraint,
+    StreamFunctionSphereFlow as StreamFunctionSphereFlow,
+)  # NEW
 from magnetofluidics_pinn.networks.mlp import build_mlp as build_mlp
-from magnetofluidics_pinn.networks.warm_start import (transfer_raw_weights as transfer_raw_weights,
-                                                      rebuild_for_geometry as rebuild_for_geometry)
+from magnetofluidics_pinn.networks.warm_start import (
+    transfer_raw_weights as transfer_raw_weights,
+    rebuild_for_geometry as rebuild_for_geometry,
+    scaled_training_config as scaled_training_config,
+)
 
 
 __all__ = [
     "build_mlp",
+    "StreamFunctionSphereFlow",
     "apply_hard_wall_constraint",
     "apply_hard_particle_constraint",
     "apply_stream_function_constraint",
     "transfer_raw_weights",
     "rebuild_for_geometry",
+    "scaled_training_config",
 ]

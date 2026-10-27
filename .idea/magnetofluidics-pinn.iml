@@ -8,8 +8,10 @@
       <excludeFolder url="file://$MODULE_DIR$/.idea/dictionaries" />
       <excludeFolder url="file://$MODULE_DIR$/.venv" />
       <excludeFolder url="file://$MODULE_DIR$/magnetofluidics_pinn.egg-info" />
+      <excludeFolder url="file://$MODULE_DIR$/notebooks/.quarto" />
+      <excludeFolder url="file://$MODULE_DIR$/notebooks/_freeze" />
     </content>
-    <orderEntry type="jdk" jdkName="Python 3.12 (pymagnetofluidics)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="~/PycharmProjects/pymagnetofluidics/.venv" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
   <component name="PyDocumentationSettings">

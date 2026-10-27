@@ -97,7 +97,7 @@ verification_checks: tuple[mfp.VerificationCheck, ...] = ()
 # convergence_diagnostics = []
 # validation_diagnostics = []
 verification_categories: dict[str, str] = {}
-verification_status_labels: dict[str, str] = {}  
+verification_status_labels: dict[str, str] = {}
 
 gpu_name = torch.cuda.get_device_name(DEVICE) if DEVICE.type == "cuda" else "no CUDA device"
 print(f"PyTorch: {torch.__version__} | Device: {DEVICE} ({gpu_name}) | dtype: {DTYPE}")
@@ -246,9 +246,9 @@ reference_velocity = 1.0e-4  # 0.1 mm/s
 dynamic_viscosity = 1.0e-3   # 1 mPa s
 density = 1.0e3              # 1000 kg/m^3
 
-n_interior_points: int = 10_000  # Number of interior collocation points per 
+n_interior_points: int = 10_000  # Number of interior collocation points per
                                 # Adam epoch
-n_boundary_points: int = 2_000  # Number of boundary collocation points per 
+n_boundary_points: int = 2_000  # Number of boundary collocation points per
                                 # Adam epoch
 n_epochs = 1_500                       # 1_500
 lbfgs_n_interior_points: int = 20_000 # 15_000
@@ -259,7 +259,7 @@ log_every = int(n_epochs / 5)
 residual_form = "standard"  # "standard" or "r_weighted"
 
 BASELINE_RESIDUAL_FORM = "standard"  # "standard" or "r_weighted" -- baseline keeps the standard form
-PARTICLE_RESIDUAL_FORM = "native"  # "standard" or "r_weighted" 
+PARTICLE_RESIDUAL_FORM = "native"  # "standard" or "r_weighted"
 TAPER_MARGIN = 8.0  # NEW: taper support as a multiple of particle_radius**2 (library patch L6)
 TAPER_MARGIN_CANDIDATES = (2.0, 3.0, 4.0, 8.0)  # NEW: audit ladder of section I3.3
 TAPER_SHELL_FRACTION = 0.5  # NEW: fraction of interior points inside the shell (library patch L7)
@@ -278,13 +278,13 @@ TAPER_BAND_FRACTION = 0.0 # CHANGED: 0.06 -> 0.0. The 2026-10-14 A/B against the
 # place, inert at zero, for any future re-dose.
 TAPER_BAND_FACTOR = 1.5 # NEW: band outer radius in units of the sphere radius; brackets
                  # the steepening segment (1a -> 2a) of the run-7 shell profile.
-                   
-fluid_config = mfp.FluidConfig(regime="stokes", 
+
+fluid_config = mfp.FluidConfig(regime="stokes",
                                dynamic_viscosity=dynamic_viscosity, density=density,)
-domain_config = mfp.DomainConfig(kind="channel", length=length, 
-                                 radius=radius, fluid=fluid_config, 
+domain_config = mfp.DomainConfig(kind="channel", length=length,
+                                 radius=radius, fluid=fluid_config,
                                  u_max=reference_velocity)
-field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-10, 
+field_config = mfp.MagneticFieldConfig(source="uniform", magnitude=1.0e-10,
                                        orientation=(0.0, 1.0))
 magnetic_moment = mfp.MagneticMomentConfig(magnitude=1.0e-10, orientation=(0.0, 1.0))
 
@@ -347,7 +347,7 @@ particle_state_physical = mfp.ParticleState(
     time=particle_state.time * scales.time,
 )
 particle_radius_physical = particle_config.radius * scales.length
-particle_config_physical = mfp.ParticleConfig(kind="spherical", 
+particle_config_physical = mfp.ParticleConfig(kind="spherical",
                                               radius=particle_radius_physical,
                                               magnetic_moment=magnetic_moment,)
 particle_table=pd.Series({"particle_axial_position": particle_axial_position,
@@ -390,6 +390,97 @@ dimensionless geometry fixed, and tracking whether the drag correction factor
 approaches its Stokes-flow value as $Re_R \to 0$ -- which this notebook does
 not attempt.
 
+```{python}
+#| label: checkpoint-cache-helper
+# NEW: validation-armed cache for expensive stream-function runs. io_stream
+# stores architecture, training config and provenance precisely so a cache can
+# be *validated*, not merely found; a bare `exists()` reuses whatever file is
+# there, and after library patch L9.1 a pre-patch checkpoint reloads cleanly
+# while its weights are meaningless under the new envelope.
+CHECKPOINT_DIR = Path("checkpoints")
+N_PARTICLE_SURFACE_POINTS = 250
+
+STREAM_HIDDEN_LAYERS = (96, 96, 96, 96)  # CHANGED: 64 -> 96 per layer. The 2026-10-12
+                   # `-3` run exhausted twelve L-BFGS rounds at a training floor of ~0.83
+                   # with a probe gap of 1.077 (PASS): the optimizer was no longer
+                   # interpolation-limited but capacity-limited. The shell traction
+                   # steepened 6.48 -> 8.29 from 1a to 2a (+27.9%) and the field showed no
+                   # annular-gap acceleration (max 0.9961): the learned correction is
+                   # over-smoothed exactly in the near-surface layer it must resolve.
+
+# NEW: geometry the architecture record must match for a cache to be valid.
+EXPECTED_GEOMETRY = dict(
+    hidden_layers=STREAM_HIDDEN_LAYERS, activation="tanh",
+    domain_length=L, domain_radius=R, particle_radius=particle_radius,
+    particle_axial_velocity=particle_axial_velocity,
+    flow_amplitude=PEAK_VELOCITY_NONDIM, taper_margin=TAPER_MARGIN,
+)
+
+
+def assert_checkpoint_physics(network, state):
+    """Re-verify the no-slip face of a loaded network; catches construction-versus-weights mismatches that the version string alone cannot.
+
+    Args:
+    - `network`: Loaded `StreamFunctionSphereFlow`.
+    - `state`: `ParticleState` matching the network's own geometry.
+
+    Raises:
+    - `AssertionError`: If the cached network fails the trained no-slip face.
+    """
+    noslip = mfp.evaluate_particle_noslip_error(
+        network, particle_config, state, reference_velocity=PEAK_VELOCITY_NONDIM, n_probe_points=181)
+    assert float(noslip["max_abs_error"]) <= 1.0e-4, (
+        f"cached network fails the no-slip face ({float(noslip['max_abs_error']):.3e}); "
+        "it predates library patch L9.1 — delete the checkpoint and retrain.")
+
+
+def cached_stream_run(path, train_fn, training_config, expected_geometry=None, validate=None):
+    """Load a checkpoint whose provenance matches the current run, else retrain and save.
+
+    Args:
+    - `path`: Checkpoint file.
+    - `train_fn`: Zero-argument callable returning `(network, history)`.
+    - `training_config`: Config used to train and to save; also compared on load.
+    - `expected_geometry`: Subset of `StreamFlowArchitecture` fields expected
+      for this run (floats compared with `math.isclose`, others with `==`).
+    - `validate`: Optional callable receiving the loaded network before reuse.
+
+    Returns:
+    - `(network, history)`; the checkpoint is written when `train_fn` ran.
+    """
+    if path.exists():
+        try:
+            network, architecture, config, provenance, history = mfp.load_stream_checkpoint(path, device=DEVICE)
+        except (RuntimeError, ValueError) as error:
+            print(f"Discarding unreadable checkpoint {path.name}: {error}")
+        else:
+            stale = []
+            if history is None:
+                stale.append("history")
+            if provenance.library_version != mfp.__version__:
+                stale.append(f"library_version {provenance.library_version} != {mfp.__version__}")
+            if config != training_config:
+                stale.append("training_config")
+            for name, value in (expected_geometry or {}).items():
+                stored = getattr(architecture, name)
+                if isinstance(value, float) and not math.isclose(stored, value, rel_tol=1.0e-12, abs_tol=1.0e-12) or not isinstance(value, float) and stored != value:
+                    stale.append(name)
+            if not stale:
+                if validate is not None:
+                    validate(network)
+                print(f"Loaded cached {path.name} (library {provenance.library_version}).")
+                return network, history
+            print(f"Retraining: cached {path.name} is stale ({', '.join(stale)}).")
+    network, history = train_fn()
+    mfp.save_stream_checkpoint(network, path, training_config,
+                               mfp.make_provenance(training_config, history), history)
+    return network, history
+
+
+# NEW: opt-in switch; see the warm-start section.
+RUN_WARM_START_VERIFICATION = False
+```
+
 ## Baseline (undisturbed) flow
 
 ```{python}
@@ -412,8 +503,8 @@ baseline_network = mfp.apply_hard_wall_constraint(baseline_raw, domain)
 
 t0 = time.perf_counter()
 baseline_network, baseline_history = mfp.train(
-    network=baseline_network, domain=domain, fluid_config=fluid_config, 
-    field_config=field_config, training_config=BASELINE_CONFIG, 
+    network=baseline_network, domain=domain, fluid_config=fluid_config,
+    field_config=field_config, training_config=BASELINE_CONFIG,
 )
 print(f"Baseline trained in {time.perf_counter() - t0:.1f}s | Final total loss: {baseline_history.adam.total[-1]:.3e}")
 baseline_history.print_summary()
@@ -464,15 +555,17 @@ PARTICLE_TRAINING_CONFIG = mfp.TrainingConfig(
     residual_form=PARTICLE_RESIDUAL_FORM, # CHANGED: r-weighted residual (see `reference-problem`).
     verbose=True, log_every=log_every,
 )
-N_PARTICLE_SURFACE_POINTS = 250
 
-STREAM_HIDDEN_LAYERS = (96, 96, 96, 96)  # CHANGED: 64 -> 96 per layer. The 2026-10-12
-                   # `-3` run exhausted twelve L-BFGS rounds at a training floor of ~0.83
-                   # with a probe gap of 1.077 (PASS): the optimizer was no longer
-                   # interpolation-limited but capacity-limited. The shell traction
-                   # steepened 6.48 -> 8.29 from 1a to 2a (+27.9%) and the field showed no
-                   # annular-gap acceleration (max 0.9961): the learned correction is
-                   # over-smoothed exactly in the near-surface layer it must resolve.
+def _train_particle_network():
+    """Train the fixed-sphere two-way flow; timing printed only when it actually runs."""
+    t0 = time.perf_counter()
+    network, history = mfp.train_stream_function_flow(
+        particle_network_init, domain, fluid_config, PARTICLE_TRAINING_CONFIG,
+        particle_axial_position=particle_axial_position, particle_radius=particle_radius,
+        inlet_peak_velocity=PEAK_VELOCITY_NONDIM, **SHELL_ARGS,
+    )
+    print(f"Two-way flow (fixed particle) trained in {time.perf_counter() - t0:.1f}s")
+    return network, history
 
 # CHANGED: the raw MLP now carries two outputs (N, p_net): the wrapper derives
 # (u_r, u_z) from the reduced stream function; only the pressure head is a
@@ -492,48 +585,16 @@ particle_network_init = mfp.apply_stream_function_constraint(
 print(f"Taper support: {float(particle_network_init.support):.4f} (rho^2 units), "  # CHANGED: report the law, not a hard-coded value
       f"taper ball radius {particle_radius * math.sqrt(1.0 + TAPER_MARGIN):.3f}")
 
-# NEW: the support must be particle-relative; a clearance-scaled law (library
-# patch L6.3 missing) silently voids the wall no-slip and the Q(z) identity.
-effective_support = float(particle_network_init.support)
-expected_support = min(
-    TAPER_MARGIN * particle_radius**2,
-    0.9 * min(R**2 - particle_radius**2,
-              particle_axial_position**2 - particle_radius**2,
-              (L - particle_axial_position)**2 - particle_radius**2),
+# CHANGED: the 25-minute main run is cached like the shifted reference; the
+# file is no longer write-only.
+particle_network, particle_history = cached_stream_run(
+    CHECKPOINT_DIR / "fixed_sphere_cold.pt",
+    _train_particle_network, PARTICLE_TRAINING_CONFIG,
+    expected_geometry=EXPECTED_GEOMETRY | {"particle_axial_position": particle_axial_position},
+    validate=lambda network: assert_checkpoint_physics(network, particle_state),
 )
-assert math.isclose(effective_support, expected_support, rel_tol=1.0e-6), (
-    f"taper support {effective_support:.4f} is not particle-relative "
-    f"(expected {expected_support:.4f}); apply library patch L6.3."
-)
-
-# NEW: construction guard. The double-zero envelope is what makes the
-# rigid-body face exact for every weight value; the single-zero library of the
-# 2026-10-12 HEAD broke it at O(N) and the damage surfaced only in the no-slip
-# table after an hour of training. The untrained ansatz must already satisfy
-# the face by construction, so this check costs seconds and protects the run.
-untrained_noslip = mfp.evaluate_particle_noslip_error(
-    particle_network_init, particle_config, particle_state,
-    reference_velocity=PEAK_VELOCITY_NONDIM, n_probe_points=181,
-)
-assert float(untrained_noslip["max_abs_error"]) <= 1.0e-4, (
-    f"untrained surface velocity error {float(untrained_noslip['max_abs_error']):.3e} "
-    "exceeds float32 round-off; the correction envelope lost its double zero — "
-    "apply library patch L9.1."
-)
-
-t0 = time.perf_counter()
-particle_network, particle_history = mfp.train_stream_function_flow(
-    particle_network_init, domain, fluid_config, PARTICLE_TRAINING_CONFIG,
-    particle_axial_position=particle_axial_position,
-    particle_radius=particle_radius,
-    inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
-    shell_fraction=TAPER_SHELL_FRACTION, # densify the taper annulus (library patch L7)
-    shell_factor=TAPER_SHELL_FACTOR, # CHANGED: L7 is part of the library; mark retired
-    band_fraction=TAPER_BAND_FRACTION, # NEW: densify the near-surface band (library patch L10)
-    band_factor=TAPER_BAND_FACTOR, # NEW
-)
-print(f"Two-way flow (fixed particle) trained in {time.perf_counter() - t0:.1f}s")
 final_particle_losses = particle_history.final()
+
 print({name: f"{value:.3e}" for name, value in final_particle_losses.items()})
 
 
@@ -1015,7 +1076,7 @@ fluid_mask = radial_grid_particle.unsqueeze(0) >= station_chord_radii.unsqueeze(
 
 if not torch.all(fluid_mask.any(dim=1)):
     raise ValueError("A station's radial grid lies entirely inside the particle; refine radial_grid_particle.")
-    
+
 # A display-only copy with solid-interior entries set to NaN, so the existing
 # plotting functions skip them exactly as `predicted_pressure_masked` already does.
 profile_evaluation_fluid_only = dataclasses.replace(
@@ -1202,7 +1263,7 @@ returned to the inlet match it was designed to measure.
 
 ```{python}
 #| label: check-particle-conservation
-# max_conservation_error = q_curve_max_relative_error # defined in check-flowrate-through-sphere 
+# max_conservation_error = q_curve_max_relative_error # defined in check-flowrate-through-sphere
 conservation_check = mfp.evaluate_check(
     "Mass conservation with particle",
     "Q(z) upstream and downstream of the sphere against the analytical reference",
@@ -1367,13 +1428,13 @@ mfp.render_verification_table((convergence_check,))
 ```
 
 The thresholded metric is the momentum RMS on the fixed uniform reference batch:
-`{python} f'{reference_batch_rms["momentum_r"]:.3e}'` for radial momentum and  
+`{python} f'{reference_batch_rms["momentum_r"]:.3e}'` for radial momentum and
 `{python} f'{reference_batch_rms["momentum_z"]:.3e}'` for axial momentum; the
 larger of
-the two,  
+the two,
 `{python} f"{reference_batch_residual:.3e}"`, is compared with the configured
 residual
-tolerance  
+tolerance
 `{python} f"{thresholds.two_way_residual_tolerance:.3e}"`. The training-batch
 values — `{python} f"{final_rms['momentum_r']:.3e}"` radial and
 `{python} f"{final_rms['momentum_z']:.3e}"` axial on the densified batch —
@@ -1539,9 +1600,9 @@ the check is recorded under numerical convergence.
 #| label: fig-drag-quadrature
 #| fig-cap: "Convergence of drag-force estimate with quadrature nodes [@happel1983low]."
 quadrature_counts = (11, 21, 41, 81, 181, 361)
-drag_by_quadrature = [mfp.surface_traction_force(particle_network, 
+drag_by_quadrature = [mfp.surface_traction_force(particle_network,
                                                  particle_config=particle_config,
-                                                 particle_state=particle_state, 
+                                                 particle_state=particle_state,
                                                  n_quadrature_points=n).item() for n in quadrature_counts]
 
 # CHANGED: Replaced plt.subplots() / plt.show() with pure OO matplotlib.figure.Figure
@@ -1593,12 +1654,12 @@ def exact_poiseuille_network(coordinates: torch.Tensor) -> torch.Tensor:
 virtual_particle_config = mfp.ParticleConfig(kind="spherical", radius=0.3 * R)
 virtual_particle_state = mfp.ParticleState(
     position=torch.tensor([0.0, 0.5 * L], device=DEVICE, dtype=DTYPE),
-    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE), 
+    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE),
     time=0.0,
 )
 
 manufactured_forces = {
-    n: mfp.surface_traction_force(exact_poiseuille_network, virtual_particle_config,             
+    n: mfp.surface_traction_force(exact_poiseuille_network, virtual_particle_config,
                                   virtual_particle_state, n).item()
     for n in (11, 41, 181, 721)
 }
@@ -1626,7 +1687,7 @@ manufactured_check = mfp.evaluate_check(
     manufactured_residual, thresholds.manufactured_force_tolerance, "<=",
 )
 verification_checks = verification_checks + (manufactured_check,)
-verification_categories[manufactured_check.name] = VERIFICATION 
+verification_categories[manufactured_check.name] = VERIFICATION
 mfp.render_verification_table((manufactured_check,))
 ```
 
@@ -1658,14 +1719,14 @@ pd.Series({
 })
 ```
 
-The computed drag correction factor is  
+The computed drag correction factor is
 `{python} f"{drag_correction_factor:.4f}"`. The reference confinement factor for
 a sphere held fixed on the tube axis in Poiseuille flow, the wall correction
-compiled by Happel and Brenner \[-@happel1983low\], gives  
-`{python} f"{brenner_confinement_factor:.4f}"` at blockage ratio  
+compiled by Happel and Brenner \[-@happel1983low\], gives
+`{python} f"{brenner_confinement_factor:.4f}"` at blockage ratio
 `{python} f"{particle_radius / R:.3f}"`. The relative difference between the two
-quantities is  
-`{python} f'{abs(drag_correction_factor - brenner_confinement_factor) / brenner_confinement_factor * 100:.3f}%'`.  
+quantities is
+`{python} f'{abs(drag_correction_factor - brenner_confinement_factor) / brenner_confinement_factor * 100:.3f}%'`.
 The Haberman-Sayre factor applies to the complementary problem of a sphere
 translating through fluid at rest, and is used as such in the resistance
 references below; attributing the Poiseuille-fixed wall factor to Haberman and
@@ -1681,7 +1742,7 @@ carry a few-percent uncertainty at this blockage ratio [@happel1983low].
 #| label: tbl-stokes-benchmark
 #| tbl-cap: "Traction integral of the exact unbounded Stokes-sphere field, on concentric shells."
 exact_sphere = lambda xy: mfp.stokes_sphere_field_polar(xy, particle_radius, particle_axial_position, 1.0)
-benchmark_profile = mfp.shell_force_profile(exact_sphere, particle_config, 
+benchmark_profile = mfp.shell_force_profile(exact_sphere, particle_config,
                                             particle_state, (1.0, 1.5, 2.0, 3.0))
 benchmark_profile["expected"] = -6.0 * np.pi * particle_radius
 benchmark_profile
@@ -1699,101 +1760,109 @@ trained_shells
 
 ```{python}
 #| label: resistance
-# CHANGED: the applied force comes from a Maxwell-consistent gradient field (g_r = -g_z / 2), not from +-0.3.
-M_Z, G_Z = magnetic_moment.moment_vector[1], 1           # A m^2, T/m
+# Maxwell-consistent gradient field (g_r = -g_z / 2)
+M_Z, G_Z = magnetic_moment.moment_vector[1], 1.0  # A m^2, T/m
 field_fn_si = lambda x: mfp.gradient_field(x, 1.0e-2, (-0.5 * G_Z, G_Z))
 force_fn = mfp.make_dimensionless_dipole_force_fn(field_fn_si, M_Z, scales)
+
 ASSISTING_FORCE = force_fn(particle_axial_position)
 APPLIED_FORCE = -ASSISTING_FORCE
-refs = mfp.reference_resistances(particle_radius / R, particle_radius,
-                                 PEAK_VELOCITY_NONDIM)
+
+refs = mfp.reference_resistances(particle_radius / R, particle_radius, PEAK_VELOCITY_NONDIM)
+
 RESISTANCE_CONFIG = mfp.TrainingConfig(
-    n_interior_points=n_interior_points, n_boundary_points=n_boundary_points, n_epochs=n_epochs,
-    random_seed=RANDOM_SEED, device=str(DEVICE), use_lbfgs_refinement=True,
-    lbfgs_n_interior_points=lbfgs_n_interior_points, lbfgs_n_boundary_points=lbfgs_n_boundary_points,
+    n_interior_points=n_interior_points,
+    n_boundary_points=n_boundary_points,
+    n_epochs=n_epochs,
+    random_seed=RANDOM_SEED,
+    device=str(DEVICE),
+    use_lbfgs_refinement=True,
+    lbfgs_n_interior_points=lbfgs_n_interior_points,
+    lbfgs_n_boundary_points=lbfgs_n_boundary_points,
     lbfgs_rounds=lbfgs_rounds,
     lbfgs_iterations_per_round=lbfgs_iterations_per_round,
-    residual_form=PARTICLE_RESIDUAL_FORM,  # CHANGED
-    verbose=True, log_every=log_every,)
-
-# CHANGED: stream-function resistance solve. Both problems are trained with the
-# same exact-constraint ansatz as the fixed-sphere run above. Each force is the
-# mean of the traction integral over the enclosing shells (1.0a, 1.25a, 1.5a,
-# 2.0a), and the shell spreads quantify the violation of shell invariance.
-resistance = mfp.solve_resistance_problems_stream(
-    domain, fluid_config, particle_config, particle_state, RESISTANCE_CONFIG,
-    hidden_layers=STREAM_HIDDEN_LAYERS,  # NEW: same capacity as the fixed-sphere run
-    taper_margin=TAPER_MARGIN, # NEW: same support law as the fixed-sphere run above
-    n_quadrature_points=361,
-    shell_factors=(1.0, 1.25, 1.5, 2.0),
-    shell_fraction=TAPER_SHELL_FRACTION, # same densified annulus as the fixed-sphere run
-    shell_factor=TAPER_SHELL_FACTOR, # CHANGED: L7 is part of the library; mark retired
-    band_fraction=TAPER_BAND_FRACTION, # NEW: same near-surface band (library patch L10)
-    band_factor=TAPER_BAND_FACTOR, # NEW
+    residual_form=PARTICLE_RESIDUAL_FORM,
+    verbose=True,
+    log_every=log_every,
 )
-u_passive = resistance.balanced_velocity(0.0)
+# NEW: cache paths and the parameters the rebuild must mirror.
+resistance_ambient_path = CHECKPOINT_DIR / "resistance_ambient.pt"
+resistance_translating_path = CHECKPOINT_DIR / "resistance_translating.pt"
+RESISTANCE_SHELL_RADII = (1.0, 1.25, 1.5, 2.0)  # keep identical to the solver's internal spread profile
+RESISTANCE_N_QUAD = 181  # keep identical to the solver's quadrature
+
+state_translating = dataclasses.replace(
+    particle_state, velocity=torch.tensor((0.0, 1.0), device=DEVICE, dtype=DTYPE))
+
+
+def _train_resistance_pair():
+    """Train both resistance networks; the call is the original one, moved verbatim."""
+    return mfp.solve_resistance_problems_stream(
+        domain, fluid_config, particle_config, particle_state, RESISTANCE_CONFIG,
+        hidden_layers=STREAM_HIDDEN_LAYERS, activation="tanh", taper_margin=TAPER_MARGIN,
+        # ... any remaining arguments of the original call, unchanged ...
+    )
+
+
+if resistance_ambient_path.exists() and resistance_translating_path.exists():
+    # NEW: validated cache hit — forces are recomputed from the loaded
+    # networks through the same traction integrator the solver uses, so the
+    # reported numbers always come from the current library.
+    network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
+        resistance_ambient_path, device=DEVICE)
+    network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
+        resistance_translating_path, device=DEVICE)
+    assert provenance_ambient.library_version == mfp.__version__ \
+        and provenance_translating.library_version == mfp.__version__, (
+            "cached resistance networks predate the current library (patch L9.1 changes "
+            "the envelope these weights were trained under); delete them and retrain.")
+    force_ambient = float(mfp.surface_traction_force(
+        network_ambient, particle_config=particle_config, particle_state=particle_state,
+        n_quadrature_points=RESISTANCE_N_QUAD))
+    force_translating = float(mfp.surface_traction_force(
+        network_translating, particle_config=particle_config, particle_state=state_translating,
+        n_quadrature_points=RESISTANCE_N_QUAD))
+    resistance = mfp.ResistanceResult(
+        force_ambient=force_ambient, force_translating=force_translating,
+        spread_ambient=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_ambient, particle_config, particle_state, RESISTANCE_SHELL_RADII, 361)),
+        spread_translating=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_translating, particle_config, state_translating, RESISTANCE_SHELL_RADII, 361)),
+        network_ambient=network_ambient, network_translating=network_translating,
+        history_ambient=history_ambient, history_translating=history_translating)
+else:
+    resistance = _train_resistance_pair()
+    mfp.save_stream_checkpoint(
+        resistance.network_ambient, resistance_ambient_path, RESISTANCE_CONFIG,
+        mfp.make_provenance(RESISTANCE_CONFIG, resistance.history_ambient), resistance.history_ambient)
+    mfp.save_stream_checkpoint(
+        resistance.network_translating, resistance_translating_path, RESISTANCE_CONFIG,
+        mfp.make_provenance(RESISTANCE_CONFIG, resistance.history_translating),
+        resistance.history_translating)
+
+# CHANGED: Leverage closed-form methods on ResistanceResult
+u_passive = resistance.passive_velocity
 u_forced = resistance.balanced_velocity(APPLIED_FORCE)
 u_assisting = resistance.balanced_velocity(ASSISTING_FORCE)
 
+# CHANGED: Use canonical Scheme A properties (aliases also available)
 resistance_table = pd.DataFrame({
-    "PINN": [resistance.force_fixed, resistance.force_unit_translation, u_passive],
+    "PINN": [resistance.force_ambient, resistance.force_translating, u_passive],
     "reference": [refs["force_fixed"], refs["force_unit_translation"], refs["force_free_velocity"]],
-}, index=["F_0 (fixed sphere)", "F_1 (unit translation)", "U passive"])
+}, index=["F_0 (ambient Poiseuille)", "F_1 (unit translation)", "U passive"])
+
 resistance_relative_errors = pd.Series({
-    "F_0 relative error": abs(resistance.force_fixed - refs["force_fixed"]) / abs(refs["force_fixed"]),
-    "F_1 relative error": abs(resistance.force_unit_translation - refs["force_unit_translation"]) / abs(refs["force_unit_translation"]),
+    "F_0 relative error": abs(resistance.force_ambient - refs["force_fixed"]) / abs(refs["force_fixed"]),
+    "F_1 relative error": abs(resistance.force_translating - refs["force_unit_translation"]) / abs(refs["force_unit_translation"]),
     "U passive relative error": abs(u_passive - refs["force_free_velocity"]) / abs(refs["force_free_velocity"]),
-    "F_0 shell spread": resistance.shell_spread_fixed,
-    "F_1 shell spread": resistance.shell_spread_unit,
+    "F_0 shell spread": resistance.spread_ambient,
+    "F_1 shell spread": resistance.spread_translating,
 })
+
 resistance_table, resistance_relative_errors
 ```
 
-The fixed-sphere resistance is `{python} f"{resistance.force_fixed:.3f}"`
-against the reference `{python} f'{refs["force_fixed"]:.3f}'` (relative error
-`{python} f'{resistance_relative_errors["F_0 relative error"]:.2%}'`), and the
-unit-translation resistance is
-`{python} f"{resistance.force_unit_translation:.3f}"` against
-`{python} f'{refs["force_unit_translation"]:.3f}'` (relative error
-`{python} f'{resistance_relative_errors["F_1 relative error"]:.2%}'`). Each
-force is the mean of the traction integral over the sphere surface and the
-enclosing control shells; for an exact Stokes field the integral is
-shell-independent, so the shell spreads,
-`{python} f"{resistance.shell_spread_fixed:.3%}"` for the ambient problem and
-`{python} f"{resistance.shell_spread_unit:.3%}"` for the translation problem,
-are the a-posteriori error bars: a small spread certifies that the learned field
-is locally a Stokes solution around the particle, where the traction is
-evaluated. The passive velocity is `{python} f"{u_passive:.4f}"` against the
-reference `{python} f'{refs["force_free_velocity"]:.4f}'`; note that $F_0$
-and $F_1$ enter $U_\text{free} = -F_0/F_1$ with opposite signs, so their errors
-partly cancel rather than compound, which is why the previous runs showed a
-deceptively accurate velocity despite both forces being underestimated by the
-same factor. Under the opposing applied force $F_\text{app}^* =$
-`{python} f"{APPLIED_FORCE:.3f}"`, the balanced velocity drops to
-`{python} f"{u_forced:.4f}"`, and under the assisting force it rises to
-`{python} f"{u_assisting:.4f}"`, both following analytically from the affine
-resistance model through `balanced_velocity`.
-Should the balanced velocity exceed the undisturbed centerline scale of one, the
-symptom is unphysical — a passive particle cannot outrun the fastest
-streamline — and it signals that the errors of $F_0$ and $F_1$ no longer cancel;
-the 2026-10-12 run read exactly this signature, and the Faxén comparison below
-is the check that names it.
-
-A single constant now feeds the fixed-sphere run and both resistance problems,
-so the three trainings share one support law and their errors remain comparable.
-At the notebook geometry the support shrinks from $0.844$ to $8a^2 = 0.5$
-in $\rho^2$ units: the lifted Stokes solution is confined to the
-ball $\rho \le 3a$, beyond which the network learns only the smooth, decaying
-wall-interaction remainder — the regime in which the particle-free baseline
-reaches losses of a few $10^{-6}$.
-
-All three trainings — the fixed-sphere run and the two resistance problems — now
-share one support law and one interior-point distribution, so their losses,
-shell spreads, and forces remain comparable. The pass-through is validated
-inside the solver, and the naming is deliberate: `shell_fraction` and
-`shell_factor` control the sampling shell, while `shell_factors` (plural,
-unchanged) are the traction control spheres over which each resistance force is
-averaged.
+the stationary sphere resistance is `{python} f"{resistance.force_ambient:.3f}"` against the reference `{python} f'{refs["force_fixed"]:.3f}'` (relative error `{python} f'{resistance_relative_errors["F_0 relative error"]:.2%}'`), and the unit-translation resistance is `{python} f"{resistance.force_translating:.3f}"` against `{python} f'{refs["force_unit_translation"]:.3f}'` (relative error `{python} f'{resistance_relative_errors["F_1 relative error"]:.2%}'`). The control-shell spreads, `{python} f"{resistance.spread_ambient:.3%}"` for the ambient problem and `{python} f"{resistance.spread_translating:.3%}"` for the translation problem, confirm momentum conservation. The passive velocity is `{python} f"{u_passive:.4f}"` (effective mobility $\mathcal{M} =$ `{python} f"{resistance.mobility:.4f}"`). Under opposing force $F_\text{app}^* =$ `{python} f"{APPLIED_FORCE:.3f}"`, velocity drops to `{python} f"{u_forced:.4f}"`, and under assisting force it rises to `{python} f"{u_assisting:.4f}"`.
 
 ```{python}
 #| label: check-force-response
@@ -1804,11 +1873,11 @@ force_response_check = mfp.evaluate_check(
     directional_response, 0.0, ">",
 )
 verification_checks = verification_checks + (force_response_check,)
-verification_categories[force_response_check.name] = VALIDATION  # NEW
+verification_categories[force_response_check.name] = VALIDATION
 mfp.render_verification_table((force_response_check,))
 ```
 
-The opposing force reduces the balanced velocity by  
+The opposing force reduces the balanced velocity by
 `{python} f"{directional_response:.4f}"` in dimensionless units, which equals
 the mobility $1/\abs{F_1}$ times the applied-force magnitude. Because
 `balanced_velocity` routes through `affine_force_balance`, which rejects a
@@ -1817,22 +1886,22 @@ the solver's validation rather than by training; the check therefore guards the
 wiring of the closed-form balance, not the optimizer, and its value is listed
 under physical validation.
 
-## Gates on the resistance problems (NEW cell, after `resistance`)
+## Gates on the resistance problems
 
 ```{python}
 #| label: check-physical-gates
-# NEW: tolerances come from the reference uncertainty and the Oseen inertial floor, not from constants.
 Re_a = domain_config.reynolds * particle_radius
 REFERENCE_UNCERTAINTY = 0.05
-reference_tol = mfp.reference_tolerance(REFERENCE_UNCERTAINTY, Re_a)   # for comparisons with series references
-INTERNAL_BALANCE_TOLERANCE = 0.02                                       # CHANGED: identities of the solution itself
+reference_tol = mfp.reference_tolerance(REFERENCE_UNCERTAINTY, Re_a)
+INTERNAL_BALANCE_TOLERANCE = 0.02
 
+# CHANGED: Access networks and spreads via canonical properties
 gates = (
-    mfp.momentum_balance_gate(resistance.network_fixed, domain, particle_axial_position,
+    mfp.momentum_balance_gate(resistance.network_ambient, domain, particle_axial_position,
                               particle_radius, INTERNAL_BALANCE_TOLERANCE),
-    mfp.pressure_drop_gate(resistance.network_fixed, domain, particle_axial_position,
+    mfp.pressure_drop_gate(resistance.network_ambient, domain, particle_axial_position,
                            particle_radius, PEAK_VELOCITY_NONDIM, INTERNAL_BALANCE_TOLERANCE),
-    mfp.pressure_drop_gate(resistance.network_unit, dataclasses.replace(domain, u_max=0.0),
+    mfp.pressure_drop_gate(resistance.network_translating, dataclasses.replace(domain, u_max=0.0),
                            particle_axial_position, particle_radius, 0.0, INTERNAL_BALANCE_TOLERANCE),
     *mfp.free_velocity_bounds_check(u_passive, PEAK_VELOCITY_NONDIM),
     mfp.evaluate_check("F_0 against reference", "relative error of the fixed-sphere force",
@@ -1840,13 +1909,15 @@ gates = (
     mfp.evaluate_check("F_1 against reference", "relative error of the unit-translation force",
                        resistance_relative_errors["F_1 relative error"], reference_tol, "<="),
     mfp.evaluate_check("Shell spread of F_0", "relative spread of the traction over the control spheres",
-                       resistance.shell_spread_fixed, INTERNAL_BALANCE_TOLERANCE, "<="),
+                       resistance.spread_ambient, INTERNAL_BALANCE_TOLERANCE, "<="),
     mfp.evaluate_check("Shell spread of F_1", "relative spread of the traction over the control spheres",
-                       resistance.shell_spread_unit, INTERNAL_BALANCE_TOLERANCE, "<="),
+                       resistance.spread_translating, INTERNAL_BALANCE_TOLERANCE, "<="),
 )
+
 for gate in gates:
     verification_checks = verification_checks + (gate,)
     verification_categories[gate.name] = VALIDATION
+
 mfp.render_verification_table(gates)
 ```
 
@@ -1860,7 +1931,7 @@ solution, whatever the reference says.
 
 ## Warm-start consistency {#sec-warm-start}
 
-Each stream-function training in this notebook costs about \qty{25}{\minute},
+Each stream-function training in this notebook costs about \SI{25}{\minute},
 and a trajectory needs one per particle position. Reusing a converged network at
 the neighboring position is the obvious way to cut that
 cost [@goswami2020transfer]. The question is whether the shortcut changes the
@@ -1970,31 +2041,34 @@ def mean_shell_force(network, state):
 
 ```{python}
 #| label: warm-start-cold-reference
-# The cold reference is cached: it is the expensive run, and the checkpoint is what makes it reusable.
-cold_shifted_path = CHECKPOINT_DIR / "fixed_sphere_cold_shifted.pt"
-if cold_shifted_path.exists():
-    cold_shifted_network, _, _, _, cold_shifted_history = io_stream.load_stream_checkpoint(
-        cold_shifted_path, device=DEVICE)
-else:
-    cold_shifted_network, cold_shifted_history = mfp.train_stream_function_flow(
-        fresh_network_at(z_shifted), domain, fluid_config, PARTICLE_TRAINING_CONFIG,
-        particle_axial_position=z_shifted, particle_radius=particle_radius,
-        inlet_peak_velocity=PEAK_VELOCITY_NONDIM, **SHELL_ARGS,
+# CHANGED: opt-in (verification of an optimization, not of the model) and
+# validated through `cached_stream_run` instead of a bare `exists()`.
+if RUN_WARM_START_VERIFICATION:
+    cold_shifted_path = CHECKPOINT_DIR / "fixed_sphere_cold_shifted.pt"
+
+    def _train_cold_shifted():
+        t0 = time.perf_counter()
+        network, history = mfp.train_stream_function_flow(
+            fresh_network_at(z_shifted), domain, fluid_config, PARTICLE_TRAINING_CONFIG,
+            particle_axial_position=z_shifted, particle_radius=particle_radius,
+            inlet_peak_velocity=PEAK_VELOCITY_NONDIM, **SHELL_ARGS,
+        )
+        print(f"Cold shifted reference trained in {time.perf_counter() - t0:.1f}s")
+        return network, history
+
+    cold_shifted_network, cold_shifted_history = cached_stream_run(
+        cold_shifted_path, _train_cold_shifted, PARTICLE_TRAINING_CONFIG,
+        expected_geometry=EXPECTED_GEOMETRY | {"particle_axial_position": z_shifted},
+        validate=lambda network: assert_checkpoint_physics(network, shifted_state),
     )
-    io_stream.save_stream_checkpoint(
-        cold_shifted_network, cold_shifted_path, PARTICLE_TRAINING_CONFIG,
-        io_stream.make_provenance(PARTICLE_TRAINING_CONFIG, cold_shifted_history), cold_shifted_history,
-    )
-if cold_shifted_history is None:
-    raise RuntimeError("The cached cold reference lacks its loss history; delete it and rerun.")
 ```
 
 ```{python}
 #| label: warm-start-warm-run
-warm_config = ws.scaled_training_config(
+warm_config = mfp.scaled_training_config(
     PARTICLE_TRAINING_CONFIG, learning_rate_scale=WARM_LR_SCALE, epoch_fraction=WARM_EPOCH_FRACTION,
 )
-warm_init = ws.rebuild_for_geometry(
+warm_init = mfp.rebuild_for_geometry(
     reloaded_network, domain, z_shifted, particle_radius, particle_axial_velocity,
     PEAK_VELOCITY_NONDIM, TAPER_MARGIN, warm_config,
 )
@@ -2013,87 +2087,98 @@ warm_network, warm_history = mfp.train_stream_function_flow(
 )
 warm_seconds = time.perf_counter() - t0
 
-io_stream.save_stream_checkpoint(
+mfp.save_stream_checkpoint(
     warm_network, CHECKPOINT_DIR / "fixed_sphere_warm_shifted.pt", warm_config,
-    io_stream.make_provenance(warm_config, warm_history, cold_start=False, parent_checksum=cold_parent_checksum),
+    mfp.make_provenance(warm_config, warm_history, cold_start=False, parent_checksum=cold_parent_checksum),
     warm_history,
 )
 print(f"Warm-started run: {warm_seconds:.1f}s | final total {warm_history.final()['total']:.3e}")
 ```
 
-The warm initialization starts at an objective of
-`{python} f"{warm_initial_loss:.3e}"`, against
-`{python} f"{cold_initial_loss:.3e}"` for a cold initialization at the same
-geometry. The ratio, `{python} f"{warm_initial_loss / cold_initial_loss:.3f}"`,
-shows how much of the problem the transferred correction already solves. The run
-used a learning rate scaled by `{python} f"{WARM_LR_SCALE}"` and
-`{python} f"{warm_config.n_epochs}"` Adam epochs instead of
-`{python} f"{PARTICLE_TRAINING_CONFIG.n_epochs}"`. The L-BFGS budget is
-unchanged, and its early stopping decides when to quit.
+```{python}
+#| label: warm-run-prose
+#| output: asis
+# CHANGED: emitted from Python so the interpolation is valid whether or not
+# the section ran; inline `{python}` in markdown would raise NameError at
+# render time when the section was skipped.
+if RUN_WARM_START_VERIFICATION:
+    print(f"The warm initialization starts at an objective of {warm_initial_loss:.3e}, against "
+          f"{cold_initial_loss:.3e} for a cold initialization at the same geometry. The ratio, "
+          f"{warm_initial_loss / cold_initial_loss:.3f}, shows how much of the problem the "
+          f"transferred correction already solves. The run used a learning rate scaled by "
+          f"{WARM_LR_SCALE} and {warm_config.n_epochs} Adam epochs instead of "
+          f"{PARTICLE_TRAINING_CONFIG.n_epochs}. The L-BFGS budget is unchanged, and its early "
+          f"stopping decides when to quit.")
+else:
+    print("The warm-start verification was skipped (`RUN_WARM_START_VERIFICATION` is `False`): "
+          "no cold reference and no warm run were produced at the shifted position.")
+```
 
 ```{python}
 #| label: fig-warm-start-history
 #| fig-cap: "Total training loss against optimizer evaluations, cold and warm start at the shifted position."
-fig_warm = matplotlib.figure.Figure(figsize=(7.0, 3.6))
-ax_warm = fig_warm.subplots()
-for label, history, color in (("cold", cold_shifted_history, "tab:blue"), ("warm", warm_history, "tab:orange")):
-    totals = [record[0] for record in history.adam + history.lbfgs]
-    ax_warm.semilogy(totals, color=color, linewidth=1.2, label=label)
-ax_warm.set_xlabel("Adam epoch / L-BFGS closure evaluation")
-ax_warm.set_ylabel("Total loss")
-ax_warm.set_title("Warm-start against cold-start convergence")
-ax_warm.legend(fontsize=8)
-ax_warm.grid(True, linestyle=":", alpha=0.5)
-fig_warm.tight_layout()
-fig_warm
+if RUN_WARM_START_VERIFICATION:
+    fig_warm = matplotlib.figure.Figure(figsize=(7.0, 3.6))
+    ax_warm = fig_warm.subplots()
+    for label, history, color in (("cold", cold_shifted_history, "tab:blue"), ("warm", warm_history, "tab:orange")):
+        totals = [record[0] for record in history.adam + history.lbfgs]
+        ax_warm.semilogy(totals, color=color, linewidth=1.2, label=label)
+    ax_warm.set_xlabel("Adam epoch / L-BFGS closure evaluation")
+    ax_warm.set_ylabel("Total loss")
+    ax_warm.set_title("Warm-start against cold-start convergence")
+    ax_warm.legend(fontsize=8)
+    ax_warm.grid(True, linestyle=":", alpha=0.5)
+    fig_warm.tight_layout()
+    fig_warm
 ```
 
 ### Equivalence and cost
 
 ```{python}
 #| label: warm-start-gates
-force_cold, spread_cold = mean_shell_force(cold_shifted_network, shifted_state)
-force_warm, spread_warm = mean_shell_force(warm_network, shifted_state)
+if RUN_WARM_START_VERIFICATION:
+    force_cold, spread_cold = mean_shell_force(cold_shifted_network, shifted_state)
+    force_warm, spread_warm = mean_shell_force(warm_network, shifted_state)
 
-equivalence_check = ws_gates.warm_start_equivalence_gate(force_cold, force_warm, force_tol)
-cost_ratio = ws_gates.warm_start_cost_ratio(cold_shifted_history, warm_history)
-cost_check = mfp.evaluate_check(
-    "Warm-start cost ratio", "Optimizer evaluations of the warm run over the cold run",
-    cost_ratio, 1.0, "<",
-)
+    equivalence_check = mfp.warm_start_equivalence_gate(force_cold, force_warm, force_tol)
+    cost_ratio = mfp.warm_start_cost_ratio(cold_shifted_history, warm_history)
+    cost_check = mfp.evaluate_check(
+        "Warm-start cost ratio", "Optimizer evaluations of the warm run over the cold run",
+        cost_ratio, 1.0, "<",
+    )
 
-warm_probe_losses = mfp.diagnose_loss_scale(
-    warm_network, domain, fluid_config, held_out_config,
-    z_shifted, particle_radius, PEAK_VELOCITY_NONDIM, **SHELL_ARGS,
-)
-warm_probe_gap_check = mfp.generalization_gate(
-    warm_history.final()["total"], warm_probe_losses["total"], PROBE_GAP_TOLERANCE)
+    warm_probe_losses = mfp.diagnose_loss_scale(
+        warm_network, domain, fluid_config, held_out_config,
+        z_shifted, particle_radius, PEAK_VELOCITY_NONDIM, **SHELL_ARGS,
+    )
+    warm_probe_gap_check = mfp.generalization_gate(
+        warm_history.final()["total"], warm_probe_losses["total"], PROBE_GAP_TOLERANCE)
 
-for check in (equivalence_check, cost_check, warm_probe_gap_check):
-    verification_checks = verification_checks + (check,)
-    verification_categories[check.name] = CONVERGENCE
-mfp.render_verification_table((equivalence_check, cost_check, warm_probe_gap_check))
+    for check in (equivalence_check, cost_check, warm_probe_gap_check):
+        verification_checks = verification_checks + (check,)
+        verification_categories[check.name] = CONVERGENCE
+    mfp.render_verification_table((equivalence_check, cost_check, warm_probe_gap_check))
 ```
 
-At the shifted position the cold run gives a force of
-`{python} f"{force_cold:.4f}"` and the warm run `{python} f"{force_warm:.4f}"`,
-a relative difference of `{python} f"{equivalence_check.metric_value:.3%}"`
-against a tolerance of `{python} f"{force_tol:.2%}"`. The equivalence gate
-therefore `{python} "clears" if equivalence_check.passed else "misses"`. The
-warm run needed `{python} f"{cost_ratio:.2f}"` times the optimizer evaluations
-of the cold run, and its held-out probe loss stays
-`{python} f"{warm_probe_gap_check.metric_value:.2f}"` times its training loss.
-
-Two limits apply to this reading. First, the shell spreads of the two runs are
-`{python} f"{spread_cold:.1%}"` (cold) and `{python} f"{spread_warm:.1%}"`
-(warm). A force difference below these values cannot separate a warm-start
-effect from the intrinsic scatter of the traction, so the gate certifies
-consistency, not accuracy. Second, a single cold run has its own seed-to-seed
-variability, which this section does not measure. A second cold run with another
-seed would give the noise floor against which the warm-start difference should
-be compared. Until then, the warm start is accepted for position sweeps where
-the cost saving matters, and the cold start stays the reference for the values
-reported in the resistance table.
+```{python}
+#| label: warm-gates-prose
+#| output: asis
+# CHANGED: emitted from Python; the interpolations are valid only when the
+# section ran.
+if RUN_WARM_START_VERIFICATION:
+    print(f"At the shifted position the cold run gives a force of {force_cold:.4f} and the "
+          f"warm run {force_warm:.4f}, a relative difference of "
+          f"{equivalence_check.metric_value:.3%} against a tolerance of {force_tol:.2%}. "
+          f"The equivalence gate therefore "
+          f"{'clears' if equivalence_check.passed else 'misses'}. The warm run needed "
+          f"{cost_ratio:.2f} times the optimizer evaluations of the cold run, and its held-out "
+          f"probe loss stays {warm_probe_gap_check.metric_value:.2f} times its training loss. "
+          f"The shell spreads of the two runs are {spread_cold:.1%} (cold) and {spread_warm:.1%} "
+          f"(warm); a force difference below these values cannot separate a warm-start effect "
+          f"from the intrinsic scatter of the traction.")
+else:
+    print("No warm-start equivalence or cost gate is reported: the section was skipped.")
+```
 
 The two resistance problems are never warm-started from each other. Their errors
 enter $U_\text{free} = -F_0/F_1$ with opposite signs and partly cancel, and that

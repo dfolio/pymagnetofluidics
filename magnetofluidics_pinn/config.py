@@ -89,11 +89,11 @@ class FluidConfig:
     - `ValueError`: If `dynamic_viscosity`, `density`, `reference_velocity`,
       or `reference_length` is not finite and strictly positive.
     """
-    
+
     regime: Literal["stokes", "navier_stokes"] = "stokes"
     dynamic_viscosity: float = 1.0e-3  # [Pa.s]
     density: float = 1.0e3  # [kg/m^3]
-    
+
     def __post_init__(self) -> None:
         for field_name in ("dynamic_viscosity", "density"):
             value = getattr(self, field_name)
@@ -126,7 +126,7 @@ class DomainConfig:
       finite number, or if `kind == "channel"` and `branch_angle` is not
       `None`.
     """
-    
+
     kind: Literal["channel", "bifurcation"] = "channel"
     length: float = _DEFAULT_REFERENCE_LENGTH * 8.0  # m
     radius: float = _DEFAULT_REFERENCE_LENGTH  # m
@@ -134,7 +134,7 @@ class DomainConfig:
     fluid: FluidConfig = FluidConfig()  # Fluid embedded by default
     u_max: float = _DEFAULT_REFERENCE_VELOCITY
     p_max: float = _DEFAULT_REFERENCE_PRESSURE
-    
+
     def __post_init__(self) -> None:
         _check_if_finite_positive_strictly(self.length, "length")
         _check_if_finite_positive_strictly(self.radius, "radius")
@@ -147,18 +147,18 @@ class DomainConfig:
                 "branch_angle is only meaningful when kind='bifurcation'; "
                 f"got kind={self.kind!r} with branch_angle={self.branch_angle!r}."
             )
-    
+
     @property
     def reference_length(self) -> float:
         """Characteristic length scale, in meter, used to nondimensionalize every spatial coordinate."""
         return self.radius
-    
+
     @property
     def reference_velocity(self) -> float:
         """Characteristic velocity scale, in meter/second, used to nondimensionalize
         velocity and (with reference_length) time and pressure."""
         return self.u_max
-    
+
     @property
     def reynolds(self) -> float:
         r"""Reynolds number of the flow, $Re = \rho U_c L_c / \mu$.
@@ -181,10 +181,10 @@ class DomainConfig:
         """
         return ((self.fluid.density * self.reference_velocity * self.reference_length)
                 / self.fluid.dynamic_viscosity)
-    
+
     def reynolds_particle(self, particle_config: ParticleConfig, particle_state: ParticleState) -> float:
         r"""Particle Reynolds number of a particle relative to the flow, $Re_p = \rho \abs{U_p - U_\infty} a / \mu$.
-        
+
         Args:
         - `particle_config`: The particle configuration.
         - `particle_state`: The particle's current state, including its velocity.
@@ -227,13 +227,13 @@ class MagneticFieldConfig:
       `orientation` dimension is not 2 or 3, or if `orientation` is not a unit
       vector within tolerance.
      """
-    
+
     source: Literal["uniform", "gradient", "biot_savart"] = "uniform"
     magnitude: float = 1.0e-2  # [T]
     # CHANGED: Generalized tuple type annotation to support both 2-D and 3-D fields
     orientation: tuple[float, ...] = (0.0, 1.0)
     time_dependent: bool = False
-    
+
     def __post_init__(self) -> None:
         _check_if_finite_positive_strictly(self.magnitude, "magnitude")
         # NEW: Validate dimensional consistency for 2-D and 3-D physical domains
@@ -249,7 +249,7 @@ class MagneticFieldConfig:
             raise ValueError(
                 f"orientation must be a unit vector; got a norm of {orientation_norm:.6g}."
             )
-    
+
     @property
     def dimension(self) -> int:
         """Return the spatial coordinate dimension of the field orientation.
@@ -259,7 +259,7 @@ class MagneticFieldConfig:
         """
         # NEW: Spatial dimension inspector
         return len(self.orientation)
-    
+
     @property
     def field_vector(self) -> tuple[float, ...]:
         r"""Compute the directed physical magnetic flux density vector.
@@ -304,23 +304,23 @@ class MagneticMomentConfig:
       `orientation` dimension is not 2 or 3, or if $\hat{\mathbf{u}}_m$ is not a
       unit vector within numerical tolerance.
     """
-    
+
     magnitude: float = 1.0e-13  # [A m^2]
     orientation: tuple[float, ...] = (0.0, 1.0)
     nature: Literal["permanent", "induced"] = "permanent"
-    
+
     def __post_init__(self) -> None:
         """Validate magnitude positivity, spatial dimensionality, and unit normalization."""
         _check_if_finite_positive_strictly(self.magnitude, "magnitude")
-        
+
         # Validate spatial dimensionality for 2-D axisymmetric and 3-D Cartesian domains
         if len(self.orientation) not in (2, 3):
             raise ValueError("orientation must be a 2-D (r, z) or 3-D (x, y, z) vector; "
                              f"got length {len(self.orientation)}.")
-        
+
         if not all(math.isfinite(component) for component in self.orientation):
             raise ValueError(f"orientation components must all be finite; got {self.orientation!r}.")
-        
+
         orientation_norm = math.hypot(*self.orientation)
         if abs(orientation_norm - 1.0) > _UNIT_NORM_TOLERANCE:
             raise ValueError(f"orientation must be a unit vector; got a norm of {orientation_norm:.6g}.")
@@ -354,7 +354,7 @@ class MagneticMomentConfig:
         - Dipole moment component at `index` in ampere-square-meter ($\mathrm{A \cdot m^2}$).
         """
         return self.moment_vector[index]
-    
+
     @property
     def dimension(self) -> int:
         """Return the spatial coordinate dimension of the dipole orientation.
@@ -363,7 +363,7 @@ class MagneticMomentConfig:
         - Spatial dimension, either 2 or 3.
         """
         return len(self.orientation)
-    
+
     @property
     def moment_vector(self) -> tuple[float, ...]:
         r"""Compute the directed physical magnetic dipole moment vector.
@@ -376,7 +376,7 @@ class MagneticMomentConfig:
           ampere-square-meter ($\mathrm{A \cdot m^2}$).
         """
         return tuple(self.magnitude * component for component in self.orientation)
-    
+
     @classmethod
     def from_vector(
             cls,
@@ -402,14 +402,14 @@ class MagneticMomentConfig:
             raise ValueError(f"vector must have length 2 or 3; got {len(vector)}.")
         if not all(math.isfinite(comp) for comp in vector):
             raise ValueError(f"All components in vector must be finite; got {vector!r}.")
-        
+
         norm = math.hypot(*vector)
         if norm <= 0.0:
             raise ValueError("vector must be non-zero to establish a well-defined magnetic moment.")
-        
+
         unit_orientation = tuple(comp / norm for comp in vector)
         return cls(magnitude=norm, orientation=unit_orientation, nature=nature)
-    
+
     @classmethod
     def from_magnetization(
             cls,
@@ -438,7 +438,7 @@ class MagneticMomentConfig:
         _check_if_finite_positive_strictly(magnetic_volume, "magnetic_volume")
         moment_components = tuple(comp * magnetic_volume for comp in magnetization)
         return cls.from_vector(vector=moment_components, nature=nature)
-    
+
     def with_magnitude(self, new_magnitude: float) -> MagneticMomentConfig:
         r"""Pure functional updater returning a new instance with altered magnitude.
 
@@ -450,7 +450,7 @@ class MagneticMomentConfig:
         """
         _check_if_finite_positive_strictly(new_magnitude, "new_magnitude")
         return replace(self, magnitude=new_magnitude)
-    
+
     def with_orientation(self, new_orientation: tuple[float, ...]) -> MagneticMomentConfig:
         r"""Pure functional updater returning a new instance with altered unit orientation.
 
@@ -501,7 +501,7 @@ class ParticleConfig:
     - `ValueError`: If dimensions, numbers, or ratios are non-finite or invalid.
     - `TypeError`: If `magnetic_moment` is neither a `MagneticMomentConfig` nor a sequence.
     """
-    
+
     kind: Literal["spherical", "swarms", "cylinder", "spheroid"] = "spherical"
     radius: float = 0.0  # [m]
     length: float = 0.0  # [m]
@@ -510,7 +510,7 @@ class ParticleConfig:
     # CHANGED: Accept MagneticMomentConfig or raw coordinate sequence, defaulting to MagneticMomentConfig
     magnetic_moment: MagneticMomentConfig | tuple[float, ...] = MagneticMomentConfig()
     magnetic_ratio: float = 1.0
-    
+
     def __post_init__(self) -> None:
         _check_if_finite_positive(self.radius, "radius")
         _check_if_finite_positive(self.length, "length")
@@ -535,14 +535,14 @@ class ParticleConfig:
                 "magnetic_moment must be an instance of MagneticMomentConfig or a coordinate sequence; "
                 f"got {type(self.magnetic_moment).__name__}."
             )
-    
+
     @property
     def max_surface_extension(self) -> float:
         """Returns the maximum radial extension from the centre of mass."""
         if self.kind == "cylinder":
             return math.hypot(self.radius, self.length / 2.0)
         return self.radius
-    
+
     @property
     def volume(self) -> float:
         """Returns the particle volume in cubic meters."""
@@ -555,12 +555,28 @@ class ParticleConfig:
         elif self.kind == "swarms":
             return self.number * (4.0 / 3.0) * math.pi * self.radius ** 3
         raise ValueError(f"Unknown kind: {self.kind}")
-    
+
     @property
     def magnetic_volume(self) -> float:
         """"Returns the magnetic volume"""
         return self.volume * self.magnetic_ratio
-    
+
+    @property
+    def magnetic_moment_config(self) -> MagneticMomentConfig:
+        """Return the magnetic moment strictly as a normalized MagneticMomentConfig instance.
+
+        NEW: Resolves PEP 484 static type-narrowing warnings across IDE inspection
+        engines (PyCharm, VS Code Pylance, MyPy) by providing a guaranteed
+        `MagneticMomentConfig` return type, even if the raw field is annotated as
+        a union type (`MagneticMomentConfig | tuple[float, ...]`).
+
+        Returns:
+        * Immutable `MagneticMomentConfig` instance.
+        """
+        if isinstance(self.magnetic_moment, MagneticMomentConfig):
+            return self.magnetic_moment
+        return MagneticMomentConfig.from_vector(self.magnetic_moment)
+
     @property
     def magnetization(self) -> tuple[float | int, ...]:
         r"""Compute the volume magnetization vector in ampere-per-meter ($\mathrm{A / m}$).
@@ -582,8 +598,8 @@ class ParticleConfig:
                 f"({magnetic_volume!r}); point particles (radius == 0.0) possess no "
                 "volume magnetization density."
             )
-        return tuple(m / magnetic_volume for m in self.magnetic_moment)
-    
+        return tuple(m / magnetic_volume for m in self.magnetic_moment_config.moment_vector)
+
     def with_magnetization(self, magnetization: tuple[float, ...] | list[float]) -> ParticleConfig:
         r"""Pure functional updater returning a new configuration with updated magnetization.
 
@@ -597,10 +613,10 @@ class ParticleConfig:
         new_moment = MagneticMomentConfig.from_magnetization(
             magnetization=magnetization,
             magnetic_volume=self.magnetic_volume,
-            nature=self.magnetic_moment.nature,
+            nature=self.magnetic_moment_config.nature,
         )
         return replace(self, magnetic_moment=new_moment)
-    
+
     def with_magnetic_moment(
             self, magnetic_moment: MagneticMomentConfig | tuple[float, ...] | list[float]
     ) -> ParticleConfig:
@@ -693,7 +709,7 @@ class TwoWayCouplingConfig:
       finite, if `n_surface_points` is not strictly positive, or if
       `particle_loss_weight` is not finite and non-negative.
     """
-    
+
     particle_config: ParticleConfig
     particle_velocity: tuple[float, float] = (0.0, 0.0)  # Lab frame velocity
     particle_position: tuple[float, float] = (0.0, 0.0)  # Instantaneous position
@@ -705,7 +721,7 @@ class TwoWayCouplingConfig:
     core_strain_weight: float = 1.0  # NEW: weight of the zero-strain term inside the rigid core (0 disables it).
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     dtype: str = "float32"
-    
+
     def __post_init__(self) -> None:
         if not all(math.isfinite(component) for component in self.particle_velocity):
             raise ValueError(f"particle_velocity components must be finite; "
@@ -729,26 +745,26 @@ class TwoWayCouplingConfig:
 
         if self.device.split(":")[0] not in ("cuda", "cpu"):  # CHANGED: accepts "cuda:0" as documented
             raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
-    
+
     @property
     def particle_velocity_magnitude(self) -> float:
         """Returns the magnitude of the particle velocity."""
         return math.hypot(*self.particle_velocity)
-    
+
     @property
     def axial_particle_velocity(self) -> float:
         """Returns the axial component of the particle velocity."""
         return self.particle_velocity[1]
-    
+
     @property
     def radial_particle_velocity(self) -> float:
         """Returns the radial component of the particle velocity."""
         return self.particle_velocity[0]
-    
+
     @property
     def particle_state(self) -> ParticleState:
         """Returns a ParticleState particle representing the particle's current state."""
-        
+
         resolved_device = resolve_device(self.device)
         resolved_dtype = resolve_dtype(self.dtype)  # CHANGED
         return ParticleState(
@@ -844,7 +860,7 @@ class TrainingConfig:
       unsafe `residual_form`, or if `device` does not resolve to `"cuda"`
       or `"cpu"`.
     """
-    
+
     n_interior_points: int = 10_000
     n_boundary_points: int = 2_000
     n_axis_points: int = 512
@@ -869,7 +885,7 @@ class TrainingConfig:
     random_seed: int = 42
     verbose: bool = False
     log_every: int = 100
-    
+
     def __post_init__(self) -> None:
         """Validate configuration parameters and resolve target device."""
         if self.n_interior_points <= 0 or self.n_boundary_points <= 0:
@@ -916,12 +932,12 @@ class TrainingConfig:
             raise ValueError(f"log_every must be at least 1 when verbose=True; got {self.log_every!r}.")
         if self.device.split(":")[0] not in ("cuda", "cpu"):  # CHANGED: accepts "cuda:0" as documented
             raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
-    
+
     @property
     def torch_device(self) -> torch.device:
         """Lazy device resolution without mutating frozen dataclass fields."""
         return resolve_device(self.device)
-    
+
     @property
     def torch_dtype(self) -> torch.dtype:
         return torch.float32 if self.dtype == "float32" else torch.float64
@@ -937,7 +953,7 @@ def set_random_seed(seeds: int | None = None) -> None:
     if seeds is not None:
         import random
         import numpy as np
-        
+
         random.seed(seeds)
         np.random.seed(seeds)
         torch.manual_seed(seeds)

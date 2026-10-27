@@ -12,7 +12,7 @@ import math
 import torch
 
 from magnetofluidics_pinn.config import ParticleConfig
-from magnetofluidics_pinn.device_utils import resolve_device, resolve_module_dtype
+from magnetofluidics_pinn.device_utils import resolve_device, resolve_dtype
 from magnetofluidics_pinn.data_types import CollocationPoints, Domain, ParticleState
 
 # Fraction of the channel radius kept clear around the symmetry axis
@@ -155,9 +155,9 @@ def sample_collocation_points(
         _AXIS_CLEARANCE_FRACTION if axis_clearance_fraction is None else axis_clearance_fraction
     )
     resolved_device = resolve_device(device)
-    resolved_dtype = resolve_module_dtype(dtype)
+    resolved_dtype = resolve_dtype(dtype)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
-    
+
     # Interior points: uniform in z, but *volume*-uniform in r rather than
     # linearly uniform. Revolving an annulus at radius r around the axis
     # gives it measure proportional to r dr, so drawing r linearly from
@@ -174,9 +174,9 @@ def sample_collocation_points(
     interior_z = domain.length * torch.rand(n_interior, 1, generator=generator,
                                             device=resolved_device, dtype=resolved_dtype)
     interior = torch.cat([interior_r, interior_z], dim=1)
-    
+
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
-    
+
     wall_points = torch.cat(
         [
             torch.full((n_wall, 1), domain.radius, device=resolved_device, dtype=resolved_dtype),
@@ -199,7 +199,7 @@ def sample_collocation_points(
         dim=1,
     )
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
-    
+
     return CollocationPoints(interior=interior, boundary=boundary, initial=None)
 
 
@@ -279,12 +279,12 @@ def sample_collocation_points_with_particle(
         dtype: torch.dtype = torch.float32,
 ) -> CollocationPoints:
     r"""Sample interior, boundary, and particle-surface points around an embedded sphere.
- 
+
     CHANGED: Implements multizone collocation sampling. Allocates `constriction_oversample_ratio`
     (default 35%) of interior collocation points directly to the high-shear annular constriction
     cylinder $|z - z_p| \le 1.5 a, \, r \in [a, R]$, resolving the accelerated bypass jet and
     preventing mass-flow deficit across the obstacle [@hu2025pecann; @happel1983low].
- 
+
     Args:
     - `domain`: Vessel geometry to sample from; must already be
       nondimensionalized.
@@ -314,7 +314,7 @@ def sample_collocation_points_with_particle(
     Returns:
     - A [`CollocationPoints`][magnetofluidics_pinn.types.CollocationPoints]
       instance with `particle_surface` populated (never `None`).
- 
+
     Raises:
     - `ValueError`: If `n_interior`, `n_boundary`, or `n_surface_points`
       is not strictly positive, if `domain.kind` is not `"channel"`, if
@@ -338,7 +338,7 @@ def sample_collocation_points_with_particle(
             "sample_collocation_points_with_particle currently only supports "
             f"domain.kind == 'channel'; got {domain.kind!r}."
         )
-    
+
     if particle_config.radius >= domain.radius:
         raise ValueError(
             f"particle.radius ({particle_config.radius!r}) must be strictly less than domain.radius ({domain.radius!r})."
@@ -355,7 +355,7 @@ def sample_collocation_points_with_particle(
     # and clipped during constriction-zone sampling instead of raising.
     obstacle_z_min = particle_state.axial_position - particle_config.radius
     obstacle_z_max = particle_state.axial_position + particle_config.radius
-    
+
     if not (0.0 < obstacle_z_min and obstacle_z_max < domain.length):
         raise ValueError("obstacle must fit strictly inside the channel's axial extent (0, domain.length); "
                          f"got axial span [{obstacle_z_min!r}, {obstacle_z_max!r}] against domain.length="
@@ -364,56 +364,56 @@ def sample_collocation_points_with_particle(
         _AXIS_CLEARANCE_FRACTION if axis_clearance_fraction is None else axis_clearance_fraction
     )
     resolved_device = resolve_device(device)
-    resolved_dtype = resolve_module_dtype(dtype)
+    resolved_dtype = resolve_dtype(dtype)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
-    
+
     a = particle_config.radius
     z_p = particle_state.axial_position
-    
+
     # 1. Budget Partition: Constriction Zone vs. Global Background
     n_constriction = int(n_interior * constriction_oversample_ratio)
     n_shell = int(n_interior * boundary_layer_fraction)  # NEW
     n_global = n_interior - n_constriction - n_shell
     if n_global < 0:  # NEW
         raise ValueError("constriction_oversample_ratio + boundary_layer_fraction must not exceed 1.")
-    
+
     # 2. Constriction-Zone Collocation Sampling: |z - z_p| <= 1.5 * a, r in [a, R]
     z_gap_min = max(z_p - constriction_axial_factor * a, 0.0)
     z_gap_max = min(z_p + constriction_axial_factor * a, domain.length)
     z_gap_length = z_gap_max - z_gap_min
-    
+
     n_constriction_candidates = math.ceil(oversampling_factor * n_constriction)
     r_min = domain.radius * resolved_axis_clearance_fraction
     xi_gap = torch.rand(n_constriction_candidates, 1, generator=generator, device=resolved_device, dtype=resolved_dtype)
     gap_cand_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi_gap)
     gap_cand_z = z_gap_min + z_gap_length * torch.rand(n_constriction_candidates, 1, generator=generator,
                                                        device=resolved_device, dtype=resolved_dtype)
-    
+
     outside_gap_particle = (gap_cand_z - z_p).square() + gap_cand_r.square() >= a ** 2
     surviving_gap_r = gap_cand_r[outside_gap_particle][:n_constriction]
     surviving_gap_z = gap_cand_z[outside_gap_particle][:n_constriction]
-    
+
     if surviving_gap_r.shape[0] < n_constriction:
         raise RuntimeError(
             f"Insufficient candidates survived constriction sampling: needed {n_constriction}, got {surviving_gap_r.shape[0]}."
         )
-    
+
     # 3. Global Background Rejection Sampling across [0, domain.length]
     n_global_candidates = math.ceil(oversampling_factor * n_global)
     xi_glob = torch.rand(n_global_candidates, 1, generator=generator, device=resolved_device, dtype=resolved_dtype)
     glob_cand_r = torch.sqrt(r_min ** 2 + (domain.radius ** 2 - r_min ** 2) * xi_glob)
     glob_cand_z = domain.length * torch.rand(n_global_candidates, 1, generator=generator, device=resolved_device,
                                              dtype=resolved_dtype)
-    
+
     outside_glob_particle = (glob_cand_z - z_p).square() + glob_cand_r.square() >= a ** 2
     surviving_glob_r = glob_cand_r[outside_glob_particle][:n_global]
     surviving_glob_z = glob_cand_z[outside_glob_particle][:n_global]
-    
+
     if surviving_glob_r.shape[0] < n_global:
         raise RuntimeError(
             f"Insufficient candidates survived global sampling: needed {n_global}, got {surviving_glob_r.shape[0]}."
         )
-    
+
     # Merge multizone coordinates
     shell_points = _sample_particle_shell_points(  # NEW
         generator, n_shell, a, z_p, (boundary_layer_radius_factor - 1.0) * a,
@@ -422,7 +422,7 @@ def sample_collocation_points_with_particle(
     interior_z = torch.cat([surviving_gap_z, surviving_glob_z], dim=0)
     interior = torch.cat([torch.stack([interior_r, interior_z], dim=1),
                           shell_points], dim=0)  # NEW: add shell points to interior
-    
+
     # 4. Channel External Boundary Points (Wall, Inlet, Outlet)
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
     wall_points = torch.cat(
@@ -447,7 +447,7 @@ def sample_collocation_points_with_particle(
         dim=1,
     )
     boundary = torch.cat([wall_points, inlet_points, outlet_points], dim=0)
-    
+
     # 5. Particle Surface Collocation Points (Uniform meridian polar angle theta in [0, pi])
     theta_surf = math.pi * torch.rand(n_surface_points, 1, generator=generator, device=resolved_device,
                                       dtype=resolved_dtype)
@@ -458,7 +458,7 @@ def sample_collocation_points_with_particle(
         ],
         dim=1,
     )
-    
+
     return CollocationPoints(
         interior=interior,
         boundary=boundary,

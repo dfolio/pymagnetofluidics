@@ -4,6 +4,8 @@ notebooks/*pdf
 notebooks/*.md
 notebooks/*.ipynb_checkpoints
 notebooks/*.quarto_ipynb
+notebooks/_freeze
+notebooks/.quarto
 ### VisualStudioCode template
 .vscode/*
 !.vscode/settings.json

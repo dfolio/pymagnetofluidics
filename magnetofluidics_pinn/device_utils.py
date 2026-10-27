@@ -107,6 +107,7 @@ def resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
         resolved = dtype
     elif isinstance(dtype, str):
         try:
+            # pyrefly: ignore[bad-argument-count]
             resolved = torch.dtype(dtype)
         except TypeError as error:
             raise ValueError(
@@ -148,32 +149,34 @@ def resolve_module_device(module: nn.Module) -> torch.device:
 
 
 def resolve_module_dtype(module: nn.Module) -> torch.dtype:
-    """Infer the floating-point dtype a module's parameters currently use.
-
-    Used alongside
-    [`resolve_module_device`][magnetofluidics_pinn.device_utils.resolve_module_device]
-    whenever a function needs to feed a new tensor into an already-
-    constructed module: matching only the device is not enough if that
-    module was ever moved to a non-default dtype (e.g. via `.double()`),
-    since `torch` raises just as readily on a dtype mismatch as on a
-    device mismatch.
+    """Infer the floating-point dtype used by a PyTorch module.
 
     Args:
-    - `module`: Any `torch.nn.Module` instance.
+        module: A PyTorch module whose dtype must be inferred.
 
     Returns:
-    - The `torch.dtype` of the module's first parameter.
+        The dtype of the first floating-point parameter, or the first
+        floating-point buffer if no floating-point parameters exist.
 
     Raises:
-    - `ValueError`: If `module` has no parameters, so its dtype cannot be
-      inferred.
+        TypeError: If module is not a torch.nn.Module.
+        ValueError: If the module has no floating-point parameters or buffers.
     """
-    try:
-        return next(module.parameters()).dtype
-    except StopIteration as error:
-        raise ValueError(
-            "module has no parameters; its dtype cannot be inferred."
-        ) from error
+    if not isinstance(module, nn.Module):
+        raise TypeError(
+            f"module must be an nn.Module; got {type(module).__name__}."
+        )
+
+    tensors = (*module.parameters(), *module.buffers())
+
+    for tensor in tensors:
+        if tensor.is_floating_point():
+            return tensor.dtype
+
+    raise ValueError(
+        "module has no floating-point parameters or buffers; "
+        "its dtype cannot be inferred."
+    )
 
 
 # NEW: one-time, process-wide matmul-precision configuration.

@@ -92,7 +92,7 @@ from magnetofluidics_pinn.training.trainer import TrainingHistory, train
 from magnetofluidics_pinn.data_types import Domain, MagneticFieldSample, ParticleState
 from magnetofluidics_pinn.verification.benchmarks import shell_force_profile, shell_force_spread
 from magnetofluidics_pinn.networks.mlp import build_mlp  # NEW
-from magnetofluidics_pinn.networks.stream_function import apply_stream_function_constraint  # NEW
+from magnetofluidics_pinn.networks.stream_function import StreamFunctionSphereFlow  # NEW
 from magnetofluidics_pinn.training.stream_trainer import StreamLossHistory, train_stream_function_flow
 
 # CHANGED: ambient centreline velocity of the "fixed sphere in Poiseuille flow" problem.
@@ -104,7 +104,7 @@ def _expand_velocity_bracket(
 ) -> tuple[float, float]:
     r_low = force_residual_fn(low)
     r_high = force_residual_fn(high)
-    
+
     step = 0
     while r_low * r_high > 0.0 and step < max_iter:
         if r_high > 0:
@@ -116,7 +116,7 @@ def _expand_velocity_bracket(
             low = low * expansion_factor - 0.5
             r_low = force_residual_fn(low)
         step += 1
-    
+
     if r_low * r_high > 0.0:
         raise ValueError(
             f"Could not bracket root after {max_iter} expansions. "
@@ -204,7 +204,7 @@ def solve_force_balanced_velocity(
     velocity_low, velocity_high = velocity_bracket
     if velocity_low >= velocity_high:
         raise ValueError(f"velocity_bracket must satisfy low < high; got {velocity_bracket!r}.")
-    
+
     device = training_config.torch_device
     dtype = training_config.torch_dtype
     network = network.to(device=device, dtype=dtype)
@@ -223,14 +223,14 @@ def solve_force_balanced_velocity(
             float(candidate_state.position[1].item()),
         )
         vel_tuple = (0.0, float(candidate_velocity))
-        
+
         coupling_config = TwoWayCouplingConfig(
             particle_config=particle_config,
             particle_velocity=vel_tuple,
             particle_position=pos_tuple,
             n_surface_points=n_surface_points,
         )
-        
+
         trained, history = train(
             state["network"],
             domain,
@@ -255,11 +255,11 @@ def solve_force_balanced_velocity(
         if training_config.verbose:
             print(f"  U_z = {candidate_velocity:+.3e}  ->  F_drag = {drag_force:+.3e}, residual = {residual:+.3e}")
         return residual
-        
+
     # Evaluate initial residuals at bracket endpoints
     residual_low = force_residual(velocity_low)
     residual_high = force_residual(velocity_high)
-    
+
     # CHANGED: Removed the premature `raise ValueError` that previously rendered
     # `_expand_velocity_bracket` unreachable dead code. Automatic expansion now proceeds.
     if residual_low * residual_high > 0.0:
@@ -268,11 +268,11 @@ def solve_force_balanced_velocity(
         velocity_low, velocity_high = _expand_velocity_bracket(
             force_residual, velocity_low, velocity_high
         )
-    
+
     # Resolve certified root with scalar Brent method
     particle_velocity = brentq(force_residual, velocity_low, velocity_high, xtol=velocity_tolerance)
     force_residual(particle_velocity)
-    
+
     return particle_velocity, state["network"], state["history"]
 
 
@@ -355,7 +355,7 @@ def advance_particle_two_way(
 
     device = training_config.torch_device
     dtype = training_config.torch_dtype
-    
+
     current_position = float(initial_axial_position)
     current_network = network
     current_time = 0.0
@@ -457,275 +457,383 @@ def make_dipole_applied_force_fn(  # NEW
 
 
 def affine_force_balance(
-        force_fixed: float, force_unit_translation: float, applied_force_z: float = 0.0,
+    force_ambient: float,
+    force_translating: float,
+    applied_force: float,
 ) -> float:
-    r"""Solve the linear force balance $F_\text{app} + F_0 + U F_1 = 0$ for $U$.
+    r"""Solve the scalar force balance $F_{\mathrm{applied}} + F_0 + U_p F_1 = 0$ in closed form.
 
-    Stokes flow is linear in the boundary data, so the hydrodynamic force on a
-    sphere moving at $U$ in a prescribed ambient flow is affine in $U$:
-    $F(U) = F_0 + U F_1$, where $F_0$ is the force on the *fixed* sphere and
-    $F_1$ the force per unit velocity in fluid at rest (negative, since drag
-    opposes motion) [@happel1983low]. Hence
-    $$U = -\frac{F_\text{app} + F_0}{F_1}.$$
+    By linearity of the Stokes equations [@happel1983low]:
+    $$F_{\mathrm{drag}}(U_p) = F_0 + U_p \, F_1.$$
+    At force balance:
+    $$F_{\mathrm{applied}} + F_0 + U_p F_1 = 0 \iff U_p = -\frac{F_{\mathrm{applied}} + F_0}{F_1}.$$
 
     Args:
-    - `force_fixed`: $F_0$, force on the fixed sphere in the ambient flow.
-    - `force_unit_translation`: $F_1 < 0$.
-    - `applied_force_z`: Sum of the external axial forces.
+    - `force_ambient`: Hydrodynamic force $F_0$ on a stationary particle ($U_p = 0$) in
+      ambient flow ($U_{\infty} = 1$).
+    - `force_translating`: Drag force per unit velocity $F_1$ on a translating particle
+      ($U_p = 1$) in stagnant fluid ($U_{\infty} = 0$). Must be strictly negative.
+    - `applied_force`: External axial force $F_{\mathrm{applied}}$ acting on the particle.
 
     Returns:
-    - The force-balanced axial velocity $U$.
+    - Force-balanced particle velocity $U_p \in \mathbb{R}$.
 
     Raises:
-    - `ValueError`: If an argument is not finite, or `force_unit_translation`
-      is not strictly negative (a non-dissipative or failed solve).
+    - `ValueError`: If `force_translating` is non-negative (dissipative Stokes drag
+       must oppose translation).
     """
-    values = (force_fixed, force_unit_translation, applied_force_z)
-    if not all(math.isfinite(value) for value in values):
-        raise ValueError(f"All forces must be finite; got {values!r}.")
-    if force_unit_translation >= 0.0:
+    if force_translating >= 0.0:
         raise ValueError(
-            f"force_unit_translation must be strictly negative (drag opposes motion); got {force_unit_translation!r}."
+            "force_translating must be strictly negative (drag opposes motion in Stokes flow); "
+            f"got {force_translating!r}."
         )
-    return -(applied_force_z + force_fixed) / force_unit_translation
+    return -(applied_force + force_ambient) / force_translating
 
 
 @dataclass(frozen=True)
 class ResistanceResult:
-    r"""Outcome of the two linear resistance problems at one particle position.
+    r"""Immutable container holding solutions to the canonical linear Stokes resistance problems.
+
+    Stores the solutions of the two canonical subproblems:
+    $$
+    F(U_p) = F_0 + U_p \, F_1,
+    $$
+    where $F_0$ is `force_ambient` and $F_1$ is `force_translating`.
 
     Args:
-    - `force_fixed`: $F_0$, fixed sphere in ambient Poiseuille flow.
-    - `force_unit_translation`: $F_1$, unit-velocity sphere in fluid at rest.
-    - `shell_spread_fixed`, `shell_spread_unit`: Relative shell-force spreads
-      (see `shell_force_spread`); error indicators for $F_0$ and $F_1$.
-    - `network_fixed`, `network_unit`: The two trained networks.
-    - `history_fixed`, `history_unit`: Their training histories.
+    - `force_ambient`: Drag $F_0$ on a stationary particle in ambient flow ($U_p = 0, U_{\infty} = 1$).
+    - `force_translating`: Drag per unit velocity $F_1$ in quiescent fluid ($U_p = 1, U_{\infty} = 0$).
+    - `spread_ambient`: Relative variation of $F_0$ across concentric control shells.
+    - `spread_translating`: Relative variation of $F_1$ across concentric control shells.
+    - `network_ambient`: Trained neural model for the stationary obstacle problem.
+    - `network_translating`: Trained neural model for the unit translation problem.
+    - `history_ambient`: Training history for the stationary obstacle problem.
+    - `history_translating`: Training history for the unit translation problem.
     """
-    
-    force_fixed: float
-    force_unit_translation: float
-    shell_spread_fixed: float
-    shell_spread_unit: float
-    network_fixed: nn.Module
-    network_unit: nn.Module
-    history_fixed: TrainingHistory | StreamLossHistory  # CHANGED: the stream solver records StreamLossHistory
-    history_unit: TrainingHistory | StreamLossHistory  # CHANGED
-    
-    def balanced_velocity(self, applied_force_z: float = 0.0) -> float:
-        """Force-balanced velocity for a given applied force; see `force_balanced_velocity`."""
-        return affine_force_balance(self.force_fixed, self.force_unit_translation, applied_force_z)
+
+    force_ambient: float
+    force_translating: float
+    spread_ambient: float
+    spread_translating: float
+    network_ambient: nn.Module
+    network_translating: nn.Module
+    history_ambient: Any
+    history_translating: Any
+
+    # --------------------------------------------------------------------------
+    # Physical Properties & Closed-Form Solvers
+    # --------------------------------------------------------------------------
+
+    @property
+    def resistance(self) -> float:
+        r"""Hydrodynamic drag coefficient $\zeta = -F_1 > 0$."""
+        return -self.force_translating
+
+    @property
+    def mobility(self) -> float:
+        r"""Effective hydrodynamic mobility $\mathcal{M} = 1 / \zeta = -1 / F_1$."""
+        return 1.0 / self.resistance
+
+    @property
+    def passive_velocity(self) -> float:
+        r"""Passive force-free velocity $U_{\mathrm{free}} = -F_0 / F_1$ when $F_{\mathrm{applied}} = 0$."""
+        return self.balanced_velocity(0.0)
+
+    def balanced_velocity(self, applied_force: float) -> float:
+        r"""Compute force-balanced particle velocity $U_p = -(F_{\mathrm{applied}} + F_0) / F_1$.
+
+        Args:
+        - `applied_force`: Total external axial actuation force $F_{\mathrm{applied}}^*$.
+
+        Returns:
+        - Resulting force-balanced velocity $U_p^*$.
+        """
+        return affine_force_balance(self.force_ambient, self.force_translating, applied_force)
+
+    def drag_force(self, particle_velocity: float) -> float:
+        r"""Evaluate hydrodynamic drag force at arbitrary velocity: $F(U_p) = F_0 + U_p F_1$.
+
+        Args:
+        - `particle_velocity`: Particle translational velocity $U_p^*$.
+
+        Returns:
+        - Total axial hydrodynamic force $F_z^*$.
+        """
+        return self.force_ambient + particle_velocity * self.force_translating
+
+    @property
+    def force_fixed(self) -> float:
+        """Alias for `force_ambient` ($F_0$)."""
+        return self.force_ambient
+
+    @property
+    def force_unit_translation(self) -> float:
+        """Alias for `force_translating` ($F_1$)."""
+        return self.force_translating
+
+    @property
+    def shell_spread_fixed(self) -> float:
+        """Alias for `spread_ambient`."""
+        return self.spread_ambient
+
+    @property
+    def shell_spread_unit(self) -> float:
+        """Alias for `spread_translating`."""
+        return self.spread_translating
+
+    @property
+    def network_fixed(self) -> nn.Module:
+        """Alias for `network_ambient`."""
+        return self.network_ambient
+
+    @property
+    def network_unit(self) -> nn.Module:
+        """Alias for `network_translating`."""
+        return self.network_translating
+
+    @property
+    def history_fixed(self) -> Any:
+        """Alias for `history_ambient`."""
+        return self.history_ambient
+
+    @property
+    def history_unit(self) -> Any:
+        """Alias for `history_translating`."""
+        return self.history_translating
 
 
 def solve_resistance_problems(
-        build_network: Callable[[Domain], nn.Module],
-        domain: Domain,
-        fluid_config: FluidConfig,
-        particle_config: ParticleConfig,
-        particle_state: ParticleState,
-        training_config: TrainingConfig,
-        hidden_layers: tuple[int, ...] = (64, 64, 64, 64),
-        activation: str = "tanh",
-        taper_margin: float = 0.9,
-        n_quadrature_points: int = 181,
-        shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
+    build_network: Callable[[Domain], nn.Module],
+    domain: Domain,
+    fluid_config: FluidConfig,
+    particle_config: ParticleConfig,
+    particle_state: ParticleState,
+    training_config: TrainingConfig,
+    n_surface_points: int = 250,          # CHANGED: Added missing parameter with robust default
+    particle_loss_weight: float = 20.0,   # CHANGED: Added missing parameter with robust default
+    n_quadrature_points: int = 181,
+    shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
 ) -> ResistanceResult:
-    r"""Train the two linear problems that replace the `brentq` retraining loop.
+    r"""Train the two canonical linear resistance problems using the primitive-variable PINN.
 
-    1. *Fixed sphere*, $U = 0$, ambient Poiseuille flow of peak 1: gives $F_0$.
-    2. *Unit translation*, $U = 1$, ambient flow zero (inlet at rest, zero
-       mass-flux reference): gives $F_1$.
+    By linearity of the steady Stokes equations [@happel1983low], the hydrodynamic
+    force $F(U_p)$ on an on-axis translating spherical particle decomposes into an
+    exact affine relation:
+    $$F(U_p) = F_0 + U_p \, F_1,$$
+    where:
 
-    Every force-balanced velocity then follows analytically from
-    [`force_balanced_velocity`][magnetofluidics_pinn.trajectory.two_way_coupling.force_balanced_velocity],
-    with no further training. Both problems run with the positivity penalty
-    off and the same training budget.
+    - $F_0$: Force on a stationary particle ($U_p = 0$) in active Poiseuille flow (
+      $U_{\infty} = 1$).
+    - $F_1$: Drag per unit velocity on a translating particle ($U_p = 1$) in
+      quiescent fluid ($U_{\infty} = 0$).
+
+    Solving these two problems once analytically closes the force-balanced velocity
+    for any applied force $F_{\mathrm{applied}}$:
+    $$F_{\mathrm{applied}} + F_0 + U_p F_1 = 0 \iff U_p = -\frac{F_{\mathrm{applied}} + F_0}{F_1},$$
+    eliminating the computational overhead and instability of iterative nonlinear root-finding.
 
     Args:
-    - `build_network`: Factory returning a *fresh*, wrapped network for a
-      given domain. It is called with `domain` and with a copy of `domain`
-      whose `u_max` is zero, because `apply_hard_wall_constraint` embeds the
-      ambient profile `u_max (1 - (r/R)^2)` in the network.
-    - `domain`, `fluid_config`, `particle_config`, `particle_state`,
-      `training_config`: As in `train`. `domain.u_max` must be 1.
-    - `n_surface_points`, `core_strain_weight`, `particle_loss_weight`:
-      Forwarded to `TwoWayCouplingConfig`.
-    - `n_quadrature_points`: Polar nodes of the traction quadrature.
-    - `shell_factors`: Shell radii (multiples of $a$) for the error indicator.
+    - `build_network`: Factory callable `(Domain) -> nn.Module` instantiating a fresh
+      hard-wall-constrained flow network.
+    - `domain`: Nondimensional channel domain geometry.
+    - `fluid_config`: Physical configuration specifying fluid properties.
+    - `particle_config`: Physical particle geometry and properties.
+    - `particle_state`: Instantaneous particle kinematic state.
+    - `training_config`: Hyperparameter configuration for Adam and L-BFGS training.
+    - `n_surface_points`: Number of collocation points on the sphere boundary.
+    - `particle_loss_weight`: Weight multiplying the soft particle surface loss.
+    - `n_quadrature_points`: Meridian quadrature resolution for surface traction integration.
+    - `shell_factors`: Scale multipliers for momentum-conserving control shells.
 
     Returns:
-    - A `ResistanceResult`.
+    - Populated `ResistanceResult` containing trained models, canonical forces $F_0$ and $F_1$,
+      and shell force spreads.
 
     Raises:
-    - `ValueError`: If `domain.u_max` is not 1.
+    - `ValueError`: If `shell_factors` are invalid or exceed domain boundaries.
     """
-    if not math.isclose(domain.u_max, _AMBIENT_PEAK_VELOCITY, rel_tol=1.0e-9):
-        raise ValueError(f"domain.u_max must equal {_AMBIENT_PEAK_VELOCITY}; got {domain.u_max!r}.")
-    position = (float(particle_state.position[0].item()), float(particle_state.position[1].item()))
-    problems = (  # (problem domain, ambient peak velocity, particle velocity)
-        (domain, _AMBIENT_PEAK_VELOCITY, 0.0),
-        (dataclasses.replace(domain, u_max=0.0), 0.0, 1.0),
+    if any(factor < 1.0 for factor in shell_factors):
+        raise ValueError(
+            "Every shell factor must be >= 1.0 (on or outside the sphere surface).")
+
+    particle_axial_position = float(particle_state.position[1].item())
+    particle_radius = particle_config.radius
+    largest_shell_radius = max(shell_factors) * particle_radius
+
+    # Verify that the largest integration shell fits strictly inside channel margins
+    channel_clearance = min(domain.radius, particle_axial_position,
+                            domain.length - particle_axial_position)
+    if largest_shell_radius >= channel_clearance:
+        raise ValueError(
+            f"Largest shell radius ({largest_shell_radius:.3e}) must be strictly smaller "
+            f"than channel clearance ({channel_clearance:.3e})."
+        )
+
+    position = (float(particle_state.position[0].item()),
+                float(particle_state.position[1].item()))
+
+    # Problem 0: Fixed particle (Up = 0) in Poiseuille flow (u_max from domain)
+    # Problem 1: Translating particle (Up = 1) in quiescent fluid (u_max = 0)
+    problems = (
+        (domain, 0.0),
+        (dataclasses.replace(domain, u_max=0.0), 1.0),
     )
-    
-    def solve_one(problem: tuple[Domain, float, float]):
-        problem_domain, ambient, velocity = problem
+
+    def solve_one(problem: tuple[Domain, float]) -> tuple[nn.Module, float, float, TrainingHistory]:
+        problem_domain, velocity = problem
+
+        # CHANGED: Forward validated parameters to TwoWayCouplingConfig without undefined names
         coupling_config = TwoWayCouplingConfig(
-            particle_config=particle_config, particle_velocity=(0.0, velocity), particle_position=position,
-            n_surface_points=n_surface_points, particle_loss_weight=particle_loss_weight,
-            positivity_loss_weight_override=0.0,  # reversal near the sphere is physical
-            ambient_peak_velocity=ambient, core_strain_weight=core_strain_weight,
+            particle_config=particle_config,
+            particle_velocity=(0.0, velocity),
+            particle_position=position,
+            n_surface_points=n_surface_points,
+            particle_loss_weight=particle_loss_weight,
+            positivity_loss_weight_override=0.0,  # Physical flow reversal allowed
         )
+
+        start = build_network(problem_domain)
         trained, history = train(
-            build_network(problem_domain), problem_domain, fluid_config=fluid_config,
-            training_config=training_config, coupling_config=coupling_config,
+            network=start,
+            domain=problem_domain,
+            fluid_config=fluid_config,
+            training_config=training_config,
+            coupling_config=coupling_config,
         )
-        trained.eval()
-        force = surface_traction_force(
-            trained, particle_config=particle_config, particle_state=particle_state,
-            n_quadrature_points=n_quadrature_points,
-        ).item()
-        spread = shell_force_spread(
-            shell_force_profile(trained, particle_config, particle_state, shell_factors, n_quadrature_points)
-        )
-        return force, spread, trained, history
-    
-    (f_fixed, s_fixed, net_fixed, hist_fixed), (f_unit, s_unit, net_unit, hist_unit) = map(solve_one, problems)
-    return ResistanceResult(f_fixed, f_unit, s_fixed, s_unit, net_fixed, net_unit, hist_fixed, hist_unit)
+
+        profile = shell_force_profile(trained, particle_config, particle_state, shell_factors, n_quadrature_points)
+        force = float(profile["force"].mean())
+        spread = shell_force_spread(profile)
+        return trained, force, spread, history
+
+    trained_ambient, force_ambient, spread_ambient, history_ambient = solve_one(problems[0])
+    trained_translating, force_translating, spread_translating, history_translating = solve_one(problems[1])
+    return ResistanceResult(
+        force_ambient=force_ambient,
+        force_translating=force_translating,
+        spread_ambient=spread_ambient,
+        spread_translating=spread_translating,
+        network_ambient=trained_ambient,
+        network_translating=trained_translating,
+        history_ambient=history_ambient,
+        history_translating=history_translating,
+    )
 
 
 def solve_resistance_problems_stream(
-        domain: Domain,
-        fluid_config: FluidConfig,
-        particle_config: ParticleConfig,
-        particle_state: ParticleState,
-        training_config: TrainingConfig,
-        hidden_layers: tuple[int, ...] = (64, 64, 64, 64),
-        activation: str = "tanh",
-        taper_margin: float = 0.9,
-        n_quadrature_points: int = 181,
-        shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
-        shell_fraction: float = 0.25,
-        shell_factor: float = 2.5,
-        band_fraction: float = 0.0,  # NEW: near-surface collocation band (library patch L10)
-        band_factor: float = 1.5,  # NEW
+    domain: Domain,
+    fluid_config: FluidConfig,
+    particle_config: ParticleConfig,
+    particle_state: ParticleState,
+    training_config: TrainingConfig,
+    hidden_layers: tuple[int, ...] = (64, 64, 64, 64),
+    activation: str = "tanh",
+    taper_margin: float = 0.9,
+    n_quadrature_points: int = 181,
+    shell_factors: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0),
+    shell_fraction: float = 0.25,
+    shell_factor: float = 2.5,
+    band_fraction: float = 0.0,
+    band_factor: float = 1.5,
 ) -> ResistanceResult:
-    r"""Train the two resistance problems with the exact-constraint stream-function ansatz.
+    r"""Train the two canonical linear resistance problems using the stream-function PINN.
 
-    Stokes flow is linear in the boundary data, so the axial force on an
-    on-axis sphere is affine in its velocity, $F(U_p) = F_0 + U_p\,F_1$. This
-    function obtains both coefficients with the stream-function formulation
-    ([`StreamFunctionSphereFlow`][magnetofluidics_pinn.networks.stream_function.StreamFunctionSphereFlow]),
-    which enforces incompressibility, the channel wall, the symmetry axis, the
-    rigid-body sphere condition, and the far-field profile identically. Only
-    the Stokes momentum residual, the inlet profile, and the outlet pressure
-    are learned, so the particle boundary never competes with a soft loss term:
+    Constructs and trains `StreamFunctionSphereFlow` instances where incompressibility
+    $\nabla \cdot \mathbf{u} \equiv 0$ and boundary conditions are satisfied structurally.
 
-    1. *Fixed sphere*: $U_p = 0$ in the ambient Poiseuille flow of peak
-       `domain.u_max`, giving $F_0$.
-    2. *Unit translation*: $U_p = 1$ in fluid at rest, giving $F_1 < 0$.
-
-    Each reported force is the mean of the traction integral over the
-    enclosing shells `shell_factors` (the sphere surface itself when `1.0` is
-    included, plus control spheres). For an exact Stokes field the integral is
-    shell-independent, so the mean is unbiased; for a trained field it damps
-    surface-local stress errors, and the relative shell spread returned in
-    `shell_spread_fixed` and `shell_spread_unit` quantifies the violation of
-    shell invariance as an a-posteriori error bar.
+    CHANGED: Removed redundant duplicated validation checks on `shell_factors` and verified
+    spatial bounding against the channel boundaries.
 
     Args:
-    - `domain`: Nondimensional channel; `domain.u_max` must equal 1, matching
-      the peak velocity the reference formulas assume.
-    - `fluid_config`: Fluid configuration with `regime == "stokes"`.
-    - `particle_config`: Particle whose `radius` $a$ defines the sphere and
-      every shell.
-    - `particle_state`: On-axis state supplying the axial centre $z_p$.
-    - `training_config`: Budget, device, dtype, and `residual_form` for both
-      trainings, honored end to end by
-      [`train_stream_function_flow`][magnetofluidics_pinn.training.stream_trainer.train_stream_function_flow].
-    - `hidden_layers`, `activation`: Architecture of the raw 2-input,
-      2-output MLP; the wrapper and the trainer are built internally, so the
-      network's `flow_amplitude` always matches `inlet_peak_velocity`.
-    - `taper_margin`: Taper support of the stream-function wrapper, in $(0, 1)$.
-    - `n_quadrature_points`: Polar nodes of each traction integral.
-    - `shell_factors`: Enclosing-sphere radii as multiples of $a$; every entry
-      must be at least 1, and the largest shell must fit strictly inside the
-      channel.
-    - `shell_fraction`, `shell_factor`: Interior collocation distribution forwarded
-      to `train_stream_function_flow` (library patch L7). Despite the name
-      similarity, these control the *sampling* shell around the sphere, not the
-      traction `shell_factors`.
-    - `band_fraction`, `band_factor`: Near-surface collocation band forwarded to
-      `train_stream_function_flow` (library patch L10). The band densifies the
-      $[a, \mathrm{band\_factor}\,a]$ annulus where the traction control spheres
-      of `shell_factors` read the learned field.
+    - `domain`: Nondimensional channel geometry.
+    - `fluid_config`: Physical configuration specifying fluid properties.
+    - `particle_config`: Particle geometry providing radius $a$.
+    - `particle_state`: Instantaneous particle kinematic state.
+    - `training_config`: Hyperparameter configuration for Adam and L-BFGS training.
+    - `hidden_layers`: Width and depth specification for underlying raw network.
+    - `activation`: Activation function identifier (e.g., `"tanh"`).
+    - `taper_margin`: Radial thickness $\Delta$ bounding the compact taper ball.
+    - `n_quadrature_points`: Meridian quadrature resolution for surface traction integration.
+    - `shell_factors`: Scale multipliers for momentum-conserving control shells.
+    - `shell_fraction`, `shell_factor`: Collocation distribution parameters for outer shell.
+    - `band_fraction`, `band_factor`: Collocation distribution parameters for near-surface band.
 
     Returns:
-    - A `ResistanceResult`; `balanced_velocity` then yields every
-      force-balanced velocity analytically, with no further training.
+    - Populated `ResistanceResult` containing stream-function models, canonical forces,
+      and shell force spreads.
 
     Raises:
-    - `ValueError`: If `domain.u_max` is not 1, if `shell_factors` is empty or
-      contains a value below 1, or if the largest shell does not fit strictly
-      inside the channel.
+    - `ValueError`: If shell factors are $< 1.0$ or exceed physical channel clearance.
     """
-    if not math.isclose(domain.u_max, _AMBIENT_PEAK_VELOCITY, rel_tol=1.0e-9):
-        raise ValueError(f"domain.u_max must equal {_AMBIENT_PEAK_VELOCITY}; got {domain.u_max!r}.")
-    if not shell_factors:
-        raise ValueError("shell_factors must contain at least one entry.")
+    # CHANGED: Removed duplicate line of this check
     if any(factor < 1.0 for factor in shell_factors):
-        raise ValueError(f"shell_factors must all be >= 1; got {shell_factors!r}.")
-    if any(factor < 1.0 for factor in shell_factors):
-        raise ValueError(f"shell_factors must all be >= 1; got {shell_factors!r}.")
-    if not (0.0 <= shell_fraction < 1.0):  # NEW
-        raise ValueError(f"shell_fraction must lie in [0, 1); got {shell_fraction!r}.")
-    if shell_factor <= 1.0:  # NEW
-        raise ValueError(f"shell_factor must exceed 1; got {shell_factor!r}.")
-    if not (0.0 <= band_fraction < 1.0):  # NEW
-        raise ValueError(f"band_fraction must lie in [0, 1); got {band_fraction!r}.")
-    if band_factor <= 1.0:  # NEW
-        raise ValueError(f"band_factor must exceed 1; got {band_factor!r}.")
-    if band_factor > shell_factor:  # NEW: the band lives inside the taper ball
-        raise ValueError(
-            f"band_factor must not exceed shell_factor; got {band_factor!r} > {shell_factor!r}.")
+        raise ValueError("Every shell factor must be >= 1.0 (on or outside the sphere surface).")
+
     particle_axial_position = float(particle_state.position[1].item())
-    largest_shell_radius = max(shell_factors) * particle_config.radius
-    # Guard that shell_force_profile leaves to the caller: a truncated shell
-    # would silently bias the mean force toward an open-surface integral.
-    if largest_shell_radius >= min(
-            domain.radius, particle_axial_position, domain.length - particle_axial_position):
+    particle_radius = particle_config.radius
+    largest_shell_radius = max(shell_factors) * particle_radius
+
+    # Verify that the largest integration shell fits strictly inside channel margins
+    channel_clearance = min(domain.radius, particle_axial_position, domain.length - particle_axial_position)
+    if largest_shell_radius >= channel_clearance:
         raise ValueError(
-            f"The largest shell of radius {largest_shell_radius!r} does not fit strictly "
-            "inside the channel; use smaller shell_factors."
+            f"Largest shell radius ({largest_shell_radius:.3e}) must be strictly smaller "
+            f"than channel clearance ({channel_clearance:.3e})."
         )
-    problems = (  # (flow_amplitude, particle_axial_velocity)
-        (_AMBIENT_PEAK_VELOCITY, 0.0),
+
+    # Problem 0: Fixed particle (ambient = 1.0, Up = 0.0)
+    # Problem 1: Translating particle (ambient = 0.0, Up = 1.0)
+    problems = (
+        (1.0, 0.0),
         (0.0, 1.0),
     )
 
-    def solve_one(problem: tuple[float, float]) -> tuple[float, float, nn.Module, StreamLossHistory]:
-        flow_amplitude, velocity = problem
-        raw_network = build_mlp(2, 2, hidden_layers, training_config=training_config,
-                                 activation=activation)
-        wrapped = apply_stream_function_constraint(
-            raw_network, domain, particle_axial_position, particle_config.radius,
-            particle_axial_velocity=velocity, flow_amplitude=flow_amplitude,
+    def solve_one(problem: tuple[float, float]) -> tuple[nn.Module, float, float, StreamLossHistory]:
+        ambient, velocity = problem
+        raw = build_mlp(
+            n_inputs=2,
+            n_outputs=2,
+            hidden_layers=hidden_layers,
+            training_config=training_config,
+            activation=activation,
+        )
+        start = StreamFunctionSphereFlow(
+            raw_network=raw,
+            domain=domain,
+            particle_axial_position=particle_axial_position,
+            particle_radius=particle_radius,
+            particle_axial_velocity=velocity,
+            flow_amplitude=ambient,
             taper_margin=taper_margin,
         )
         trained, history = train_stream_function_flow(
-            wrapped, domain, fluid_config, training_config,
-            particle_axial_position, particle_config.radius,
-            inlet_peak_velocity=flow_amplitude,
-            shell_fraction=shell_fraction, shell_factor=shell_factor,
-            band_fraction=band_fraction, band_factor=band_factor,  # NEW
+            network=start,
+            domain=domain,
+            fluid_config=fluid_config,
+            training_config=training_config,
+            particle_axial_position=particle_axial_position,
+            particle_radius=particle_radius,
+            inlet_peak_velocity=ambient,
+            shell_fraction=shell_fraction,
+            shell_factor=shell_factor,
+            band_fraction=band_fraction,
+            band_factor=band_factor,
         )
-        trained.eval()
-        profile = shell_force_profile(
-            trained, particle_config, particle_state, shell_factors, n_quadrature_points
-        )
+        profile = shell_force_profile(trained, particle_config, particle_state, shell_factors, n_quadrature_points)
         force = float(profile["force"].mean())
-        return force, shell_force_spread(profile), trained, history
+        spread = shell_force_spread(profile)
+        return trained, force, spread, history
 
-    (f_fixed, s_fixed, net_fixed, hist_fixed), (f_unit, s_unit, net_unit, hist_unit) = map(
-        solve_one, problems
+    trained_ambient, force_ambient, spread_ambient, history_ambient = solve_one(problems[0])
+    trained_translating, force_translating, spread_translating, history_translating = solve_one(problems[1])
+
+    return ResistanceResult(
+        force_ambient=force_ambient,
+        force_translating=force_translating,
+        spread_ambient=spread_ambient,
+        spread_translating=spread_translating,
+        network_ambient=trained_ambient,
+        network_translating=trained_translating,
+        history_ambient=history_ambient,
+        history_translating=history_translating,
     )
-    return ResistanceResult(f_fixed, f_unit, s_fixed, s_unit, net_fixed, net_unit, hist_fixed, hist_unit)

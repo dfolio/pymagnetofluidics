@@ -10,21 +10,25 @@ honors `TrainingConfig.dtype` and `TrainingConfig.device` end to end.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import torch
 from torch import nn
 
 from magnetofluidics_pinn.boundary_conditions.flow_bc import inlet_velocity_condition
-from magnetofluidics_pinn.config import DEFAULT_BOUNDARY_LOSS_WEIGHT, FluidConfig, TrainingConfig
-from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
-from magnetofluidics_pinn.sampling.exterior import sample_exterior_points, sample_inlet_outlet_points
-from magnetofluidics_pinn.training.losses import compose_loss
+from magnetofluidics_pinn.config import DEFAULT_BOUNDARY_LOSS_WEIGHT, FluidConfig, \
+    TrainingConfig
 from magnetofluidics_pinn.data_types import Domain
+from magnetofluidics_pinn.networks import StreamFunctionSphereFlow
+from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
+from magnetofluidics_pinn.sampling.exterior import sample_exterior_points, \
+    sample_inlet_outlet_points
+from magnetofluidics_pinn.training.losses import compose_loss
 
 # Ordered names of the recorded losses; "total" is recorded first.
-STREAM_LOSS_NAMES: tuple[str, ...] = ("total", "momentum_r", "momentum_z", "continuity", "inlet", "outlet")
+STREAM_LOSS_NAMES: tuple[str, ...] = ("total", "momentum_r", "momentum_z", "continuity",
+                                      "inlet", "outlet")
 
 
 @dataclass(frozen=True)
@@ -41,7 +45,7 @@ class StreamLossHistory:
     adam: tuple[tuple[float, ...], ...]
     lbfgs: tuple[tuple[float, ...], ...]
     probe: tuple[float, ...] = ()  # CHANGED: probe loss after each L-BFGS round
-    
+
     def final(self) -> dict[str, float]:
         """Return the last recorded value of every loss.
 
@@ -75,11 +79,14 @@ class _StreamBatch:
 
 
 def _build_batch(
-    domain: Domain, particle_z: float, particle_radius: float, inlet_peak_velocity: float,
-    n_interior: int, n_boundary: int, seed: int, device: torch.device, dtype: torch.dtype,
+    domain: Domain, particle_z: float, particle_radius: float,
+    inlet_peak_velocity: float,
+    n_interior: int, n_boundary: int, seed: int, device: torch.device,
+    dtype: torch.dtype,
     shell_fraction: float = 0.25,  # NEW: forwarded to `sample_exterior_points`
     shell_factor: float = 2.5,  # NEW: forwarded to `sample_exterior_points`
-    band_fraction: float = 0.0,  # NEW: fraction of interior points in the near-surface band
+    band_fraction: float = 0.0,
+    # NEW: fraction of interior points in the near-surface band
     band_factor: float = 1.5,  # NEW: band outer radius in units of the sphere radius
 ) -> _StreamBatch:
     r"""Sample one batch.
@@ -109,52 +116,77 @@ def _build_batch(
     """
     n_band = round(band_fraction * n_interior)  # NEW
     interior = sample_exterior_points(
-        domain, particle_z, particle_radius, n_interior - n_band, seed,  # CHANGED: reduced count
+        domain, particle_z, particle_radius, n_interior - n_band, seed,
+        # CHANGED: reduced count
         device=device, dtype=dtype,
         shell_fraction=shell_fraction, shell_factor=shell_factor,
     )  # CHANGED: gradient attached once, after the band join
     if n_band > 0:  # NEW: dedicated near-surface draw (library patch L10)
         band_points = _sample_near_surface_band(
             domain, particle_z, particle_radius, band_factor, n_band,
-            seed + 717_717, device, dtype)  # NEW: offset disjoint from every other seed in use
+            seed + 717_717, device,
+            dtype)  # NEW: offset disjoint from every other seed in use
         interior = torch.cat((interior, band_points))
     interior = interior.requires_grad_(True)  # CHANGED
-    inlet, outlet = sample_inlet_outlet_points(domain, n_boundary, seed + 1, device=device, dtype=dtype)
-    return _StreamBatch(interior, inlet, inlet_velocity_condition(domain, inlet, inlet_peak_velocity), outlet)
+    inlet, outlet = sample_inlet_outlet_points(domain, n_boundary, seed + 1,
+                                               device=device, dtype=dtype)
+    return _StreamBatch(interior, inlet,
+                        inlet_velocity_condition(domain, inlet, inlet_peak_velocity),
+                        outlet)
 
 
 def _evaluate_losses(
-    network: nn.Module, batch: _StreamBatch, fluid_config: FluidConfig, config: TrainingConfig,
+    network: nn.Module | StreamFunctionSphereFlow,
+    batch: _StreamBatch,
+    fluid_config: FluidConfig,
+    config: TrainingConfig,
 ) -> dict[str, torch.Tensor]:
-    """Compute every loss term and the weighted total.
+    r"""Compute every loss term and the weighted total objective.
+
+    When `config.residual_form == "native"`, queries `StreamFunctionSphereFlow.stokes_residual_sz`
+    directly, narrowing the type to suppress PyCharm inspection warnings.
 
     Args:
-    - `network`: Stream-function network.
-    - `batch`: Collocation batch.
+    - `network`: Flow model, expected to be an instance of `StreamFunctionSphereFlow`
+      when `config.residual_form == "native"`.
+    - `batch`: Collocation batches for interior, inlet, and outlet points.
     - `fluid_config`: Stokes fluid configuration.
-    - `config`: Supplies the momentum weight and `residual_form`.
+    - `config`: Hyperparameter configuration specifying loss weights and `residual_form`.
 
     Returns:
-    - Mapping from `STREAM_LOSS_NAMES` to scalar tensors.
+    * Dictionary mapping names in `STREAM_LOSS_NAMES` to scalar tensors attached to the graph.
+
+    Raises:
+    * `TypeError`: If `config.residual_form == "native"` but `network` is not an
+      instance of `StreamFunctionSphereFlow`.
     """
     # residual = stokes_residual(network, batch.interior, fluid_config, residual_form=config.residual_form)
     if config.residual_form == "native":  # CHANGED
-        if not hasattr(network, "stokes_residual_sz"):
-            raise ValueError("residual_form='native' requires a StreamFunctionSphereFlow.")
+        if not isinstance(network, StreamFunctionSphereFlow):
+            raise TypeError(
+                f"residual_form='native' requires a StreamFunctionSphereFlow instance; "
+                f"got {type(network).__name__}."
+            )
         residual = network.stokes_residual_sz(batch.interior)
     else:
-        residual = stokes_residual(network, batch.interior, fluid_config, residual_form=config.residual_form)
-    
+        residual = stokes_residual(network, batch.interior, fluid_config,
+                                   residual_form=config.residual_form)
+
     parts = {
         "momentum_r": residual[:, 0:1].square().mean(),
         "momentum_z": residual[:, 1:2].square().mean(),
-        "continuity": residual[:, 2:3].square().mean(),  # Monitored only: holds by construction.
-        "inlet": (network(batch.inlet_points)[:, :2] - batch.inlet_target).square().mean(),
-        "outlet": network(batch.outlet_points)[:, 2:3].square().mean(),
+        "continuity": residual[:, 2:3].square().mean(),
+        # Monitored only: holds by construction.
+        "inlet"     : (network(batch.inlet_points)[
+                           :, :2] - batch.inlet_target).square().mean(),
+        "outlet"    : network(batch.outlet_points)[:, 2:3].square().mean(),
     }
-    weights = {"momentum_r": config.momentum_loss_weight, "momentum_z": config.momentum_loss_weight,
-               "inlet": DEFAULT_BOUNDARY_LOSS_WEIGHT, "outlet": DEFAULT_BOUNDARY_LOSS_WEIGHT}
-    total = compose_loss({name: (lambda value=parts[name]: value) for name in weights}, weights)
+    weights = {"momentum_r": config.momentum_loss_weight,
+               "momentum_z": config.momentum_loss_weight,
+               "inlet"     : DEFAULT_BOUNDARY_LOSS_WEIGHT,
+               "outlet"    : DEFAULT_BOUNDARY_LOSS_WEIGHT}
+    total = compose_loss({name: (lambda value=parts[name]: value) for name in weights},
+                         weights)
     return {"total": total, **parts}
 
 
@@ -167,7 +199,8 @@ def _record(losses: dict[str, torch.Tensor]) -> tuple[float, ...]:
     Returns:
     - Values in `STREAM_LOSS_NAMES` order.
     """
-    return tuple(torch.stack([losses[name].detach() for name in STREAM_LOSS_NAMES]).tolist())
+    return tuple(
+        torch.stack([losses[name].detach() for name in STREAM_LOSS_NAMES]).tolist())
 
 
 def _sample_near_surface_band(  # NEW
@@ -202,9 +235,10 @@ def _sample_near_surface_band(  # NEW
     rho_inner, rho_outer = particle_radius, band_factor * particle_radius
     generator = torch.Generator(device=device).manual_seed(seed)
     n_candidates = 4 * n_points + 16
-    rho_sq = rho_inner**2 + (rho_outer**2 - rho_inner**2) * torch.rand(
+    rho_sq = rho_inner ** 2 + (rho_outer ** 2 - rho_inner ** 2) * torch.rand(
         n_candidates, 1, generator=generator, device=device, dtype=dtype)
-    theta = math.pi * torch.rand(n_candidates, 1, generator=generator, device=device, dtype=dtype)
+    theta = math.pi * torch.rand(n_candidates, 1, generator=generator, device=device,
+                                 dtype=dtype)
     rho = torch.sqrt(rho_sq)
     candidates = torch.cat(
         [rho * torch.sin(theta), particle_z + rho * torch.cos(theta)], dim=1)
@@ -230,11 +264,11 @@ def train_stream_function_flow(
     min_relative_improvement: float = 1.0e-2,  # NEW
     patience: int = 2,  # NEW
     stagnation_probe_seed: int | None = None,
-    shell_fraction: float = 0.25,  # NEW: fraction of interior points in the oversampled shell
-    shell_factor: float = 2.5,  # NEW: shell outer radius in units of the sphere radius
-    band_fraction: float = 0.0,  # NEW: fraction of interior points in the near-surface band
-    band_factor: float = 1.5,  # NEW: band outer radius in units of the sphere radius
-    restore_best_probe: bool = True,   # CHANGED
+    shell_fraction: float = 0.25,
+    shell_factor: float = 2.5,
+    band_fraction: float = 0.0,
+    band_factor: float = 1.5,
+    restore_best_probe: bool = True,  # CHANGED
 ) -> tuple[nn.Module, StreamLossHistory]:
     """Train a stream-function network on a deep copy and return it.
 
@@ -269,103 +303,120 @@ def train_stream_function_flow(
     - `ValueError`: If L-BFGS is enabled with a non-positive setting.
     """
     if training_config.use_lbfgs_refinement and min(
-        training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
+        training_config.lbfgs_n_interior_points,
+        training_config.lbfgs_n_boundary_points,
         training_config.lbfgs_rounds, training_config.lbfgs_iterations_per_round,
     ) <= 0:
-        raise ValueError("All L-BFGS settings must be strictly positive when refinement is enabled.")
+        raise ValueError(
+            "All L-BFGS settings must be strictly positive when refinement is enabled.")
 
     device, dtype = training_config.torch_device, training_config.torch_dtype
     trained = copy.deepcopy(network).to(device=device, dtype=dtype)
-    
+
     def batch(n_interior: int, n_boundary: int, seed: int) -> _StreamBatch:
-        return _build_batch(domain, particle_axial_position, particle_radius, inlet_peak_velocity,
+        return _build_batch(domain, particle_axial_position, particle_radius,
+                            inlet_peak_velocity,
                             n_interior, n_boundary, seed, device, dtype,
                             shell_fraction, shell_factor,
                             band_fraction, band_factor)  # CHANGED
 
     optimizer = torch.optim.Adam(trained.parameters(), lr=training_config.learning_rate)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(  # NEW: damps resampling noise
-        optimizer, T_max=training_config.n_epochs, eta_min=1.0e-2 * training_config.learning_rate)
-    
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # NEW: damps resampling noise
+        optimizer, T_max=training_config.n_epochs,
+        eta_min=1.0e-2 * training_config.learning_rate)
+
     adam_records: list[tuple[float, ...]] = []
     for epoch in range(training_config.n_epochs):
         losses = _evaluate_losses(
-            trained, batch(training_config.n_interior_points, training_config.n_boundary_points,
-                           training_config.random_seed + epoch),
+            trained,
+            batch(training_config.n_interior_points, training_config.n_boundary_points,
+                  training_config.random_seed + epoch),
             fluid_config, training_config,
         )
         optimizer.zero_grad()
         losses["total"].backward()
         if training_config.gradient_clip_norm is not None:
-            torch.nn.utils.clip_grad_norm_(trained.parameters(), training_config.gradient_clip_norm)
+            torch.nn.utils.clip_grad_norm_(trained.parameters(),
+                                           training_config.gradient_clip_norm)
         optimizer.step()
         scheduler.step()
         adam_records.append(_record(losses))
         if training_config.verbose and epoch % training_config.log_every == 0:
             print(f"Epoch {epoch:5d} | total {adam_records[-1][0]:.3e}")
-    
+
     probe_seed = (
         training_config.random_seed + 999_999 if stagnation_probe_seed is None else stagnation_probe_seed
     )
-    probe_batch = batch(training_config.lbfgs_n_interior_points, training_config.lbfgs_n_boundary_points,
+    probe_batch = batch(training_config.lbfgs_n_interior_points,
+                        training_config.lbfgs_n_boundary_points,
                         probe_seed)  # NEW: fixed across every round
-    
+
     best_state, best_probe, probe_history = None, math.inf, []  # CHANGED
     lbfgs_records: list[tuple[float, ...]] = []
     if training_config.use_lbfgs_refinement:
         previous_probe_loss: float | None = None
         stalled_rounds = 0
         for round_index in range(training_config.lbfgs_rounds):
-            seed = training_config.random_seed + 100_000 + (round_index if resample_each_round else 0)
+            seed = training_config.random_seed + 100_000 + (
+                round_index if resample_each_round else 0)
             fixed = batch(training_config.lbfgs_n_interior_points,
                           training_config.lbfgs_n_boundary_points, seed)
             lbfgs = torch.optim.LBFGS(
-                trained.parameters(), lr=1.0, max_iter=training_config.lbfgs_iterations_per_round,
+                trained.parameters(), lr=1.0,
+                max_iter=training_config.lbfgs_iterations_per_round,
                 history_size=100, line_search_fn="strong_wolfe",
                 tolerance_grad=1.0e-12, tolerance_change=1.0e-14,
             )
-            
+
             def closure(batch_=fixed, optimizer=lbfgs) -> torch.Tensor:
                 optimizer.zero_grad()
-                _losses = _evaluate_losses(trained, batch_, fluid_config, training_config)
+                _losses = _evaluate_losses(trained, batch_, fluid_config,
+                                           training_config)
                 _losses["total"].backward()
                 lbfgs_records.append(_record(_losses))
                 return _losses["total"]
-            
+
             lbfgs.step(closure)
             # current = lbfgs_records[-1][0]
             # with torch.no_grad():
-            probe_loss = _evaluate_losses(trained, probe_batch, fluid_config, training_config)["total"].item()
+            probe_loss = \
+                _evaluate_losses(trained, probe_batch, fluid_config, training_config)[
+                    "total"].item()
             probe_history.append(probe_loss)
             if probe_loss < best_probe:  # CHANGED
                 best_probe, best_state = probe_loss, copy.deepcopy(trained.state_dict())
-            
+
             if training_config.verbose:
-                print(f"L-BFGS round {round_index + 1} | train {lbfgs_records[-1][0]:.3e} | probe {probe_loss:.3e}")
-            
+                print(
+                    f"L-BFGS round {round_index + 1} | train {lbfgs_records[-1][0]:.3e} | probe {probe_loss:.3e}")
+
             if previous_probe_loss is not None:
-                improvement = (previous_probe_loss - probe_loss) / abs(previous_probe_loss)
+                improvement = (previous_probe_loss - probe_loss) / abs(
+                    previous_probe_loss)
                 stalled_rounds = stalled_rounds + 1 if improvement < min_relative_improvement else 0
                 if stalled_rounds >= patience:
                     break
             previous_probe_loss = probe_loss
-            
+
     if restore_best_probe and best_state is not None:  # CHANGED (after the loop)
         trained.load_state_dict(best_state)
     return trained, StreamLossHistory(STREAM_LOSS_NAMES,
                                       tuple(adam_records), tuple(lbfgs_records),
-                                      tuple(probe_history),  # CHANGED: probe was computed but never returned
+                                      tuple(probe_history),
+                                      # CHANGED: probe was computed but never returned
                                       )
 
 
 def diagnose_loss_scale(  # NEW
-    network: nn.Module, domain: Domain, fluid_config: FluidConfig, training_config: TrainingConfig,
+    network: nn.Module, domain: Domain, fluid_config: FluidConfig,
+    training_config: TrainingConfig,
     particle_axial_position: float, particle_radius: float, inlet_peak_velocity: float,
     shell_fraction: float = 0.25,
     shell_factor: float = 2.5,
     band_fraction: float = 0.0,  # NEW: must match the training distribution
     band_factor: float = 1.5,  # NEW
-    ) -> dict[str, float]:
+) -> dict[str, float]:
     """Evaluate every loss on one batch *before* training, to catch scaling defects.
 
     Args:
@@ -378,14 +429,16 @@ def diagnose_loss_scale(  # NEW
     - `band_fraction`, `band_factor`: Near-surface distribution of the audit batch.
       Pass the same values as the subsequent `train_stream_function_flow` call, so
       the audit measures the batch the optimizer will actually see.
-  
+
     Returns:
     - Mapping from each name in `STREAM_LOSS_NAMES` to its initial value.
     """
     device, dtype = training_config.torch_device, training_config.torch_dtype
     probe = copy.deepcopy(network).to(device=device, dtype=dtype)
-    batch = _build_batch(domain, particle_axial_position, particle_radius, inlet_peak_velocity,
-                         training_config.n_interior_points, training_config.n_boundary_points,
+    batch = _build_batch(domain, particle_axial_position, particle_radius,
+                         inlet_peak_velocity,
+                         training_config.n_interior_points,
+                         training_config.n_boundary_points,
                          training_config.random_seed, device, dtype,
                          shell_fraction, shell_factor,
                          band_fraction, band_factor)  # CHANGED
