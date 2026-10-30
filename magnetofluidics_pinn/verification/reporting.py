@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 import operator
 from dataclasses import dataclass, fields
-from typing import Callable, Literal, NamedTuple
+from typing import Callable, Literal, NamedTuple, Mapping, Sequence
 
 import pandas as pd
 import torch
@@ -338,3 +338,54 @@ def default_thresholds(
         quadrature_convergence_tolerance=quadrature_convergence_tolerance,  # NEW
         faxen_consistency_tolerance=faxen_consistency_tolerance,      # NEW
     )
+
+
+def build_residual_consistency_table(
+    standard_losses: Mapping[str, float],
+    native_losses: Mapping[str, float],
+    r_weighted_losses: Mapping[str, float],
+    components: Sequence[str] = ("momentum_r", "momentum_z"),
+    eps: float = 1.0e-30,
+) -> tuple[pd.DataFrame, float]:
+    r"""Construct a structured comparison table of residual consistency across formulations.
+
+    Computes component-wise root-mean-square (RMS) ratios relative to the standard
+    unweighted baseline
+
+    Args:
+    - `standard_losses`: Mapping of component names to MSE values under `"standard"`.
+    - `native_losses`: Mapping of component names to MSE values under `"native"`.
+    - `r_weighted_losses`: Mapping of component names to MSE values under `"r_weighted"`.
+    - `components`: Ordered sequence of PDE components to compare.
+    - `eps`: Small numerical regularizer preventing division by zero.
+
+    Returns:
+    - A `pd.DataFrame` indexed by component name with columns displaying raw MSE values
+      and normalized relative RMS ratios.
+
+    Raises:
+    - `KeyError`: If any component in `components` is absent from any loss mapping.
+    """
+    records: list[dict[str, float | str]] = []
+    worst: float = 0.0
+    for name in components:
+        std_val = float(standard_losses[name])
+        nat_val = float(native_losses[name])
+        rw_val = float(r_weighted_losses[name])
+
+        nat_ratio = math.sqrt(nat_val / max(std_val, eps))
+        nat2_ratio = math.sqrt(nat_val / max(rw_val, eps))
+        rw_ratio = math.sqrt(rw_val / max(std_val, eps))
+        worst = max(worst, nat_ratio, nat2_ratio, rw_ratio)
+        records.append({
+            "Component": name,
+            "Standard (MSE)": std_val,
+            "Native (MSE)": nat_val,
+            "R-Weighted (MSE)": rw_val,
+            "Native / Standard (RMS)": nat_ratio,
+            "Native / R-Weighted (RMS)": nat2_ratio,
+            "R-Weighted / Standard (RMS)": rw_ratio,
+        })
+
+    return pd.DataFrame.from_records(records).set_index("Component"), worst
+

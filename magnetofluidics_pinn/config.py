@@ -743,7 +743,7 @@ class TwoWayCouplingConfig:
         _check_if_finite_positive(self.ambient_peak_velocity, "ambient_peak_velocity")
         _check_if_finite_positive(self.core_strain_weight, "core_strain_weight")
 
-        if self.device.split(":")[0] not in ("cuda", "cpu"):  # CHANGED: accepts "cuda:0" as documented
+        if self.device.split(":")[0] not in ("cuda", "cpu"):
             raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
 
     @property

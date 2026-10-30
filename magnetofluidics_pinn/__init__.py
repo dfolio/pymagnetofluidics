@@ -84,7 +84,7 @@ from magnetofluidics_pinn.physics import (annular_flow_rate as annular_flow_rate
 from magnetofluidics_pinn.sampling import (
     sample_collocation_points as sample_collocation_points,
     sample_collocation_points_with_particle as sample_collocation_points_with_particle,
-    sample_exterior_points as sample_exterior_points,  # NEW
+    sample_exterior_points as sample_exterior_points,
 )
 # Normalization utilities, required to keep solvers dimensionless while
 # accepting/reporting physical (SI) quantities at the package boundary.
@@ -109,7 +109,7 @@ from magnetofluidics_pinn.trajectory import (advance_particle_resistance as adva
                                              ResistancePair as ResistancePair,
                                              solve_force_balanced_velocity as solve_force_balanced_velocity,
                                              solve_resistance_pair as solve_resistance_pair,
-                                             solve_resistance_problems_stream as solve_resistance_problems_stream,  # NEW
+                                             solve_resistance_problems_stream as solve_resistance_problems_stream,
                                              )
 from magnetofluidics_pinn.data_types import (
     CollocationPoints as CollocationPoints,
@@ -123,6 +123,7 @@ from magnetofluidics_pinn.data_types import (
 # `verification.metrics.ProfileEvaluation` - see that module's docstring.
 from magnetofluidics_pinn.verification import (analytical_pressure_gradient as analytical_pressure_gradient,
                                                analytical_tracer_streamline as analytical_tracer_streamline,
+                                               build_residual_consistency_table as build_residual_consistency_table,
                                                compare_trajectory_to_analytical as compare_trajectory_to_analytical,
                                                compute_flow_rate_curve as compute_flow_rate_curve,
                                                compute_flow_rate_errors as compute_flow_rate_errors,
@@ -155,6 +156,7 @@ from magnetofluidics_pinn.verification import (analytical_pressure_gradient as a
                                                sphere_traction_force as sphere_traction_force,
                                                stokes_sphere_field_polar as stokes_sphere_field_polar,
                                                summarize_residual as summarize_residual,
+                                               partition_evaluation_stations as partition_evaluation_stations,
                                                surface_independence_report as surface_independence_report,
                                                VerificationCheck as VerificationCheck,
                                                VerificationThresholds as VerificationThresholds,
@@ -168,27 +170,42 @@ from magnetofluidics_pinn.verification import (analytical_pressure_gradient as a
                                                warm_start_cost_ratio as warm_start_cost_ratio,
                                                warm_start_equivalence_gate as warm_start_equivalence_gate
                                                )
-from magnetofluidics_pinn.visualization import (plot_flow_rate_deviation as plot_flow_rate_deviation,
-                                                plot_particle_flow_field as plot_particle_flow_field,
-                                                plot_particle_residual_heatmap as plot_particle_residual_heatmap,
-                                                plot_pressure_gradient_fit as plot_pressure_gradient_fit,
-                                                plot_profile_error as plot_profile_error,
-                                                plot_radial_leakage as plot_radial_leakage,
-                                                plot_residual_heatmap as plot_residual_heatmap,
-                                                plot_streamlines as plot_streamlines,
-                                                plot_training_history as plot_training_history,
-                                                plot_trajectories as plot_trajectories,
-                                                plot_two_way_history as plot_two_way_history,
-                                                plot_velocity_profile_comparison as plot_velocity_profile_comparison,
-                                                plot_traction_uniformity as plot_traction_uniformity,
-                                                plot_resistance_pair_comparison as plot_resistance_pair_comparison,
-                                                plot_resistance_position_sweep as plot_resistance_position_sweep,
-                                                plot_residual_by_region as plot_residual_by_region,
-                                                plot_surface_independence as plot_surface_independence,
-                                                plot_stream_function_field as plot_stream_function_field,
-                                                )
+from magnetofluidics_pinn.visualization import (
+    plot_flow_rate_deviation as plot_flow_rate_deviation,
+    plot_particle_flow_animation as plot_particle_flow_animation,
+    plot_particle_flow_field as plot_particle_flow_field,
+    plot_particle_residual_heatmap as plot_particle_residual_heatmap,
+    plot_pressure_gradient_fit as plot_pressure_gradient_fit,
+    plot_pressure_through_particle as plot_pressure_through_particle,
+    plot_profile_error as plot_profile_error,
+    plot_radial_leakage as plot_radial_leakage,
+    plot_residual_by_region as plot_residual_by_region,
+    plot_residual_heatmap as plot_residual_heatmap,
+    plot_resistance_pair_comparison as plot_resistance_pair_comparison,
+    plot_resistance_position_sweep as plot_resistance_position_sweep,
+    plot_station_profile_comparison as plot_station_profile_comparison,
+    plot_stream_function_field as plot_stream_function_field,
+    plot_stream_loss_history as plot_stream_loss_history,
+    plot_streamlines as plot_streamlines,
+    plot_surface_independence as plot_surface_independence,
+    plot_traction_uniformity as plot_traction_uniformity,
+    plot_training_history as plot_training_history,
+    plot_trajectories as plot_trajectories,
+    plot_two_way_history as plot_two_way_history,
+    plot_velocity_profile_comparison as plot_velocity_profile_comparison,
+    plot_flow_rate_reconnection as plot_flow_rate_reconnection,
+    plot_quadrature_convergence as plot_quadrature_convergence,
+)
+from magnetofluidics_pinn.animation import(
+    free_particle_velocity as free_particle_velocity,
+    free_particle_trajectory as free_particle_trajectory,
+    SuperposedFlow as SuperposedFlow,
+    rebuild_at_position as rebuild_at_position,
+    superposed_flow_at as superposed_flow_at,
+)
 
-__version__ = "0.1.7"  # CHANGED: was "0.1.6" - bumped for the train()/train_around_obstacle() merge and the new ObstacleConfig.
+
+__version__ = "0.1.7"
 
 __all__ = [
     "__version__",
@@ -214,7 +231,7 @@ __all__ = [
     "nondimensionalize_domain",
     "redimensionalize_domain",
     "nondimensionalize_particle",
-    "nondimensionalize_mobility",  # NEW: was previously only reachable via the `scaling` submodule directly.
+    "nondimensionalize_mobility",
     # Device management
     "resolve_device",
     "resolve_dtype",
@@ -295,18 +312,18 @@ __all__ = [
     "solve_resistance_pair",
     "resistance_position_sweep",
     "position_independence",
-    "solve_resistance_problems_stream",  # NEW
+    "solve_resistance_problems_stream",
     # Visualization
     "plot_streamlines",
     "plot_trajectories",
     "plot_training_history",
-    "plot_two_way_history",  # NEW
-    "plot_velocity_profile_comparison",  # NEW
-    "plot_profile_error",  # NEW
-    "plot_radial_leakage",  # NEW
-    "plot_flow_rate_deviation",  # NEW
-    "plot_pressure_gradient_fit",  # NEW
-    "plot_residual_heatmap",  # NEW
+    "plot_two_way_history",
+    "plot_velocity_profile_comparison",
+    "plot_profile_error",
+    "plot_radial_leakage",
+    "plot_flow_rate_deviation",
+    "plot_pressure_gradient_fit",
+    "plot_residual_heatmap",
     "plot_particle_flow_field",
     "plot_particle_residual_heatmap",
     "plot_traction_uniformity",
@@ -315,6 +332,12 @@ __all__ = [
     "plot_residual_by_region",
     "plot_surface_independence",
     "plot_stream_function_field",
+    "plot_particle_flow_animation",
+    "plot_stream_loss_history",
+    "plot_station_profile_comparison",
+    "plot_pressure_through_particle",
+    "plot_flow_rate_reconnection",
+    "plot_quadrature_convergence",
     # Verification
     "ProfileEvaluation",
     "summarize_residual",
@@ -334,6 +357,7 @@ __all__ = [
     "compare_trajectory_to_analytical",
     "hagen_poiseuille_velocity_field",
     "hagen_poiseuille_pressure",
+    "build_residual_consistency_table",
     "analytical_pressure_gradient",
     "analytical_tracer_streamline",
     "faxen_offset_velocity",
@@ -362,5 +386,12 @@ __all__ = [
     "reference_tolerance",
     "momentum_balance_gate",
     "warm_start_cost_ratio",
-    "warm_start_equivalence_gate"
+    "warm_start_equivalence_gate",
+    "partition_evaluation_stations",
+    # Animation
+    "free_particle_velocity",
+    "free_particle_trajectory",
+    "SuperposedFlow",
+    "rebuild_at_position",
+    "superposed_flow_at",
 ]

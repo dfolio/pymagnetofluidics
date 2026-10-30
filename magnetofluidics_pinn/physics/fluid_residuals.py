@@ -42,7 +42,7 @@ that, selected via `residual_form`:
   weight* near $r=0$ than near the wall. What it buys is the ability to
   sample and enforce the PDE at all in the thin annulus between the axis
   and `"standard"`'s exclusion band, where today nothing is checked.
- 
+
 Neither strategy substitutes for
 [`networks.apply_hard_wall_constraint`][magnetofluidics_pinn.networks.constraints.apply_hard_wall_constraint]:
 that wrapper enforces the axis and wall *boundary conditions*
@@ -65,7 +65,7 @@ from magnetofluidics_pinn.config import DomainConfig, FluidConfig
 # The two supported interior-residual singularity treatments; shared between
 # `stokes_residual` and `navier_stokes_residual` so both validate and
 # document the option identically rather than drifting apart.
-_RESIDUAL_FORMS = ("standard", "r_weighted", "native")
+_RESIDUAL_FORMS = ["standard", "r_weighted", "native"]
 
 
 class FlowDerivatives(NamedTuple):
@@ -192,18 +192,18 @@ def compute_flow_derivatives(
     velocity_r = output[:, 0:1]
     velocity_z = output[:, 1:2]
     pressure = output[:, 2:3]
-    
+
     grad_velocity_r = scalar_field_gradient(velocity_r, coordinates)
     grad_velocity_z = scalar_field_gradient(velocity_z, coordinates)
     grad_pressure = scalar_field_gradient(pressure, coordinates)
-    
+
     d_velocity_r_dr = grad_velocity_r[:, 0:1]
     d_velocity_r_dz = grad_velocity_r[:, 1:2]
     d_velocity_z_dr = grad_velocity_z[:, 0:1]
     d_velocity_z_dz = grad_velocity_z[:, 1:2]
     dp_dr = grad_pressure[:, 0:1]
     dp_dz = grad_pressure[:, 1:2]
-    
+
     if not compute_second_order:
         return FlowDerivatives(
             velocity_r=velocity_r,
@@ -218,12 +218,12 @@ def compute_flow_derivatives(
             grad_velocity_r=grad_velocity_r,
             grad_velocity_z=grad_velocity_z,
         )
-    
+
     d2_velocity_r_dr2 = scalar_field_gradient(d_velocity_r_dr, coordinates)[:, 0:1]
     d2_velocity_r_dz2 = scalar_field_gradient(d_velocity_r_dz, coordinates)[:, 1:2]
     d2_velocity_z_dr2 = scalar_field_gradient(d_velocity_z_dr, coordinates)[:, 0:1]
     d2_velocity_z_dz2 = scalar_field_gradient(d_velocity_z_dz, coordinates)[:, 1:2]
-    
+
     return FlowDerivatives(
         velocity_r=velocity_r,
         velocity_z=velocity_z,
@@ -252,7 +252,7 @@ def _axis_threshold(radius: torch.Tensor, eps: float | None) -> float:   # CHANG
 def axisymmetric_vector_laplacian(
         derivs: FlowDerivatives,
         radius: torch.Tensor,
-        residual_form: Literal["standard", "r_weighted"] = "standard",
+        residual_form: Literal["standard", "r_weighted", "native"] = "standard",
         axis_regularization_eps: float| None = 1.0e-7,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     r"""Evaluate the axisymmetric vector Laplacian $\nabla^2 \mathbf{u} = (\nabla_r^2 \mathbf{u}, \nabla_z^2 \mathbf{u})$.
@@ -292,13 +292,13 @@ def axisymmetric_vector_laplacian(
             "axisymmetric_vector_laplacian requires second-order derivatives; "
             "ensure compute_second_order=True in compute_flow_derivatives."
         )
-    
+
     axis_threshold = _axis_threshold(radius, axis_regularization_eps)  # CHANGED (float32 -> 3.5e-4, float64 -> 1.5e-8)
     if residual_form == "standard":
         is_axis = radius < axis_threshold
         # Regularize divisor to avoid NaN in backward computation graph
         safe_radius = torch.where(is_axis, torch.full_like(radius, axis_threshold), radius)
-        
+
         # Standard off-axis computation
         lap_r_standard = (
                 derivs.d2_velocity_r_dr2
@@ -311,11 +311,11 @@ def axisymmetric_vector_laplacian(
                 + derivs.d_velocity_z_dr / safe_radius
                 + derivs.d2_velocity_z_dz2
         )
-        
+
         # CHANGED: Exact L'Hôpital limits smoothly applied on the symmetry axis (r -> 0)
         lap_r_axis = torch.zeros_like(lap_r_standard)
         lap_z_axis = 2.0 * derivs.d2_velocity_z_dr2 + derivs.d2_velocity_z_dz2
-        
+
         laplacian_r = torch.where(is_axis, lap_r_axis, lap_r_standard)
         laplacian_z = torch.where(is_axis, lap_z_axis, lap_z_standard)
     else:
@@ -337,7 +337,7 @@ def _continuity_residual(
         d_velocity_r_dr: torch.Tensor,
         d_velocity_z_dz: torch.Tensor,
         radius: torch.Tensor,
-        residual_form: Literal["standard", "r_weighted"] = "standard",
+        residual_form: Literal["standard", "r_weighted", "native"] = "standard",
         axis_regularization_eps: float = 1.0e-7,
 ) -> torch.Tensor:
     r"""Evaluate axisymmetric continuity residual $\nabla \cdot \mathbf{u} = 0$.
@@ -346,8 +346,8 @@ def _continuity_residual(
     $$\nabla \cdot \mathbf{u} = \frac{\partial u_r}{\partial r} + \frac{u_r}{r} + \frac{\partial u_z}{\partial z} = 0.$$
     As $r \to 0$, applying L'Hôpital's rule gives $\lim_{r \to 0} \frac{u_r}{r} = \frac{\partial u_r}{\partial r}$, yielding:
     $$\left.\nabla \cdot \mathbf{u}\right|_{r=0} = 2 \frac{\partial u_r}{\partial r} + \frac{\partial u_z}{\partial z} = 0.$$
-       
-       
+
+
     Args:
     - `velocity_r`: Radial velocity $u_r$, shape `(n_points, 1)`.
     - `d_velocity_r_dr`: $\partial u_r / \partial r$, shape `(n_points, 1)`.
@@ -355,7 +355,7 @@ def _continuity_residual(
     - `radius`: Radial coordinates $r$, shape `(n_points, 1)`.
     - `residual_form`: `"standard"` or `"r_weighted"`.
     - `axis_regularization_eps`: Proximity tolerance for applying L'Hôpital axis limits.
-    
+
     Returns:
     - Residual tensor of shape `(n_points, 1)`.
     """
@@ -373,7 +373,7 @@ def _continuity_residual(
 def _stokes_momentum_residuals(
         derivs: FlowDerivatives,
         radius: torch.Tensor,
-        residual_form: Literal["standard", "r_weighted"] = "standard",
+        residual_form: Literal["standard", "r_weighted", "native"] = "standard",
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Evaluate the steady Stokes momentum residuals: -grad p + laplacian u."""
     laplacian_r, laplacian_z = axisymmetric_vector_laplacian(
@@ -401,11 +401,11 @@ def stokes_residual(
         residual_form: Literal["standard", "r_weighted"] = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible Stokes-flow residual.
- 
+
     Enforces continuity, $\nabla \cdot \mathbf{u} = 0$, and the steady
     momentum balance, $-\nabla p + \nabla^2 \mathbf{u} = 0$, in
     dimensionless form, at each coordinate.
- 
+
     Args:
     - `network`: Callable mapping coordinates of shape `(n_points, n_dims)`
       to a tensor of shape `(n_points, n_dims + 1)`, the last column being
@@ -420,14 +420,14 @@ def stokes_residual(
       singularity analytically, and additionally accepts `r = 0`. See this
       module's docstring for the full derivation and the trade-off between
       the two.
- 
+
     Returns:
     - Tensor of shape `(n_points, n_dims + 1)` with the continuity residual
       in the last column and the momentum residuals in the preceding
       columns. Under `"r_weighted"`, every column is the corresponding
       `"standard"` column multiplied by $r$ ($z$-momentum, continuity) or
       $r^2$ ($r$-momentum).
- 
+
     Raises:
     - `ValueError`: If `fluid_config.regime` is not `"stokes"`, if
       `residual_form` is not `"standard"` or `"r_weighted"`, if
@@ -449,7 +449,7 @@ def stokes_residual(
         residual_form=residual_form,
         function_name="stokes_residual",
     )
-    
+
     derivs = compute_flow_derivatives(network, coordinates, compute_second_order=True)
     momentum_r, momentum_z = _stokes_momentum_residuals(derivs, radius, residual_form)
     continuity = _continuity_residual(
@@ -459,7 +459,7 @@ def stokes_residual(
         radius=radius,
         residual_form=residual_form,
     )
-    
+
     return torch.cat([momentum_r, momentum_z, continuity], dim=1)
 
 
@@ -544,13 +544,13 @@ def navier_stokes_residual(
         residual_form=residual_form,
         function_name="navier_stokes_residual",
     )
-    
+
     derivs = compute_flow_derivatives(network, coordinates, compute_second_order=True)
-    
+
     # Autodiff temporal gradients from 3rd coordinate column (time t)
     d_velocity_r_dt = derivs.grad_velocity_r[:, 2:3]
     d_velocity_z_dt = derivs.grad_velocity_z[:, 2:3]
-    
+
     material_derivative_r = (
             d_velocity_r_dt
             + derivs.velocity_r * derivs.d_velocity_r_dr
@@ -561,9 +561,9 @@ def navier_stokes_residual(
             + derivs.velocity_r * derivs.d_velocity_z_dr
             + derivs.velocity_z * derivs.d_velocity_z_dz
     )
-    
+
     stokes_mom_r, stokes_mom_z = _stokes_momentum_residuals(derivs, radius, residual_form)
-    
+
     reynolds = domain_config.reynolds
     if residual_form == "standard":
         momentum_r = reynolds * material_derivative_r - stokes_mom_r
@@ -571,7 +571,7 @@ def navier_stokes_residual(
     else:
         momentum_r = radius.square() * reynolds * material_derivative_r - stokes_mom_r
         momentum_z = radius * reynolds * material_derivative_z - stokes_mom_z
-    
+
     continuity = _continuity_residual(
         velocity_r=derivs.velocity_r,
         d_velocity_r_dr=derivs.d_velocity_r_dr,
@@ -579,5 +579,5 @@ def navier_stokes_residual(
         radius=radius,
         residual_form=residual_form,
     )
-    
+
     return torch.cat([momentum_r, momentum_z, continuity], dim=1)

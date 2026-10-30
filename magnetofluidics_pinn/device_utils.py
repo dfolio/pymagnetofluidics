@@ -38,6 +38,18 @@ import torch
 from torch import nn
 
 
+# Canonical mapping of string identifiers to PyTorch floating-point dtypes
+_SUPPORTED_DTYPES: dict[str, torch.dtype] = {
+    "float32": torch.float32,
+    "float": torch.float32,
+    "float64": torch.float64,
+    "double": torch.float64,
+    "float16": torch.float16,
+    "half": torch.float16,
+    "bfloat16": torch.bfloat16,
+}
+
+
 def resolve_device(device: str | torch.device | None) -> torch.device:
     """Resolve a requested device to a concrete, available `torch.device`.
 
@@ -104,22 +116,30 @@ def resolve_dtype(dtype: str | torch.dtype | None) -> torch.dtype:
         return torch.float32 if torch.cuda.is_available() else torch.float64
 
     if isinstance(dtype, torch.dtype):
-        resolved = dtype
-    elif isinstance(dtype, str):
-        try:
-            # pyrefly: ignore[bad-argument-count]
-            resolved = torch.dtype(dtype)
-        except TypeError as error:
-            raise ValueError(
-                "dtype must be a valid torch dtype string (e.g. 'float32', "
-                f"'float64'); got {dtype!r}."
-            ) from error
-    else:
-        raise TypeError(
-            f"dtype must be None, a str, or a torch.dtype; got {type(dtype).__name__}."
+        return dtype
+
+    if isinstance(dtype, str):
+        # Normalize string: strip whitespace, lowercase, and optional 'torch.' prefix
+        clean_str = dtype.strip().lower()
+        if clean_str.startswith("torch."):
+            clean_str = clean_str[6:]
+
+        if clean_str in _SUPPORTED_DTYPES:
+            return _SUPPORTED_DTYPES[clean_str]
+
+        # Defensive fallback to torch namespace attribute inspection
+        candidate = getattr(torch, clean_str, None)
+        if isinstance(candidate, torch.dtype):
+            return candidate
+
+        raise ValueError(
+            "dtype must be a valid torch dtype string (e.g. 'float32', "
+            f"'float64', 'torch.float32'); got {dtype!r}."
         )
 
-    return resolved
+    raise TypeError(
+        f"dtype must be None, a str, or a torch.dtype; got {type(dtype).__name__}."
+    )
 
 
 def resolve_module_device(module: nn.Module) -> torch.device:

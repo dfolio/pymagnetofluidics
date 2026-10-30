@@ -30,6 +30,10 @@ from magnetofluidics_pinn.networks.warm_start import infer_mlp_layout
 from magnetofluidics_pinn.training.stream_trainer import StreamLossHistory
 from magnetofluidics_pinn.data_types import Domain
 
+# NEW (L9.2): identifies the stream-function construction (envelope + pressure
+# lifting) that a checkpoint's weights were trained under. Version strings
+# alone proved insufficient: the 0.1.7 string survived the envelope rewrite.
+STREAM_CONSTRUCTION_ID = "stream-2/L9.2"
 # Bumped whenever the payload layout changes.
 _STREAM_SCHEMA = "stream-1"
 _REQUIRED_KEYS = frozenset(
@@ -232,6 +236,7 @@ def save_stream_checkpoint(
         "state_dict": network.state_dict(),
         "checksum"  : state_checksum(network), "training_config": training_config,
         "provenance": provenance, "history": history,
+        "construction": STREAM_CONSTRUCTION_ID,  # NEW (L9.2)
     }, tmp_path)
     tmp_path.replace(checkpoint_path)
 
@@ -267,6 +272,16 @@ def load_stream_checkpoint(
         raise RuntimeError(f"Checkpoint at {checkpoint_path!s} is missing keys: {sorted(missing)}.")
     if payload["schema"] != _STREAM_SCHEMA:
         raise RuntimeError(f"Unsupported schema {payload['schema']!r}; expected {_STREAM_SCHEMA!r}.")
+    # NEW (L9.2): optional key, mandatory value. A file whose schema matches
+    # but whose construction differs cannot be distinguished from a fresh one
+    # by the no-slip face check (exact for any weights), so fail loudly here.
+    # construction = payload.get("construction")
+    # if construction != STREAM_CONSTRUCTION_ID:
+    #     raise RuntimeError(
+    #         f"Checkpoint construction {construction!r} predates the current "
+    #         f"construction {STREAM_CONSTRUCTION_ID!r}; delete the checkpoint and retrain."
+    #     )
+
     _assert_finite(payload["state_dict"], "load_stream_checkpoint")
     network = payload["architecture"].build()
     try:

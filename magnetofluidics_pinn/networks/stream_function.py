@@ -17,6 +17,7 @@ the complete derivative $\partial F / \partial (s, z)$.
 
 from __future__ import annotations
 
+from typing import Literal
 import torch
 from torch import nn
 
@@ -28,6 +29,10 @@ from magnetofluidics_pinn.physics.fluid_residuals import (
     axisymmetric_vector_laplacian,
     compute_flow_derivatives,
 )
+
+# Axis-singularity threshold; below it the wrapper uses the
+# analytic limit u_z(0, z) = -2 F(0, z) instead of the r-singular quotient.
+AXIS_EPS = 1.0e-6
 
 
 def bump_function(q: torch.Tensor) -> torch.Tensor:
@@ -294,6 +299,57 @@ class StreamFunctionSphereFlow(nn.Module):
         raw_output = self.raw_network(self._raw_inputs(coordinates))
         return raw_output[:, 0:1], raw_output[:, 1:2]
 
+    def _poiseuille_pressure(self, z: torch.Tensor) -> torch.Tensor:
+        r"""Evaluate the exact Hagen-Poiseuille axial pressure ramp, outlet-gauged.
+
+        Evaluates:
+        $$p_P(z) = \frac{4\,u_{\max}}{R^{2}}\,(L - z),
+        \qquad \dv{p_P}{z} = -\frac{4\,u_{\max}}{R^{2}} = -4\kappa,$$
+        which cancels the Laplacian of the background profile,
+        $\nabla^{2} u_z = -4\kappa$, so the pair $(\psi_P, p_P)$ satisfies the
+        Stokes balance identically throughout the channel.
+
+        Args:
+        - `z`: Axial coordinates of shape `(n_points, 1)`.
+
+        Returns:
+        - Pressure ramp tensor of shape `(n_points, 1)`.
+        """
+        # NEW (L9.2): lifts the O(4 kappa L) ramp off the network head.
+        kappa = self.flow_amplitude / (self.radius ** 2)
+        return 4.0 * kappa * (self.length - z)
+
+    def _stokeslet_pressure(
+        self, z: torch.Tensor, rho: torch.Tensor
+    ) -> torch.Tensor:
+        r"""Evaluate the tapered dipole pressure of the translating-sphere lifting.
+
+        Evaluates:
+        $$
+        T(\rho)\,p_T = T(\rho)\,\frac{3}{2}\,a\,W\,\frac{z - z_p}{\rho^{3}},
+        \qquad W = U_p - u_{\max},
+        $$
+        the Stokeslet pressure of the unbounded translating-sphere solution
+        (the potential doublet part carries no pressure). The taper
+        co-localizes the pressure dipole with the velocity lifting, and its
+        compact support keeps the outlet gauge exact.
+
+        Args:
+        - `z`: Axial coordinates of shape `(n_points, 1)`.
+        - `rho`: Sphere-center distances of shape `(n_points, 1)`, with $\rho \ge a$.
+
+        Returns:
+        - Tapered dipole pressure tensor of shape `(n_points, 1)`.
+        """
+        # NEW (L9.2): anchors the unconfined face pressure analytically; the
+        # head learns only the bounded confinement excess.
+        relative_velocity = self.particle_u - self.flow_amplitude
+        dipole = (
+            1.5 * self.particle_radius * relative_velocity
+            * (z - self.particle_z) / rho.pow(3)
+        )
+        return self._taper(rho) * dipole
+
     def _gauge_pressure(self, raw_p: torch.Tensor,
                         coordinates: torch.Tensor) -> torch.Tensor:
         r"""Anchor the pressure relative to the outlet centerline $p(0, L) = 0$.
@@ -312,8 +368,41 @@ class StreamFunctionSphereFlow(nn.Module):
         p_ref = self.raw_network(self._raw_inputs(ref_coord))[:, 1:2]
         return raw_p - p_ref
 
+    def _shear_pressure(self, z: torch.Tensor, rho: torch.Tensor) -> torch.Tensor:
+        r"""Evaluate the tapered Stokeslet pressure of the quadratic-shear lifting.
+
+        Evaluates:
+        $$ T(\rho)\,p_S = T(\rho)\,\kappa\,a^{3}\,\frac{z - z_p}{\rho^{3}},
+        \qquad \kappa = \frac{u_{\max}}{R^{2}}, $$
+        the pressure of the $n = 1$ shear mode, a Stokeslet of strength
+        $8\pi C_1 = 4\pi\kappa a^{3}$ with $C_1 = \kappa a^{3}/2$. It supplies
+        the pressure third $-(4\pi/3)\kappa a^{3}$ of the Faxén curvature
+        correction; the $n = 3$ mode is force-free with a face-pressure
+        integral vanishing by parity, so it carries no pressure term.
+
+        Args:
+        - `z`: Axial coordinates of shape `(n_points, 1)`.
+        - `rho`: Sphere-center distances of shape `(n_points, 1)`, with $\rho \ge a$.
+
+        Returns:
+        - Tapered shear pressure tensor of shape `(n_points, 1)`.
+        """
+        # NEW (L9.3): without this term the zero-weight traction integral
+        # exceeds the analytic floor by exactly (4/3)kappa*a^3 / drag, i.e.
+        # 1.45% at lambda = 0.25, which convicted the manufactured check
+        # (metric 1.446e-02 against 1.0e-02) on 2026-10-28.
+        curvature = self.flow_amplitude / self.radius.square()
+        return self._taper(rho) * curvature * self.particle_radius.pow(3) \
+            * (z - self.particle_z) / rho.pow(3)
+
     def _pressure(self, coordinates: torch.Tensor) -> torch.Tensor:
-        r"""Compute the fully gauged scalar pressure field $p(r, z)$.
+        r"""Assemble the lifted, outlet-gauged pressure field $p(r, z)$.
+
+        Evaluates:
+        $$p = p_P + T\,p_T + \big(p_{\text{net}} - p_{\text{net}}(0, L)\big),$$
+        so that $p(0, L) = 0$ holds identically for every network weight
+        value, and the head $p_{\text{net}}$ only learns the smooth
+        wall-interaction and shear-mode corrections.
 
         Args:
         - `coordinates`: Tensor of shape `(n_points, 2)` containing $(r, z)$.
@@ -321,9 +410,20 @@ class StreamFunctionSphereFlow(nn.Module):
         Returns:
         - Gauged pressure tensor of shape `(n_points, 1)`.
         """
-        # NEW: Modular pressure evaluator
+        r = coordinates[:, 0:1]
+        z = coordinates[:, 1:2]
+        axial_offset = z - self.particle_z
+        # CHANGED (L9.2): same distance guard as the stream-function path.
+        rho = torch.sqrt(r.square() + axial_offset.square() + 1.0e-14)
         _, raw_p = self._evaluate_reduced(coordinates)
-        return self._gauge_pressure(raw_p, coordinates)
+        # CHANGED (L9.2): analytic parts lifted ahead of the gauged head; the
+        # outlet-pressure soft term becomes a structural zero by construction.
+        return (
+            self._poiseuille_pressure(z)
+            + self._stokeslet_pressure(z, rho)
+            + self._shear_pressure(z, rho)  # NEW (L9.3): completes the pressure lifting.
+            + self._gauge_pressure(raw_p, coordinates)
+        )
 
     def _base_stream_function(self, r: torch.Tensor) -> torch.Tensor:
         r"""Compute the exact Hagen-Poiseuille background stream function $\psi_0(r)$.
@@ -459,7 +559,8 @@ class StreamFunctionSphereFlow(nn.Module):
         gauged_p = self._pressure(coordinates)
         return total_psi, gauged_p
 
-    def stokes_residual_sz(self, coordinates: torch.Tensor) -> torch.Tensor:
+    def stokes_residual_sz(self, coordinates: torch.Tensor,
+                           residual_form: Literal["standard", "r_weighted", "native"] = "standard") -> torch.Tensor:
         r"""Evaluate the native Stokes momentum and continuity balance in $(s, z) \equiv (r, z)$.
 
         Evaluates:
@@ -487,7 +588,7 @@ class StreamFunctionSphereFlow(nn.Module):
         lap_r, lap_z = axisymmetric_vector_laplacian(
             derivs=derivs,
             radius=r,
-            residual_form="standard",
+            residual_form=residual_form,
         )
 
         momentum_r = -derivs.dp_dr + lap_r
@@ -500,10 +601,10 @@ class StreamFunctionSphereFlow(nn.Module):
         r"""Reconstruct the divergence-free $(u_r, u_z, p)$ flow field from the stream function.
 
         Args:
-        * `coordinates`: Tensor of shape `(n_points, 2)` containing $(r, z)$.
+        - `coordinates`: Tensor of shape `(n_points, 2)` containing $(r, z)$.
 
         Returns:
-        * Tensor of shape `(n_points, 3)` containing `(u_r, u_z, p)`.
+        - Tensor of shape `(n_points, 3)` containing `(u_r, u_z, p)`.
         """
         param_device = resolve_module_device(self.raw_network)
         param_dtype = resolve_module_dtype(self.raw_network)
@@ -519,14 +620,20 @@ class StreamFunctionSphereFlow(nn.Module):
             psi, p = self._stream_function(coords_grad)
             grad_psi = scalar_field_gradient(psi, coords_grad)
 
-            # u_r = -(1/r) * dpsi/dz
+            # u_r = -(1/r) dpsi/dz; since psi = O(r^2), the axis limit of
+            # u_r is exactly 0, so the zero fill below is the analytic limit.
             dpsi_dz = grad_psi[:, 1:2]
             u_r = -dpsi_dz / safe_r
             u_r = torch.where(r > 1.0e-7, u_r, torch.zeros_like(u_r))
 
-            # u_z = (1/r) * dpsi/dr
+            # CHANGED (L12): u_z = (1/r) dpsi/dr. Every contribution to psi
+            # is even in r (psi = r^2 G(r^2, z)), so the quotient is regular
+            # on the axis with limit u_z(0, z) = 2 G(0, z) = u_max for the
+            # Poiseuille base. Clamping r at AXIS_EPS evaluates that limit
+            # with O(AXIS_EPS^2) error by the even symmetry; no zero fill and
+            # no reduced-network query are required.
             dpsi_dr = grad_psi[:, 0:1]
-            u_z = dpsi_dr / safe_r
+            u_z = dpsi_dr / r.clamp_min(AXIS_EPS)
 
         return torch.cat([u_r, u_z, p], dim=1)
 

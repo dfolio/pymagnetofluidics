@@ -94,8 +94,6 @@ CONVERGENCE = "convergence"
 VALIDATION = "validation"
 
 verification_checks: tuple[mfp.VerificationCheck, ...] = ()
-# convergence_diagnostics = []
-# validation_diagnostics = []
 verification_categories: dict[str, str] = {}
 verification_status_labels: dict[str, str] = {}
 
@@ -104,7 +102,7 @@ print(f"PyTorch: {torch.__version__} | Device: {DEVICE} ({gpu_name}) | dtype: {D
 print(f"magnetofluidics_pinn: v{mfp.__version__}")
 ```
 
-he printed device line confirms the two enforced properties before any training
+The printed device line confirms the two enforced properties before any training
 starts: the run executes on `{python} f"{DEVICE}"` (`{python} gpu_name`) and all
 tensors and network parameters are `{python} str(DTYPE)`. Should the CUDA driver
 or the CUDA build of PyTorch be missing, the notebook stops here with an
@@ -130,11 +128,9 @@ The evidence is deliberately separated into three categories:
    convergence of the underlying PINN by itself.
 
 This distinction is important for the present problem. In particular,
-convergence
-of the surface quadrature does not imply convergence of the neural
-approximation,
-and agreement with a Faxén estimate does not constitute a validation of the
-two-way solver at a finite blockage ratio.
+convergence of the surface quadrature does not imply convergence of the neural
+approximation, and agreement with a Faxén estimate does not constitute a
+validation of the two-way solver at a finite blockage ratio.
 
 ## What this notebook does **not** verify
 
@@ -165,10 +161,6 @@ $$-\pdv{p^*}{r^*} + \laplacian u_r^* - \frac{u_r^*}{r^{*2}} = 0, \qquad -\pdv{p^
 A rigid sphere of radius $a^*$, centered at $z_p^*$ and translating axially
 at $U_z^*$, adds a boundary face:
 $$\vb{u}^*\big\vert{}_{S} = (0,\ U_z^*), \qquad S = \left\{ (r^*, z^*) : (z^* - z_p^*)^2 + r^{*2} = a^{*2}\right\}.$$
-<!-- CHANGED: every particle run below enforces this face exactly, by
-     construction, through the stream-function constraint; the soft weighted
-     penalty (`rigid_body_velocity_condition` inside the training loss) is
-     retained by the trainer only for comparison runs. -->
 In the stream-function formulation used for every particle-perturbed run
 below, this face is enforced exactly by construction
 (`apply_stream_function_constraint`), together with the wall and axis
@@ -189,7 +181,7 @@ a 1-D quadrature that `surface_traction_force` evaluates using
 
 In the overdamped Stokes limit, external force balances hydrodynamic drag
 exactly:
-$$\vb{f}_{\text{applied}}^* + \vb{f}_z^{*,\text{drag}} (U_z^*) = 0.$$
+$$\vb{f}_{\text{applied}}^* + \vb{f}_{\text{drag}}^{*} (U_z^*) = 0.$$
 `solve_force_balanced_velocity` solves this scalar equation for $U_z^*$ using
 `scipy.optimize.brentq`. Because Stokes flow is linear in the boundary data, the
 drag is affine in the sphere velocity, $F (U_z^*) = F_0 + U_z^*,F_1$,
@@ -238,49 +230,74 @@ compromise.
 We define the fluid properties, domain geometry, and particle dimensions:
 
 ```{python}
-#| label: reference-problem
+#| label: physical-parameters
+# CHANGED (reorg): physical constants only; the training and sampling
+# hyperparameters moved to `training-hyperparameters` and `taper-sampling`.
 radius = 7.5e-4              # 750 µm
-reference_velocity = 1.0e-3  # 1 mm/s
-length = 8.0 * radius        # 6 mm -- long enough for upstream/downstream margins
+reference_velocity = 1.0e-4  # 0.1 mm/s
+length = 8.0 * radius        # 8 mm -- long enough for upstream/downstream margins
 reference_velocity = 1.0e-4  # 0.1 mm/s
 dynamic_viscosity = 1.0e-3   # 1 mPa s
 density = 1.0e3              # 1000 kg/m^3
+```
 
+## Training and sampling hyperparameters
+
+```{python}
+#| label: training-hyperparameters
+# NEW (reorg): optimizer budget and residual-form selection, separated from the
+# physical configuration so that a training sweep never edits physics.
 n_interior_points: int = 10_000  # Number of interior collocation points per
                                 # Adam epoch
 n_boundary_points: int = 2_000  # Number of boundary collocation points per
                                 # Adam epoch
-n_epochs = 1_500                       # 1_500
+n_epochs = 2_500                       # 1_500
 lbfgs_n_interior_points: int = 20_000 # 15_000
 lbfgs_n_boundary_points: int = 4_000 # 2_000
-lbfgs_rounds = 18                     # 10-12
+lbfgs_rounds = 15                     # 10-12
 lbfgs_iterations_per_round = 1000     # 500
 log_every = int(n_epochs / 5)
 residual_form = "standard"  # "standard" or "r_weighted"
 
-BASELINE_RESIDUAL_FORM = "standard"  # "standard" or "r_weighted" -- baseline keeps the standard form
-PARTICLE_RESIDUAL_FORM = "native"  # "standard" or "r_weighted"
-TAPER_MARGIN = 8.0  # NEW: taper support as a multiple of particle_radius**2 (library patch L6)
-TAPER_MARGIN_CANDIDATES = (2.0, 3.0, 4.0, 8.0)  # NEW: audit ladder of section I3.3
-TAPER_SHELL_FRACTION = 0.5  # NEW: fraction of interior points inside the shell (library patch L7)
-TAPER_SHELL_FACTOR = 1.1 * math.sqrt(1.0 + TAPER_MARGIN)  # CHANGED comment: shell outer radius
-                   # in units of a; brackets the taper ball and its edge transition (3.3a at m = 8)
-TAPER_BAND_FRACTION = 0.0 # CHANGED: 0.06 -> 0.0. The 2026-10-14 A/B against the
-# run-7 `rw` configuration convicted the band as configured. The batch momentum
-# RMS rose 0.782 -> 1.092, but the metric is inflationary: the band share went
-# from the incidental 6.3% to ~11.9%, and an unchanged field would read
-# sqrt(0.119/0.063) = 1.37x higher, against 1.40x observed. The
-# distribution-free observables degraded on their own: drag factor
-# 1.414 -> 1.351, taper-edge probe 1.855 -> 2.937, resistance errors
-# 15.4%/16.6% -> 18.0%/19.5%, momentum-balance gate 16.7% -> 39.0%. Sampling
-# harder without new means to resolve the band stiffened the objective
-# (rounds 7-12 oscillated). The L10 plumbing and TAPER_BAND_FACTOR stay in
-# place, inert at zero, for any future re-dose.
-TAPER_BAND_FACTOR = 1.5 # NEW: band outer radius in units of the sphere radius; brackets
-                 # the steepening segment (1a -> 2a) of the run-7 shell profile.
+BASELINE_RESIDUAL_FORM = "standard"    # "standard" or "r_weighted"
+PARTICLE_RESIDUAL_FORM = "r_weighted"  # "standard" or "r_weighted" or "native"
+```
 
+The baseline keeps the `{python} BASELINE_RESIDUAL_FORM` form, whose global
+relative $L^2$ error against the analytical solution is reported in the
+baseline section below. The particle runs use the `{python} PARTICLE_RESIDUAL_FORM` form: the
+standard momentum residual, the physical force density, expressed in $(s,z)$
+with $s=r^{*2}$. For $u_r=r\,F_z$ and $u_z=-2(F+sF_s)$, every $1/r$ and
+$1/r^2$ term cancels and the reduced residuals read
+$$R_r = r\left(-2\,\pdv{p}{s} + 8\,\pdv[2]{F}{z}{s} + 4s\,\pdv[3]{F}{z}{s}{s} + \pdv[3]{F}{z}{z}{z}\right), \qquad R_z = -\pdv{p}{z} - 2\left(\pdv[2]{F}{z}{z} + s\,\pdv[3]{F}{s}{z}{z}\right) - 16\,\pdv{F}{s} - 32s\,\pdv[2]{F}{s}{s} - 8s^{2}\,\pdv[3]{F}{s}{s}{s},$$
+so $R_r$ carries an explicit prefactor $r$ and vanishes identically on the axis,
+while $R_z$ is finite everywhere; neither component retains a singular weight.
+The $r$-weighted form, by contrast, divides the weight $r^{2}$ out of exactly
+the region where the sphere and its traction sit, and remains available as a
+documented fallback. Losses of different residual forms are not comparable, so
+every network is judged with the same operator in `residual_by_region`.
+
+
+```{python}
+#| label: taper-sampling
+# NEW (reorg): taper-margin and densified-sampling constants, separated from the
+# optimizer budget; the audit ladder below reads them, not the Adam/L-BFGS knobs.
+TAPER_MARGIN = 8.0
+TAPER_MARGIN_CANDIDATES = (2.0, 3.0, 4.0, 8.0)
+TAPER_SHELL_FRACTION = 0.5
+TAPER_SHELL_FACTOR = 1.1 * math.sqrt(1.0 + TAPER_MARGIN)
+TAPER_BAND_FRACTION = 0.0
+TAPER_BAND_FACTOR = 1.5 #band outer radius in units of the sphere radius; brackets
+                        # the steepening segment (1a -> 2a) of the run-7 shell profile.
+```
+
+```{python}
+#| label: domain-build
+# NEW (reorg): configuration objects and the nondimensional domain build,
+# grouped so the physical model and its scales are defined in one place.
 fluid_config = mfp.FluidConfig(regime="stokes",
-                               dynamic_viscosity=dynamic_viscosity, density=density,)
+                               dynamic_viscosity=dynamic_viscosity,
+                               density=density,)
 domain_config = mfp.DomainConfig(kind="channel", length=length,
                                  radius=radius, fluid=fluid_config,
                                  u_max=reference_velocity)
@@ -304,27 +321,10 @@ pd.Series({"domain.radius": domain.radius, "domain.length": domain.length,
            "scales.pressure [Pa]": scales.pressure})
 ```
 
-The particle runs keep the `"r_weighted"` singularity treatment of the
-axisymmetric operator: pre-multiplying the equations through by $r$ removes
-the $1/r^2$ coordinate singularity from the collocation loss. The baseline keeps
-`"standard"`, which matched the analytical solution to $2.9\times 10^{-4}$ in
-relative $L^2$ previously.
-
-The particle runs use the `{python} PARTICLE_RESIDUAL_FORM` form. It is the
-standard momentum
-residual, the physical force density, written in $(s,z)$ with $s=r^{*2}$. For
-$u_r=r\,F_z$ and $u_z=-2 (F+sF_s)$ every $1/r$ and $1/r^2$ term cancels, so the
-residual is
-finite on the axis and carries no $r$ weight. The $r$-weighted form divides the
-weight
-$r^2$ out of exactly the region where the sphere and its traction sit. Losses of
-different
-residual forms are not comparable, so every network is judged with the same
-operator in
-`residual_by_region`.
-
 ```{python}
-#| label: reference-problem-2
+#| label: particle-geometry
+# NEW (reorg): particle dimensions and configuration objects only; the state
+# construction and the physical twin moved to `particle-state`.
 particle_radius = 0.25 * R
 # Scale applied force with particle volume relative to baseline radius (0.25 * R)
 baseline_radius = 0.25 * R
@@ -333,7 +333,34 @@ particle_axial_position = 0.5 * L
 particle_axial_velocity = 0.0
 particle_config = mfp.ParticleConfig(kind="spherical", radius=particle_radius,
                                      magnetic_moment=magnetic_moment,)
+```
 
+```{python}
+#| label: evaluation-stations
+# Single shared axial-station set. Every diagnostic that samples the axis —
+# the profile evaluations, the axis-limit probe, and any later probe —
+# consumes these stations; a special placement requirement belongs here,
+# not in the diagnostic cell.
+EDGE_RADIUS = particle_radius * math.sqrt(1.0 + TAPER_MARGIN)
+STATION_CLEARANCE = 2.0 * EDGE_RADIUS
+z_stations_eval = [0.50,
+                   particle_axial_position - STATION_CLEARANCE,
+                   particle_axial_position + STATION_CLEARANCE,
+                   7.50]
+assert all(abs(z - particle_axial_position) >= STATION_CLEARANCE for z in z_stations_eval)
+```
+
+All axial sampling stations share the set defined here: the inlet and outlet
+stations, plus one station two taper-ball radii upstream and downstream of the
+sphere. Every station lies in the fluid region, clear of the taper ball, so the
+axis-limit probe, the profile evaluation, and any future diagnostic probe the
+same cross-sections; a station with a special placement requirement is added to
+this set rather than defined locally.
+
+```{python}
+#| label: particle-state
+# NEW (reorg): dimensionless state, physical twin, and the geometry table,
+# grouped so every state object is defined exactly once and next to its table.
 INITIAL_PARTICLE_VELOCITY = (0.0, particle_axial_velocity)
 INITIAL_PARTICLE_POSITION = (0.0, particle_axial_position)
 particle_state = mfp.ParticleState(
@@ -387,26 +414,21 @@ in the asymptotic creeping-flow regime $Re_R \ll 1$ the Stokes model assumes.
 Establishing that limit quantitatively would require a dedicated
 Reynolds-number sweep -- varying $U_c$, $\mu$, or $R$ while holding the
 dimensionless geometry fixed, and tracking whether the drag correction factor
-approaches its Stokes-flow value as $Re_R \to 0$ -- which this notebook does
+approaches its Stokes-flow value as $Re_R \to 0$ ---which this notebook does
 not attempt.
 
-```{python}
-#| label: checkpoint-cache-helper
-# NEW: validation-armed cache for expensive stream-function runs. io_stream
-# stores architecture, training config and provenance precisely so a cache can
-# be *validated*, not merely found; a bare `exists()` reuses whatever file is
-# there, and after library patch L9.1 a pre-patch checkpoint reloads cleanly
-# while its weights are meaningless under the new envelope.
-CHECKPOINT_DIR = Path("checkpoints")
-N_PARTICLE_SURFACE_POINTS = 250
 
-STREAM_HIDDEN_LAYERS = (96, 96, 96, 96)  # CHANGED: 64 -> 96 per layer. The 2026-10-12
-                   # `-3` run exhausted twelve L-BFGS rounds at a training floor of ~0.83
-                   # with a probe gap of 1.077 (PASS): the optimizer was no longer
-                   # interpolation-limited but capacity-limited. The shell traction
-                   # steepened 6.48 -> 8.29 from 1a to 2a (+27.9%) and the field showed no
-                   # annular-gap acceleration (max 0.9961): the learned correction is
-                   # over-smoothed exactly in the near-surface layer it must resolve.
+
+```{python}
+#| label: stream-architecture
+# Width raised from 64 to 96 units per layer after the 2026-10-12 run: twelve
+# L-BFGS rounds ended at a training floor of ~0.83 with a probe gap of 1.077,
+# so the optimizer was capacity-limited rather than interpolation-limited. The
+# shell traction steepened from 6.48 to 8.29 between one and two sphere radii
+# (+27.9%) and the field showed no annular-gap acceleration (max 0.9961): the
+# learned correction was over-smoothed exactly in the near-surface layer it
+# must resolve.
+STREAM_HIDDEN_LAYERS = (96, 96, 96, 96)
 
 # NEW: geometry the architecture record must match for a cache to be valid.
 EXPECTED_GEOMETRY = dict(
@@ -415,6 +437,21 @@ EXPECTED_GEOMETRY = dict(
     particle_axial_velocity=particle_axial_velocity,
     flow_amplitude=PEAK_VELOCITY_NONDIM, taper_margin=TAPER_MARGIN,
 )
+```
+
+```{python}
+#| label: checkpoint-helpers
+# Validation-armed cache for expensive stream-function runs. io_stream
+# stores architecture, training config and provenance precisely so a cache can
+# be *validated*, not merely found; a bare `exists()` reuses whatever file is
+# there, and after library patch L9.1 a pre-patch checkpoint reloads cleanly
+# while its weights are meaningless under the new envelope.
+CHECKPOINT_DIR = Path("checkpoints")
+cold_checkpoint = CHECKPOINT_DIR / f"{PARTICLE_RESIDUAL_FORM}_fixed_sphere_cold.pt"
+resistance_ambient_path = CHECKPOINT_DIR / f"{PARTICLE_RESIDUAL_FORM}_resistance_ambient.pt"
+resistance_translating_path = CHECKPOINT_DIR / f"{PARTICLE_RESIDUAL_FORM}_resistance_translating.pt"
+
+N_PARTICLE_SURFACE_POINTS = 250
 
 
 def assert_checkpoint_physics(network, state):
@@ -477,8 +514,14 @@ def cached_stream_run(path, train_fn, training_config, expected_geometry=None, v
     return network, history
 
 
+```
+
+```{python}
+#| label: warm-start-switch
+# NEW (reorg): the opt-in switch moved out of the cache helpers; it is a
+# notebook-scope experiment control, not an I/O concern.
 # NEW: opt-in switch; see the warm-start section.
-RUN_WARM_START_VERIFICATION = False
+RUN_WARM_START_VERIFICATION = True
 ```
 
 ## Baseline (undisturbed) flow
@@ -545,17 +588,24 @@ loss competition that the previous soft-boundary weight sweep exposed: there
 is no `particle_loss_weight` left to tune.
 
 ```{python}
-#| label: particle-training
+#| label: particle-training-config
 PARTICLE_TRAINING_CONFIG = mfp.TrainingConfig(
     n_interior_points=n_interior_points, n_boundary_points=n_boundary_points, n_epochs=n_epochs,
     random_seed=RANDOM_SEED, device=str(DEVICE),
     use_lbfgs_refinement=True, lbfgs_n_interior_points=lbfgs_n_interior_points,
     lbfgs_n_boundary_points=lbfgs_n_boundary_points,
     lbfgs_rounds=lbfgs_rounds, lbfgs_iterations_per_round=lbfgs_iterations_per_round,
-    residual_form=PARTICLE_RESIDUAL_FORM, # CHANGED: r-weighted residual (see `reference-problem`).
+    residual_form=PARTICLE_RESIDUAL_FORM,
     verbose=True, log_every=log_every,
 )
+SHELL_ARGS = dict(
+    shell_fraction=TAPER_SHELL_FRACTION, shell_factor=TAPER_SHELL_FACTOR,
+    band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR,
+)
+```
 
+```{python}
+#| label: particle-network-init
 def _train_particle_network():
     """Train the fixed-sphere two-way flow; timing printed only when it actually runs."""
     t0 = time.perf_counter()
@@ -565,11 +615,11 @@ def _train_particle_network():
         inlet_peak_velocity=PEAK_VELOCITY_NONDIM, **SHELL_ARGS,
     )
     print(f"Two-way flow (fixed particle) trained in {time.perf_counter() - t0:.1f}s")
+
+    # history.print_summary()
     return network, history
 
-# CHANGED: the raw MLP now carries two outputs (N, p_net): the wrapper derives
-# (u_r, u_z) from the reduced stream function; only the pressure head is a
-# direct network output.
+
 particle_raw = mfp.build_mlp(n_inputs=2, n_outputs=2, hidden_layers=STREAM_HIDDEN_LAYERS,
                              training_config=PARTICLE_TRAINING_CONFIG,
                              activation="tanh", )
@@ -579,16 +629,112 @@ particle_network_init = mfp.apply_stream_function_constraint(
     particle_radius=particle_radius,
     particle_axial_velocity=particle_axial_velocity,  # fixed sphere: U_p = 0
     flow_amplitude=PEAK_VELOCITY_NONDIM,
-    taper_margin=TAPER_MARGIN,  # NEW: particle-relative support law (library patch L6)
+    taper_margin=TAPER_MARGIN,
 )
 
-print(f"Taper support: {float(particle_network_init.support):.4f} (rho^2 units), "  # CHANGED: report the law, not a hard-coded value
-      f"taper ball radius {particle_radius * math.sqrt(1.0 + TAPER_MARGIN):.3f}")
+```
 
-# CHANGED: the 25-minute main run is cached like the shifted reference; the
-# file is no longer write-only.
+```{python}
+#| label: particle-network-taper-support
+print(f"Taper support: {float(particle_network_init.support):.4f} (rho^2 units), "
+      f"taper ball radius {particle_radius * math.sqrt(1.0 + TAPER_MARGIN):.3f}")
+```
+
+### Operator-consistency check (patch L11)
+
+Before any training budget is spent, the native operator is validated against
+the standard one on a field whose exact residual structure is known: the
+zero-weight ansatz, whose velocity lifting is the analytic unbounded
+sphere-in-Poiseuille construction. The two forms must agree to $\mathcal{O}(1)$
+in RMS on identical points; a ratio that grows toward the axis is the missing
+$2r$ chain-rule factor that the 2026-10-28-b run exhibited, and no training can
+repair such an objective.
+
+```{python}
+#| label: tbl-residual-consistency
+#| tbl-caption: Comparison of residual consistency
+RESIDUAL_CONSISTENCY_SEED = RANDOM_SEED + 606_060  # Disjoint from every trainer/probe  seed
+RESIDUAL_CONSISTENCY_TOLERANCE = 2.0  # O(1) band; the pre-patch operator failed far above it
+
+operator_consistency_config = dataclasses.replace(
+    PARTICLE_TRAINING_CONFIG,
+    random_seed=RESIDUAL_CONSISTENCY_SEED,
+    n_interior_points=lbfgs_n_interior_points,
+    n_boundary_points=lbfgs_n_boundary_points,
+)
+
+def _losses_with_residual_form(network, form):
+    """Evaluate one audit batch of the given residual form on a fixed network.
+
+    Args:
+    - `network`: Field mapping `(r, z)` to `(u_r, u_z, p)`.
+    - `form`: Residual form passed through a cloned training config.
+
+    Returns:
+    - Mapping from loss name to its value on the audit batch.
+    """
+    return mfp.diagnose_loss_scale(
+        network, domain, fluid_config,
+        dataclasses.replace(operator_consistency_config, residual_form=form),
+        particle_axial_position, particle_radius, PEAK_VELOCITY_NONDIM,
+        shell_fraction=TAPER_SHELL_FRACTION, shell_factor=TAPER_SHELL_FACTOR,
+        band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR,
+    )
+
+native_consistency_losses = _losses_with_residual_form(particle_network_init, "native")
+standard_consistency_losses = _losses_with_residual_form(particle_network_init, "standard")
+r_weighted_consistency_losses = _losses_with_residual_form(particle_network_init, "r_weighted")
+
+consistency_table, _ = mfp.build_residual_consistency_table(
+    standard_losses=standard_consistency_losses,
+    native_losses=native_consistency_losses,
+    r_weighted_losses=r_weighted_consistency_losses,
+    components=("momentum_r", "momentum_z"),
+)
+consistency_rms_ratio = {
+    f"{form}/{reference} {name}": math.sqrt(form_losses[name] / max(reference_losses[name], 1.0e-30))
+    for form, form_losses in (("native", native_consistency_losses), ("r_weighted", r_weighted_consistency_losses))
+    for reference, reference_losses in (("standard", standard_consistency_losses),)
+    for name in ("momentum_r", "momentum_z")
+}
+native_over_standard = {
+    name: math.sqrt(native_consistency_losses[name] / max(standard_consistency_losses[name], 1.0e-30))
+    for name in ("momentum_r", "momentum_z")
+}
+worst_consistency_ratio = max(native_over_standard.values())
+
+consistency_table
+```
+
+```{python}
+#| label: check-residual-consistency
+worst_consistency_ratio: float = max(consistency_rms_ratio.values())
+
+consistency_check = mfp.evaluate_check(
+    "Residual formulation consistency",
+    "Max RMS ratio of native and r-weighted momentum residuals vs standard baseline on untrained ansatz",
+    worst_consistency_ratio, RESIDUAL_CONSISTENCY_TOLERANCE, "<=",
+)
+verification_checks = verification_checks + (consistency_check,)
+verification_categories[consistency_check.name] = VERIFICATION
+consistency_verdict = "clears" if consistency_check.passed else "misses"
+mfp.render_verification_table((consistency_check,))
+```
+
+The gated ratio is native against standard: both operators act on the same
+untrained ansatz, so any disagreement is an operator property, and the check
+`{python} consistency_verdict`. The r-weighted ratios are reported by the
+consistency table ungated, because that form is designed to differ from the
+standard operator by its $r^{2}$ weight; gating it would convict a design
+property. A miss convicts the operator and stops the interpretation of every
+loss value downstream: the objective the optimizer sees would not be the
+physical force density.
+
+
+```{python}
+#| label: particle-training-run
 particle_network, particle_history = cached_stream_run(
-    CHECKPOINT_DIR / "fixed_sphere_cold.pt",
+    cold_checkpoint,
     _train_particle_network, PARTICLE_TRAINING_CONFIG,
     expected_geometry=EXPECTED_GEOMETRY | {"particle_axial_position": particle_axial_position},
     validate=lambda network: assert_checkpoint_physics(network, particle_state),
@@ -596,8 +742,10 @@ particle_network, particle_history = cached_stream_run(
 final_particle_losses = particle_history.final()
 
 print({name: f"{value:.3e}" for name, value in final_particle_losses.items()})
+```
 
-
+```{python}
+#| label: particle-disturbance
 def relative_fluid_l2_distance(flow_network, reference_network, radial_grid, axial_grid,
                                particle_axial_position, particle_radius):
     r"""Relative $L^2$ velocity distance between two flow fields over the fluid region.
@@ -650,8 +798,57 @@ momentum and `{python} f'{final_particle_losses["inlet"]:.3e}'` for the inlet
 profile.
 
 ```{python}
+#| label: check-axis-limit
+# Regression test for the axis evaluation of the stream-function wrapper. The
+# probe consumes the shared station set; by construction every station lies in
+# the fluid region, clear of the taper ball, so a singular read-out here is an
+# axis defect and not the analytic lifting's rho -> 0 behaviour inside the
+# sphere.
+AXIS_PROBE_Z = tuple(float(z) for z in z_stations_eval)
+AXIS_PROBE_RADII = (0.0, 1.0e-3 * R, 1.0e-2 * R)
+AXIS_LIMIT_TOLERANCE = 1.0e-3  # max |u_z(0,z) - u_z(eps,z)| / u_max
+
+with torch.no_grad():
+    axis_probe = {
+        z: {
+            float(r): float(particle_network(torch.tensor([[r, z]], device=DEVICE, dtype=DTYPE))[0, 1])
+            for r in AXIS_PROBE_RADII
+        }
+        for z in AXIS_PROBE_Z
+    }
+axis_table = pd.DataFrame(axis_probe).T
+axis_table.index.name = "z*"
+axis_table.columns = [f"r* = {r / R:.1e}" if r > 0 else "r* = 0 (axis)" for r in AXIS_PROBE_RADII]
+axis_deviation = max(
+    abs(values[0.0] - values[1.0e-3 * R])
+    for values in axis_probe.values()
+)
+axis_limit_check = mfp.evaluate_check(
+    "Axis evaluation of the stream function",
+    "Wrapper must return the analytic centerline limit u_z(0,z), not a zero fill",
+    axis_deviation, AXIS_LIMIT_TOLERANCE, "<=",
+)
+verification_checks = verification_checks + (axis_limit_check,)
+verification_categories[axis_limit_check.name] = VERIFICATION
+axis_verdict = "clears" if axis_limit_check.passed else "misses"
+mfp.render_verification_table((axis_limit_check,))
+axis_table
+```
+
+The axis probe samples the {python} len(AXIS_PROBE_Z) shared stations. At the
+station nearest the sphere, the centerline velocity reads
+`{python} f'{axis_probe[AXIS_PROBE_Z[1]][0.0]:.3f}'` on the axis against
+`{python} f'{axis_probe[AXIS_PROBE_Z[1]][1.0e-3 * R]:.3f}'` one part in a
+thousand off it, and the largest deviation across all stations is
+`{python} f'{axis_deviation:.2e}'`; the check {python} axis_verdict. A miss
+here is a library defect (patch L12), not a training failure: the stream
+function is even in $r$, so the wrapper's axial evaluation must return the
+analytic centerline limit rather than a zero fill. The same defect contaminates
+every axis-band diagnostic and the pressure-drop gates.
+
+```{python}
 #| label: particle-loss-scale
-# CHANGED: the audit now (i) uses the same densified interior distribution as
+# The audit now (i) uses the same densified interior distribution as
 # training (library patch L7) and (ii) reports the whole margin ladder, because
 # the untrained total is monotone in the margin (edge curvature ~ 1/support^2)
 # and therefore evidences the trade-off rather than selecting the margin.
@@ -678,7 +875,7 @@ def untrained_taper_audit(margin):
         candidate, domain, fluid_config, PARTICLE_TRAINING_CONFIG,
         particle_axial_position, particle_radius, PEAK_VELOCITY_NONDIM,
         shell_fraction=TAPER_SHELL_FRACTION, shell_factor=TAPER_SHELL_FACTOR,
-        band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR, # NEW: same distribution
+        band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR, # same distribution
     )
 
 taper_audits = {margin: untrained_taper_audit(margin) for margin in TAPER_MARGIN_CANDIDATES}
@@ -717,12 +914,7 @@ the network must absorb — not an error of the construction.
 
 ```{python}
 #| label: taper-edge-residual
-# NEW: residual probe on a thin annulus centred on the taper-ball edge, before
-# and after training. The edge is where the bump's second derivatives scale
-# like 1/support^2 and generate the cross-term residual that dominates the
-# untrained audit; this cell verifies that the selected margin and the
-# densified collocation actually absorb that object rather than move it.
-TAPER_EDGE_BAND = 0.15  # NEW: half-width of the probe annulus, as a fraction of the edge radius
+TAPER_EDGE_BAND = 0.15  # Half-width of the probe annulus, as a fraction of the edge  radius
 
 
 def sample_taper_edge_band(particle_axial_position, particle_radius, margin, band,
@@ -815,43 +1007,16 @@ make the edge learnable, and the margin, not the schedule, must move next.
 ```{python}
 #| label: fig-particle-loss
 #| fig-cap: "Stream-function training loss by component: Adam epochs, then L-BFGS closure evaluations (phase separated by the vertical line)."
-# CHANGED: `plot_two_way_history` expects the primitive-path TrainingHistory.
-# StreamLossHistory stores flat tuples, so the components are plotted directly.
-component_names = particle_history.names
-total_index = component_names.index("total")
-adam_totals = [record[total_index] for record in particle_history.adam]
-lbfgs_totals = [record[total_index] for record in particle_history.lbfgs]
-
-fig_loss = matplotlib.figure.Figure(figsize=(7.5, 4.0))
-ax_loss = fig_loss.subplots()
-component_styles = {"momentum_r": "tab:blue", "momentum_z": "tab:orange",
-                    "continuity": "tab:green", "inlet": "tab:red", "outlet": "tab:purple"}
-for name, color in component_styles.items():
-    index = component_names.index(name)
-    ax_loss.semilogy([record[index] for record in particle_history.adam],
-                     color=color, linewidth=0.9, alpha=0.8, label=f"Adam {name}")
-ax_loss.semilogy(adam_totals, color="black", linewidth=1.6, label="Adam total")
-ax_loss.semilogy(range(len(adam_totals) - 1, len(adam_totals) + len(lbfgs_totals) - 1),
-                 lbfgs_totals, color="black", linewidth=1.6, linestyle="--",
-                 label="L-BFGS total")
-ax_loss.axvline(len(adam_totals) - 1, color="gray", linestyle=":", linewidth=1.0)
-ax_loss.set_xlabel("Adam epoch / L-BFGS closure evaluation")
-ax_loss.set_ylabel("Loss (mean-squared residual)")
-ax_loss.set_title("Stream-function training loss by component")
-ax_loss.legend(fontsize=7, ncol=2, loc="upper right")
-ax_loss.grid(True, linestyle=":", alpha=0.5)
-fig_loss.tight_layout()
-fig_loss
+display(mfp.plot_stream_loss_history(particle_history))
 ```
 
-The continuity curve in @fig-particle-loss is a monitor of the $r$-weighted
-residual, not a
-measure of mass conservation. The check `check-continuity` measures that, on
-fresh points.
+The continuity curve in @fig-particle-loss is a monitor of the training
+residual form, not a measure of mass conservation.  The check `check-continuity`
+measures that, on fresh points.
 
 ```{python}
 #| label: particle-training-diagnostics
-# CHANGED: StreamLossHistory stores flat tuples; index by name instead of attribute access.
+# StreamLossHistory stores flat tuples; index by name instead of attribute access.
 total_index = particle_history.names.index("total")
 adam_initial_loss = particle_history.adam[0][total_index]
 final_losses = particle_history.final()
@@ -859,7 +1024,6 @@ lbfgs_final_loss = final_losses["total"]
 training_loss_reduction = (
     abs(adam_initial_loss - lbfgs_final_loss) / max(abs(adam_initial_loss), 1.0e-12)
 )
-
 ```
 
 The Adam-to-final optimization loss decreases from
@@ -906,18 +1070,24 @@ u_r_field = field_pred[..., 0]
 u_z_field = field_pred[..., 1]
 vel_mag = torch.hypot(u_r_field, u_z_field)
 
-# CHANGED: exclude the sphere interior. The construction imposes the rigid-body
-# condition on the surface only; inside the sphere the ansatz evaluates an
-# analytic continuation with no physical meaning, so an unmasked extremum
-# reports that continuation instead of the fluid response.
 fluid_mask_field = ((zz - particle_state.axial_position) ** 2 + rr ** 2) >= particle_config.radius ** 2
 velocity_magnitude_max = vel_mag[fluid_mask_field].max().item()
 velocity_magnitude_min = vel_mag[fluid_mask_field].min().item()
+```
 
-z_stations_eval = [0.80, 3.50, 4.00, 4.50, 6.50]  # Profile evaluation positions
+```{python}
+#| label: profile-stations
+# The station set is defined once in `evaluation-stations` and consumed here
+# unchanged; only the upstream/downstream partition and the labels are local.
+z_upstream, z_downstream = mfp.partition_evaluation_stations(
+    stations=z_stations_eval,
+    particle_axial_position=particle_state.axial_position,
+    particle_radius=particle_config.radius,
+    channel_length=L,
+    device=DEVICE,
+    dtype=DTYPE,
+)
 
-z_upstream = torch.tensor([0.20 * particle_state.axial_position, 0.60 * particle_state.axial_position], device=DEVICE, dtype=DTYPE)
-z_downstream = particle_state.axial_position + particle_config.radius + (L - particle_state.axial_position - particle_config.radius) * torch.tensor([0.2, 0.6], device=DEVICE, dtype=DTYPE)
 profile_stations = torch.cat([z_upstream, z_downstream])
 upstream_distances = (z_upstream - particle_axial_position).abs()
 downstream_distances = (z_downstream - particle_axial_position).abs()
@@ -928,8 +1098,6 @@ downstream_labels = (["downstream (near)", "downstream (far)"] if downstream_dis
 profile_labels = tuple(upstream_labels + downstream_labels)
 radial_grid_profile = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
 
-
-# CHANGED: Pass dimensionless radius directly and enable streamlines
 mfp.plot_particle_flow_field(
     flow_network=particle_network,
     domain=domain,
@@ -947,53 +1115,28 @@ The fluid-region velocity magnitude spans
 The presence of the spherical particle of radius $a^* =$
 `{python} f"{particle_config.radius:.2f}"`
 at $z_p^* =$ `{python} f"{particle_axial_position:.2f}"` forces the flow around
-the rigid obstacle,
-generating local flow acceleration in the annular clearance ($r^* \in [a^*,
-R^*]$) and stagnation
+the rigid obstacle, generating local flow acceleration in the annular clearance
+($r^* \in [a^*, R^*]$) and stagnation
 zones upstream and downstream [@kim2005microhydrodynamics; @sukumar2022exact].
-The overlaid
-streamlines illustrate the deflection of fluid parcel trajectories around the
-particle surface.
+The overlaid streamlines illustrate the deflection of fluid parcel trajectories around
+the particle surface.
 
 ```{python}
 #| label: fig-axial-velocity-profile-stations
 #| fig-cap: "Axial-velocity profile $u_z(r)$ at axial stations [@kim2005microhydrodynamics]."
-
-# CHANGED: Replaced plt.subplots() / plt.show() with pure OO matplotlib.figure.Figure
-fig_profiles = matplotlib.figure.Figure(figsize=(7.5, 4.2))
-ax_prof = fig_profiles.subplots()
 profile_deviations = []
-
-for index, (z_station, label, color) in enumerate(zip(profile_stations, profile_labels, ("tab:blue", "tab:orange", "tab:green", "tab:red"))):
+station_profiles = []
+for z_station, label in zip(profile_stations, profile_labels):
     coords = torch.stack([radial_grid_profile, z_station.expand_as(radial_grid_profile)], dim=1)
     with torch.no_grad():
         u_two_way = particle_network(coords)[:, 1]
         u_baseline = baseline_network(coords)[:, 1]
     profile_deviations.append((u_two_way - u_baseline).abs().max().item())
-    ax_prof.plot(
-        radial_grid_profile.cpu().numpy(),
-        u_two_way.cpu().numpy(),
-        color=color,
-        linewidth=1.6,
-        label=f"{label} (z*={z_station.item():.2f})",
-    )
-    ax_prof.plot(
-        radial_grid_profile.cpu().numpy(),
-        u_baseline.cpu().numpy(),
-        color=color,
-        linestyle="--",
-        linewidth=1.0,
-        alpha=0.7,
-        label="undisturbed baseline" if index == 0 else None,
-    )
+    station_profiles.append((float(z_station.item()), u_two_way, u_baseline))
 
-ax_prof.set_xlabel("Radial position $r^*$")
-ax_prof.set_ylabel("Axial velocity $u_z^*$")
-ax_prof.set_title("Particle-perturbed vs. undisturbed axial-velocity profiles")
-ax_prof.legend(fontsize=7, ncol=2, loc="lower left")
-ax_prof.grid(True, linestyle=":", alpha=0.5)
-fig_profiles.tight_layout()
-fig_profiles
+display(mfp.plot_station_profile_comparison(
+    radial_grid_profile, station_profiles, profile_labels,
+))
 ```
 
 ```{python}
@@ -1012,16 +1155,13 @@ profile_far_deviation = profile_deviations[farthest_profile_index]
 The largest pointwise difference between the coupled and undisturbed
 axial-velocity
 profiles is `{python} f"{profile_max_deviation:.3e}"` in dimensionless velocity
-units.
-At the nearest selected station the maximum difference is
+units. At the nearest selected station the maximum difference is
 `{python} f"{profile_deviations[nearest_profile_index]:.3e}"`,
 whereas at the farthest station it is `{python} f"{profile_far_deviation:.3e}"`.
 Their ratio is `{python} f"{profile_relaxation_ratio:.3g}"`. These
 values quantify the spatial extent of the particle disturbance; they should not
-be interpreted as
-an error because the perturbed solution is expected to differ physically from
-the undisturbed
-reference [@kim2005microhydrodynamics; @sukumar2022exact].
+be interpreted as an error because the perturbed solution is expected to differ
+physically from  the undisturbed reference [@kim2005microhydrodynamics; @sukumar2022exact].
 
 ```{python}
 #| label: fig-predicted-vs-analytical-profiles
@@ -1036,7 +1176,7 @@ def local_particle_chord_radius(
     meridian plane only where $\abs{z - z_p} \le a$, over the radial interval
     $r \in [0, r_c(z)]$, with
 
-    $$ r_c(z) = \sqrt{\max\!\left(0,\; a^2 - (z - z_p)^2\right)}. $$
+    $$r_c(z) = \sqrt{\max\!\left(0,\; a^2 - (z - z_p)^2\right)}.$$
 
     Radial positions below $r_c(z)$ sit inside the solid particle and are not
     fluid; comparing them against the particle-free analytical profile is not
@@ -1065,8 +1205,6 @@ radial_grid_particle = torch.linspace(0.0, R, 150, device=DEVICE, dtype=DTYPE)
 profile_evaluation_particle = mfp.evaluate_velocity_profiles(
     particle_network, domain, z_stations_eval, radial_grid_particle, PEAK_VELOCITY_NONDIM
 )
-# CHANGED: per-station fluid mask (True where (r, z_station) lies outside the solid sphere),
-# replacing the unmasked `profile_evaluation_particle` used by the plots and stats below.
 station_chord_radii = torch.tensor(
     [local_particle_chord_radius(z, particle_axial_position, particle_radius)
      for z in profile_evaluation_particle.z_stations],
@@ -1121,14 +1259,11 @@ absolute axial-velocity error
 relative to the particle-free analytical scale is
 `{python} f"{profile_max_relative_to_scale:.3%}"`,
 and the RMS absolute error is `{python} f"{profile_rms_error:.3e}"`. The worst
-selected
-station is `{python} f"{worst_station_z_particle:.3f}"`
+selected station is `{python} f"{worst_station_z_particle:.3f}"`
 (`{python} worst_station_label_particle`).
 These errors measure departure from the particle-free Hagen–Poiseuille solution,
-so
-they are diagnostic of the particle-induced disturbance plus numerical error
-rather
-than a pure solver error [@raissi2019physics; @sukumar2022exact].
+so they are diagnostic of the particle-induced disturbance plus numerical error
+rather than a pure solver error [@raissi2019physics; @sukumar2022exact].
 
 ```{python}
 #| label: fig-radial-leakage-domain
@@ -1144,10 +1279,8 @@ maximum
 absolute radial velocity on the `{python} len(z_stations_eval)` stations is
 `{python} f"{radial_leakage_max:.3e}"`,
 corresponding to `{python} f"{radial_leakage_relative:.3%}"` of the reference
-velocity
-scale. A nonzero value is a local numerical diagnostic; it should decrease with
-training and sampling refinement if the learned field approaches the
-axisymmetric
+velocity scale. A nonzero value is a local numerical diagnostic; it should decrease
+with training and sampling refinement if the learned field approaches the axisymmetric
 solution accurately [@kim2005microhydrodynamics].
 
 ```{python}
@@ -1160,11 +1293,6 @@ z_upstream_curve = torch.linspace(
 z_downstream_curve = torch.linspace(
     particle_axial_position + particle_radius, 0.95 * L, N_FLOWRATE_STATIONS, device=DEVICE, dtype=DTYPE
 )
-# NEW: quadrature-refinement ladder. Q(z) is constant by construction, so a
-# deviation that collapses under refinement is quadrature aliasing of the
-# taper-edge structure crossing the station line, while a deviation that
-# persists is genuine high-frequency content of the trained field — the
-# batch-interpolation signature that the probe-gap check names explicitly.
 Q_NODE_COUNTS = (256, 1024, 4096)
 z_curve_all = torch.cat([z_upstream_curve, z_downstream_curve])
 q_quadrature_convergence = {
@@ -1173,9 +1301,9 @@ q_quadrature_convergence = {
         / abs(Q_REF)).max())
     for n_nodes in Q_NODE_COUNTS
 }
-Q_STATION_NODES = max(Q_NODE_COUNTS)  # NEW: converged resolution for the reported metrics
-q_upstream_curve = mfp.compute_flow_rate_curve(particle_network, domain, z_upstream_curve, n_quadrature_points=Q_STATION_NODES)  # CHANGED: 256 -> converged count
-q_downstream_curve = mfp.compute_flow_rate_curve(particle_network, domain, z_downstream_curve, n_quadrature_points=Q_STATION_NODES)  # CHANGED
+Q_STATION_NODES = max(Q_NODE_COUNTS)
+q_upstream_curve = mfp.compute_flow_rate_curve(particle_network, domain, z_upstream_curve, n_quadrature_points=Q_STATION_NODES)
+q_downstream_curve = mfp.compute_flow_rate_curve(particle_network, domain, z_downstream_curve, n_quadrature_points=Q_STATION_NODES)
 
 q_dev_upstream = (q_upstream_curve - Q_REF).abs() / abs(Q_REF)
 q_dev_downstream = (q_downstream_curve - Q_REF).abs() / abs(Q_REF)
@@ -1186,29 +1314,14 @@ q_curve_rms_relative_error = torch.sqrt(torch.mean(q_curve_deviation ** 2)).item
 q_upstream_max_relative_error = q_dev_upstream.max().item()
 q_downstream_max_relative_error = q_dev_downstream.max().item()
 
-# CHANGED: Pure OO figure creation avoiding plt.subplots() side-effects
-fig_q = matplotlib.figure.Figure(figsize=(8.0, 3.2))
-ax_q = fig_q.subplots()
-ax_q.plot(z_upstream_curve.cpu().numpy(), q_upstream_curve.cpu().numpy(), color="tab:blue",
-          marker=".", markersize=3.0, linewidth=1.0, label="Q(z), two-way")
-ax_q.plot(z_downstream_curve.cpu().numpy(), q_downstream_curve.cpu().numpy(), color="tab:blue",
-          marker=".", markersize=3.0, linewidth=1.0)
-ax_q.axhline(Q_REF, color="black", linestyle="--", linewidth=1.0, label="Q_ref* (analytical)")
-ax_q.axvspan(particle_axial_position - particle_radius, particle_axial_position + particle_radius,
-             color="lightgray", alpha=0.5, label="Particle (excluded)")
-ax_q.set_xlabel("Axial position $z^*$")
-ax_q.set_ylabel("$Q(z)^*$")
-ax_q.set_title("Flow-rate reconnection around the particle")
-ax_q.legend(fontsize=8, loc="lower center")
-ax_q.grid(True, linestyle=":", alpha=0.5)
-fig_q.tight_layout()
-fig_q
+display(mfp.plot_flow_rate_reconnection(
+    z_upstream_curve, q_upstream_curve, z_downstream_curve, q_downstream_curve,
+    Q_REF, particle_axial_position, particle_radius,
+))
 ```
 
 ```{python}
 #| label: check-flowrate-through-sphere
-# NEW: for |z - z_p| < a the fluid fills the annulus r_core(z) <= r <= R. The rigid core carries
-# pi r_core^2 U_p. Because psi = -U_p s / 2 on the sphere, the identity Q = Q_ref holds exactly.
 z_inside = torch.linspace(particle_axial_position - 0.95 * particle_radius,
                           particle_axial_position + 0.95 * particle_radius, 21, device=DEVICE, dtype=DTYPE)
 with torch.no_grad():
@@ -1217,8 +1330,6 @@ with torch.no_grad():
 q_inside_max_relative_error = ((q_inside - Q_REF).abs() / abs(Q_REF)).max().item()
 max_conservation_error = max(q_curve_max_relative_error, q_inside_max_relative_error)
 ```
-
-<!-- In `check-particle-conservation`, keep `max_conservation_error` as defined here (CHANGED). -->
 
 ```{python}
 #| label: tbl-particle-conservation
@@ -1263,14 +1374,13 @@ returned to the inlet match it was designed to measure.
 
 ```{python}
 #| label: check-particle-conservation
-# max_conservation_error = q_curve_max_relative_error # defined in check-flowrate-through-sphere
 conservation_check = mfp.evaluate_check(
     "Mass conservation with particle",
     "Q(z) upstream and downstream of the sphere against the analytical reference",
     max_conservation_error, thresholds.conservation_of_mass_tolerance, "<=",
 )
 verification_checks = verification_checks + (conservation_check,)
-verification_categories[conservation_check.name] = VERIFICATION  # NEW
+verification_categories[conservation_check.name] = VERIFICATION
 conservation_verdict = "clears" if conservation_check.passed else "misses"
 mfp.render_verification_table((conservation_check,))
 ```
@@ -1289,21 +1399,10 @@ analytical_pressure_baseline = mfp.hagen_poiseuille_pressure(
     torch.as_tensor(axial_positions_pressure, dtype=DTYPE), R, PEAK_VELOCITY_NONDIM, L, REFERENCE_PRESSURE
 ).numpy()
 
-fig_p = matplotlib.figure.Figure(figsize=(8.0, 3.2))
-ax_p = fig_p.subplots()
-ax_p.plot(axial_positions_pressure, predicted_pressure_masked, color="tab:red", linewidth=1.2,
-          label="Predicted p(r≈0, z), two-way")
-ax_p.plot(axial_positions_pressure, analytical_pressure_baseline, color="black", linestyle="--", linewidth=1.0,
-          label="Analytical (particle-free) baseline")
-ax_p.axvspan(particle_state.axial_position - particle_config.radius, particle_state.axial_position + particle_config.radius,
-             color="lightgray", alpha=0.5, label="Particle (excluded)")
-ax_p.set_xlabel("Axial position $z^*$")
-ax_p.set_ylabel(r"Pressure $p^*(r{\approx}0, z)$")
-ax_p.set_title("Axial pressure through the particle vs. the undisturbed baseline")
-ax_p.legend(fontsize=8)
-ax_p.grid(True, linestyle=":", alpha=0.5)
-fig_p.tight_layout()
-fig_p
+display(mfp.plot_pressure_through_particle(
+    axial_positions_pressure, predicted_pressure_masked, analytical_pressure_baseline,
+    particle_state.axial_position, particle_config.radius,
+))
 ```
 
 ```{python}
@@ -1331,10 +1430,8 @@ from the particle-free analytical profile is
 with RMS difference `{python} f"{pressure_difference_rms:.3e}"`. Relative to the
 analytical pressure-drop scale, the maximum discrepancy is
 `{python} f"{pressure_difference_relative:.3%}"`. The comparison is restricted
-to the
-fluid region; pressure values inside the particle are not interpreted as
-physical
-flow-field predictions [@happel1983low].
+to the fluid region; pressure values inside the particle are not interpreted as
+physical flow-field predictions [@happel1983low].
 
 ```{python}
 #| label: tbl-particle-noslip
@@ -1367,7 +1464,7 @@ noslip_check = mfp.evaluate_check(
     max_noslip_error, thresholds.noslip_tolerance, "<=",
 )
 verification_checks = verification_checks + (noslip_check,)
-verification_categories[noslip_check.name] = VERIFICATION  # NEW
+verification_categories[noslip_check.name] = VERIFICATION
 noslip_verdict = "clears" if noslip_check.passed else "misses"
 mfp.render_verification_table((noslip_check,))
 ```
@@ -1389,17 +1486,10 @@ residual_terms = ("momentum_r", "momentum_z")
 final_losses = particle_history.final()
 final_rms = {name: math.sqrt(final_losses[name]) for name in residual_terms}
 
-continuity_noise_rms = math.sqrt(final_losses["continuity"])  # NEW: monitor
+continuity_noise_rms = math.sqrt(final_losses["continuity"])
 final_residual = max(final_rms.values())
 
-# NEW: distribution-free reference batch. The 2026-10-14 run showed the
-# training-batch RMS is a sampler-dependent metric: raising the near-surface
-# share from the incidental 6.3% to ~11.9% inflated the batch RMS of an
-# unchanged field by sqrt(0.119/0.063) = 1.37x, against the 1.40x observed.
-# The thresholded check must not move when the sampler moves, so it is
-# computed on one fixed uniform batch -- no shell densification, no band --
-# seeded independently of every seed the trainer and the probes use.
-REFERENCE_BATCH_SEED_OFFSET = 91_919  # NEW: disjoint from the probe and band offsets
+REFERENCE_BATCH_SEED_OFFSET = 91_919  #  disjoint from the probe and band offsets
 reference_batch_config = dataclasses.replace(
     PARTICLE_TRAINING_CONFIG,
     random_seed=RANDOM_SEED + REFERENCE_BATCH_SEED_OFFSET,
@@ -1409,7 +1499,7 @@ reference_batch_config = dataclasses.replace(
 reference_batch_losses = mfp.diagnose_loss_scale(
     particle_network, domain, fluid_config, reference_batch_config,
     particle_axial_position, particle_radius, PEAK_VELOCITY_NONDIM,
-    shell_fraction=0.0, band_fraction=0.0,  # NEW: uniform interior draw
+    shell_fraction=0.0, band_fraction=0.0,
 )
 reference_batch_rms = {
     name: math.sqrt(reference_batch_losses[name]) for name in residual_terms
@@ -1430,14 +1520,12 @@ mfp.render_verification_table((convergence_check,))
 The thresholded metric is the momentum RMS on the fixed uniform reference batch:
 `{python} f'{reference_batch_rms["momentum_r"]:.3e}'` for radial momentum and
 `{python} f'{reference_batch_rms["momentum_z"]:.3e}'` for axial momentum; the
-larger of
-the two,
+larger of the two,
 `{python} f"{reference_batch_residual:.3e}"`, is compared with the configured
-residual
-tolerance
+residual tolerance
 `{python} f"{thresholds.two_way_residual_tolerance:.3e}"`. The training-batch
-values — `{python} f"{final_rms['momentum_r']:.3e}"` radial and
-`{python} f"{final_rms['momentum_z']:.3e}"` axial on the densified batch —
+values --- `{python} f"{final_rms['momentum_r']:.3e}"` radial and
+`{python} f"{final_rms['momentum_z']:.3e}"` axial on the densified batch---
 remain recorded as monitors: they measure the distribution the optimizer saw,
 not the field. The 2026-10-14 run convicted the old metric, whose value rose by
 the square root of the band-share ratio while the field itself was nearly
@@ -1448,7 +1536,7 @@ the taper annulus half again as heavily, and they are expected to read below the
 densified-batch monitor for the same reason.
 
 ```{python}
-#| label: check-particle-convergence-2
+#| label: check-particle-convergence
 residual_table = mfp.residual_by_region(
     particle_network, domain, fluid_config, particle_axial_position, particle_radius,
     section_offset=2.0, residual_form="native")
@@ -1480,7 +1568,7 @@ depends on.
 
 ```{python}
 #| label: check-continuity
-# NEW: relative divergence max|div u| / (max|u| / R) on three fresh, independently seeded batches,
+# relative divergence max|div u| / (max|u| / R) on three fresh, independently seeded batches,
 # evaluated on the unweighted operator (the loss entry is the r-weighted residual).
 DIVERGENCE_EPSILON_FACTOR = 1.0e3   # calibratable multiple of machine epsilon
 divergence_by_batch = tuple(
@@ -1533,7 +1621,7 @@ residual_axial_grid = torch.linspace(0.0, L, 220, device=DEVICE, dtype=DTYPE)
 residual_grids = mfp.evaluate_residual_grid(particle_network,
                                             fluid_config,
                                             residual_radial_grid, residual_axial_grid,
-                                            residual_form=PARTICLE_RESIDUAL_FORM,  # CHANGED: was "standard"
+                                            residual_form=PARTICLE_RESIDUAL_FORM,
                                             )
 residual_rr, residual_zz = torch.meshgrid(residual_radial_grid, residual_axial_grid, indexing="ij")
 residual_inside_particle = (residual_zz - particle_state.axial_position) ** 2 + residual_rr ** 2 < particle_config.radius ** 2
@@ -1550,11 +1638,11 @@ mfp.plot_residual_heatmap(residual_radial_grid, residual_axial_grid, momentum_z_
 
 ```{python}
 #| label: check-probe-gap
-# NEW: held-out probe gap. The 2026-10-09 run closed with the probe loss three
+# held-out probe gap. The 2026-10-09 run closed with the probe loss three
 # orders of magnitude above the training loss (1.2e2 against 1.7e-1): L-BFGS
 # interpolated its fixed batch. The check makes that failure mode explicit
 # instead of silent.
-PROBE_SEED_OFFSET = 123_457  # NEW: disjoint from the epoch, round and probe seeds
+PROBE_SEED_OFFSET = 123_457  # disjoint from the epoch, round and probe seeds
 held_out_config = dataclasses.replace(
     PARTICLE_TRAINING_CONFIG,
     random_seed=RANDOM_SEED + PROBE_SEED_OFFSET,
@@ -1568,7 +1656,7 @@ held_out_losses = mfp.diagnose_loss_scale(
     band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR, # NEW: same distribution
 )
 probe_train_gap = held_out_losses["total"] / max(final_losses["total"], 1.0e-12)
-PROBE_GAP_TOLERANCE = 10.0  # NEW: one order of magnitude; interpolation ran above 100
+PROBE_GAP_TOLERANCE = 10.0
 
 probe_gap_check = mfp.evaluate_check(
     "Held-out probe gap",
@@ -1594,7 +1682,7 @@ misrepresented field and no threshold comparison should be trusted until the gap
 clears. The 2026-10-09 run would have failed this check at a ratio of about 700;
 the check is recorded under numerical convergence.
 
-# Verification 1: PINN Traction Force vs. Analytical Drag
+# PINN Traction Force vs. Analytical Drag
 
 ```{python}
 #| label: fig-drag-quadrature
@@ -1605,17 +1693,7 @@ drag_by_quadrature = [mfp.surface_traction_force(particle_network,
                                                  particle_state=particle_state,
                                                  n_quadrature_points=n).item() for n in quadrature_counts]
 
-# CHANGED: Replaced plt.subplots() / plt.show() with pure OO matplotlib.figure.Figure
-# to eliminate global state pollution across interactive IDE and headless execution.
-fig_drag = matplotlib.figure.Figure(figsize=(6.0, 3.6))
-ax_drag = fig_drag.subplots()
-ax_drag.plot(quadrature_counts, drag_by_quadrature, marker="o", color="tab:blue", linewidth=1.2)
-ax_drag.set_xscale("log")
-ax_drag.set_xlabel("Number of quadrature nodes")
-ax_drag.set_ylabel(r"$f_z^*$")
-ax_drag.set_title("Drag-force quadrature convergence")
-ax_drag.grid(True, linestyle=":", alpha=0.5)
-fig_drag.tight_layout()
+display(mfp.plot_quadrature_convergence(quadrature_counts, drag_by_quadrature))
 
 drag_force = drag_by_quadrature[-1]
 quadrature_changes = [
@@ -1625,8 +1703,6 @@ quadrature_changes = [
 quadrature_relative_change = quadrature_changes[-1]
 drag_quadrature_min = min(drag_by_quadrature)
 drag_quadrature_max = max(drag_by_quadrature)
-# CHANGED: Render figure deterministically via pure expression return instead of plt.show()
-fig_drag
 ```
 
 ```{python}
@@ -1638,7 +1714,7 @@ quadrature_check = mfp.evaluate_check(
     quadrature_relative_change, thresholds.quadrature_convergence_tolerance, "<=",
 )
 verification_checks = verification_checks + (quadrature_check,)
-verification_categories[quadrature_check.name] = CONVERGENCE  # NEW
+verification_categories[quadrature_check.name] = CONVERGENCE
 print(f"Relative change, last quadrature doubling: {quadrature_relative_change:.2%}")
 mfp.render_verification_table((quadrature_check,))
 ```
@@ -1647,6 +1723,7 @@ mfp.render_verification_table((quadrature_check,))
 
 ```{python}
 #| label: tbl-drag-manufactured
+#| tbl-cap: "Traction integral of the virtual-sphere check under quadrature refinement"
 def exact_poiseuille_network(coordinates: torch.Tensor) -> torch.Tensor:
     """Closed-form Hagen-Poiseuille field with trained-network calling convention."""
     return mfp.hagen_poiseuille_velocity_field(coordinates, domain, PEAK_VELOCITY_NONDIM, REFERENCE_PRESSURE)
@@ -1673,10 +1750,8 @@ resolutions. Its finest-resolution residual is
 `{python} f"{abs(manufactured_forces[721]):.3e}"`,
 while the largest absolute residual across the tested resolutions is
 `{python} f"{max(abs(value) for value in manufactured_forces.values()):.3e}"`.
-This
-checks the stress-to-force integration pathway on a known source-free Stokes
-field,
-independently of the trained particle-perturbed network.
+This checks the stress-to-force integration pathway on a known source-free Stokes
+field, independently of the trained particle-perturbed network.
 
 ```{python}
 #| label: check-drag-manufactured
@@ -1695,12 +1770,7 @@ mfp.render_verification_table((manufactured_check,))
 
 ```{python}
 #| label: tbl-stokes-comparison
-# def haberman_sayre_wall_factor(blockage_ratio: float) -> float:
-#     """Evaluate the notebook's wall-correction reference factor."""
-#     lam = blockage_ratio
-#     numerator = 1.0 - 2.105 * lam + 2.0865 * lam**3 - 1.7068 * lam**5 + 0.72603 * lam**6
-#     denominator = 1.0 - 0.75857 * lam**5
-#     return numerator / denominator
+#| tbl-cap: "Wall-confinement summary of the predicted drag against the unconfined Stokes law."
 
 with torch.no_grad():
     local_undisturbed_uz = baseline_network(torch.tensor([[1.0e-4 * R, particle_state.axial_position]], device=DEVICE, dtype=DTYPE))[0, 1].item()
@@ -1722,7 +1792,7 @@ pd.Series({
 The computed drag correction factor is
 `{python} f"{drag_correction_factor:.4f}"`. The reference confinement factor for
 a sphere held fixed on the tube axis in Poiseuille flow, the wall correction
-compiled by Happel and Brenner \[-@happel1983low\], gives
+compiled by Happel and Brenner [-@happel1983low], gives
 `{python} f"{brenner_confinement_factor:.4f}"` at blockage ratio
 `{python} f"{particle_radius / R:.3f}"`. The relative difference between the two
 quantities is
@@ -1785,9 +1855,6 @@ RESISTANCE_CONFIG = mfp.TrainingConfig(
     verbose=True,
     log_every=log_every,
 )
-# NEW: cache paths and the parameters the rebuild must mirror.
-resistance_ambient_path = CHECKPOINT_DIR / "resistance_ambient.pt"
-resistance_translating_path = CHECKPOINT_DIR / "resistance_translating.pt"
 RESISTANCE_SHELL_RADII = (1.0, 1.25, 1.5, 2.0)  # keep identical to the solver's internal spread profile
 RESISTANCE_N_QUAD = 181  # keep identical to the solver's quadrature
 
@@ -1805,9 +1872,6 @@ def _train_resistance_pair():
 
 
 if resistance_ambient_path.exists() and resistance_translating_path.exists():
-    # NEW: validated cache hit — forces are recomputed from the loaded
-    # networks through the same traction integrator the solver uses, so the
-    # reported numbers always come from the current library.
     network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
         resistance_ambient_path, device=DEVICE)
     network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
@@ -1840,12 +1904,12 @@ else:
         mfp.make_provenance(RESISTANCE_CONFIG, resistance.history_translating),
         resistance.history_translating)
 
-# CHANGED: Leverage closed-form methods on ResistanceResult
+# Leverage closed-form methods on ResistanceResult
 u_passive = resistance.passive_velocity
 u_forced = resistance.balanced_velocity(APPLIED_FORCE)
 u_assisting = resistance.balanced_velocity(ASSISTING_FORCE)
 
-# CHANGED: Use canonical Scheme A properties (aliases also available)
+# Use canonical Scheme A properties (aliases also available)
 resistance_table = pd.DataFrame({
     "PINN": [resistance.force_ambient, resistance.force_translating, u_passive],
     "reference": [refs["force_fixed"], refs["force_unit_translation"], refs["force_free_velocity"]],
@@ -1862,7 +1926,7 @@ resistance_relative_errors = pd.Series({
 resistance_table, resistance_relative_errors
 ```
 
-the stationary sphere resistance is `{python} f"{resistance.force_ambient:.3f}"` against the reference `{python} f'{refs["force_fixed"]:.3f}'` (relative error `{python} f'{resistance_relative_errors["F_0 relative error"]:.2%}'`), and the unit-translation resistance is `{python} f"{resistance.force_translating:.3f}"` against `{python} f'{refs["force_unit_translation"]:.3f}'` (relative error `{python} f'{resistance_relative_errors["F_1 relative error"]:.2%}'`). The control-shell spreads, `{python} f"{resistance.spread_ambient:.3%}"` for the ambient problem and `{python} f"{resistance.spread_translating:.3%}"` for the translation problem, confirm momentum conservation. The passive velocity is `{python} f"{u_passive:.4f}"` (effective mobility $\mathcal{M} =$ `{python} f"{resistance.mobility:.4f}"`). Under opposing force $F_\text{app}^* =$ `{python} f"{APPLIED_FORCE:.3f}"`, velocity drops to `{python} f"{u_forced:.4f}"`, and under assisting force it rises to `{python} f"{u_assisting:.4f}"`.
+The stationary sphere resistance is `{python} f"{resistance.force_ambient:.3f}"` against the reference `{python} f'{refs["force_fixed"]:.3f}'` (relative error `{python} f'{resistance_relative_errors["F_0 relative error"]:.2%}'`), and the unit-translation resistance is `{python} f"{resistance.force_translating:.3f}"` against `{python} f'{refs["force_unit_translation"]:.3f}'` (relative error `{python} f'{resistance_relative_errors["F_1 relative error"]:.2%}'`). The control-shell spreads, `{python} f"{resistance.spread_ambient:.3%}"` for the ambient problem and `{python} f"{resistance.spread_translating:.3%}"` for the translation problem, confirm momentum conservation. The passive velocity is `{python} f"{u_passive:.4f}"` (effective mobility $\mathcal{M} =$ `{python} f"{resistance.mobility:.4f}"`). Under opposing force $F_\text{app}^* =$ `{python} f"{APPLIED_FORCE:.3f}"`, velocity drops to `{python} f"{u_forced:.4f}"`, and under assisting force it rises to `{python} f"{u_assisting:.4f}"`.
 
 ```{python}
 #| label: check-force-response
@@ -1895,7 +1959,7 @@ REFERENCE_UNCERTAINTY = 0.05
 reference_tol = mfp.reference_tolerance(REFERENCE_UNCERTAINTY, Re_a)
 INTERNAL_BALANCE_TOLERANCE = 0.02
 
-# CHANGED: Access networks and spreads via canonical properties
+# Access networks and spreads via canonical properties
 gates = (
     mfp.momentum_balance_gate(resistance.network_ambient, domain, particle_axial_position,
                               particle_radius, INTERNAL_BALANCE_TOLERANCE),
@@ -1922,12 +1986,11 @@ mfp.render_verification_table(gates)
 ```
 
 The first three gates and the shell spreads test identities of the computed
-field. They do not
-involve a reference, so they must not inherit the reference uncertainty. If the
-traction, the
-cross-section momentum force and the far-field pressure jump disagree, the field
-is not a Stokes
-solution, whatever the reference says.
+field. They do not involve a reference, so they must not inherit the reference
+uncertainty. If the traction, the cross-section momentum force and the far-field
+pressure jump disagree, the field is not a Stokes solution, whatever the reference
+says.
+
 
 ## Warm-start consistency {#sec-warm-start}
 
@@ -1957,8 +2020,6 @@ depends on its training history, so it is never promoted to a reference value.
 
 ```{python}
 #| label: warm-start-checkpoint
-CHECKPOINT_DIR = Path("checkpoints")
-cold_checkpoint = CHECKPOINT_DIR / "fixed_sphere_cold.pt"
 
 cold_provenance = mfp.make_provenance(PARTICLE_TRAINING_CONFIG, particle_history)
 mfp.save_stream_checkpoint(
@@ -2016,10 +2077,6 @@ shifted_state = mfp.ParticleState(
     velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE),
     time=0.0,
 )
-SHELL_ARGS = dict(
-    shell_fraction=TAPER_SHELL_FRACTION, shell_factor=TAPER_SHELL_FACTOR,
-    band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR,
-)
 
 
 def fresh_network_at(z_p: float):
@@ -2041,10 +2098,10 @@ def mean_shell_force(network, state):
 
 ```{python}
 #| label: warm-start-cold-reference
-# CHANGED: opt-in (verification of an optimization, not of the model) and
+# opt-in (verification of an optimization, not of the model) and
 # validated through `cached_stream_run` instead of a bare `exists()`.
 if RUN_WARM_START_VERIFICATION:
-    cold_shifted_path = CHECKPOINT_DIR / "fixed_sphere_cold_shifted.pt"
+    cold_shifted_path = CHECKPOINT_DIR / f"{PARTICLE_RESIDUAL_FORM}_fixed_sphere_cold_shifted.pt"
 
     def _train_cold_shifted():
         t0 = time.perf_counter()
@@ -2098,9 +2155,6 @@ print(f"Warm-started run: {warm_seconds:.1f}s | final total {warm_history.final(
 ```{python}
 #| label: warm-run-prose
 #| output: asis
-# CHANGED: emitted from Python so the interpolation is valid whether or not
-# the section ran; inline `{python}` in markdown would raise NameError at
-# render time when the section was skipped.
 if RUN_WARM_START_VERIFICATION:
     print(f"The warm initialization starts at an objective of {warm_initial_loss:.3e}, against "
           f"{cold_initial_loss:.3e} for a cold initialization at the same geometry. The ratio, "
@@ -2129,7 +2183,7 @@ if RUN_WARM_START_VERIFICATION:
     ax_warm.legend(fontsize=8)
     ax_warm.grid(True, linestyle=":", alpha=0.5)
     fig_warm.tight_layout()
-    fig_warm
+    display(fig_warm)
 ```
 
 ### Equivalence and cost
@@ -2157,14 +2211,12 @@ if RUN_WARM_START_VERIFICATION:
     for check in (equivalence_check, cost_check, warm_probe_gap_check):
         verification_checks = verification_checks + (check,)
         verification_categories[check.name] = CONVERGENCE
-    mfp.render_verification_table((equivalence_check, cost_check, warm_probe_gap_check))
+    display(mfp.render_verification_table((equivalence_check, cost_check, warm_probe_gap_check)))
 ```
 
 ```{python}
 #| label: warm-gates-prose
 #| output: asis
-# CHANGED: emitted from Python; the interpolations are valid only when the
-# section ran.
 if RUN_WARM_START_VERIFICATION:
     print(f"At the shifted position the cold run gives a force of {force_cold:.4f} and the "
           f"warm run {force_warm:.4f}, a relative difference of "
@@ -2186,13 +2238,11 @@ argument holds only if the errors are independent. In
 `resistance_position_sweep`, each problem is initialized from its own
 counterpart at the previous position.
 
+
 ## Faxén-limit consistency
 
 ```{python}
 #| label: check-faxen-consistency
-# CHANGED: the tolerance is no longer the gap between two nearly identical series (0.03 %).
-# It is the reference uncertainty, floored by the Oseen estimate. Faxén's law is a free-space
-# result, so it is reported for information and is not the gated reference at lambda = 0.25.
 faxen_probe = torch.tensor([[1.0e-3 * R, particle_axial_position]], device=DEVICE, dtype=DTYPE)
 faxen_velocity = float(mfp.faxen_corrected_velocity(baseline_network, faxen_probe, particle_radius)[0, 1])
 passive_error = abs(u_passive - refs["force_free_velocity"]) / abs(refs["force_free_velocity"])
@@ -2225,6 +2275,190 @@ evidence. And
 $U_\text{free}=-F_0/F_1$ is a ratio of two forces that are both too low, so a
 good passive velocity
 does not show that the forces are right.
+
+## Free-Particle Trajectory and Animation
+
+The particle is now released: no-slip keeps its kinematic form
+$\vb{u}^* _S = (0, U_p^*)$ for any $U_p^*$, and the freedom is closed by the
+overdamped balance
+$$F_{\mathrm{applied}}^*(z_p) + F_0 + U_p^*\, F_1 = 0,$$
+exact at zero Reynolds number [@happel1983low]. Rotation is absent for a
+torque-free sphere in a swirl-free axisymmetric flow, so the axisymmetric
+formulation remains self-consistent. By linearity, the free-particle field is
+the superposition
+$$\vb{u} = u_{\max}\,\Phi_A + U_p^*\,\Phi_B,$$
+assembled per frame from the two cached resistance networks; the raw
+corrections transfer through the translation-invariant input
+$(s/R^2, (z - z_p)/R)$, accurate in the channel's central region. This
+section therefore trains nothing: it reuses section 5.
+
+```{python}
+#| label: animation-config
+# NEW (A11): quasi-static animation switch. Requires the L9.2 construction id
+# validated at load; reuses the resistance pair from section 5.
+RUN_ANIMATION = True
+ANIMATION_TIME_STEP = 0.05      # nondimensional, O(R/u_max) is unity
+ANIMATION_MAX_STEPS = 600
+ANIMATION_START = 2.0           # central region, clear of the inlet
+ANIMATION_SPAN = (2.0 * particle_radius, L - 2.0 * particle_radius)
+ANIMATION_GRID = (48, 160)      # (n_r, n_z)
+ANIMATION_N_FRAMES = 60        # GIF frame budget; the trajectory is strided to it
+ANIMATION_FPS = 20
+```
+
+```{python}
+#| label: check-manufactured-lifting
+zero_raw = mfp.build_mlp(n_inputs=2, n_outputs=2,
+                         hidden_layers=STREAM_HIDDEN_LAYERS,
+                         training_config=PARTICLE_TRAINING_CONFIG, activation="tanh")
+with torch.no_grad():
+    for parameter in zero_raw.parameters():
+        parameter.zero_()
+analytic_network = mfp.apply_stream_function_constraint(
+    zero_raw, domain, particle_axial_position, particle_radius,
+    particle_axial_velocity=particle_axial_velocity,
+    flow_amplitude=PEAK_VELOCITY_NONDIM, taper_margin=TAPER_MARGIN)
+manufactured_drag = float(mfp.surface_traction_force(
+    analytic_network, particle_config=particle_config, particle_state=particle_state,
+    n_quadrature_points=RESISTANCE_N_QUAD))
+analytic_floor = 6.0 * math.pi * particle_radius * PEAK_VELOCITY_NONDIM \
+    * (1.0 - (2.0 / 3.0) * (particle_radius / R) ** 2)
+manufactured_check = mfp.evaluate_check(
+    "Manufactured lifting traction",
+    "Zero-weight network drag against the analytic unconfined value",
+    abs(manufactured_drag - analytic_floor) / abs(analytic_floor), 1.0e-2, "<=")
+verification_checks = verification_checks + (manufactured_check,)
+verification_categories[manufactured_check.name] = VERIFICATION  # NEW
+mfp.render_verification_table((manufactured_check,))
+```
+
+```{python}
+#| label: animation-trajectory
+if RUN_ANIMATION:
+    passive_trajectory = mfp.free_particle_trajectory(
+        resistance, lambda z: 0.0, ANIMATION_SPAN,
+        ANIMATION_TIME_STEP, ANIMATION_MAX_STEPS, initial_position=ANIMATION_START)
+    magnetic_trajectory = mfp.free_particle_trajectory(
+        resistance, force_fn, ANIMATION_SPAN,
+        ANIMATION_TIME_STEP, ANIMATION_MAX_STEPS, initial_position=ANIMATION_START)
+
+    def _trajectory_frame(trajectory, label):
+        """Return one trajectory as a frame table with a disambiguating column.
+
+        Args:
+        - `trajectory`: `FreeParticleTrajectory` of arbitrary length.
+        - `label`: Trajectory identifier, e.g. "passive" or "magnetic".
+
+        Returns:
+        - `DataFrame` with the sampled states; the lengths of the passive and
+          magnetic trajectories differ by construction, so they cannot share
+          frame-indexed columns.
+        """
+        return pd.DataFrame({
+            "trajectory": label,
+            "t (nondim)": trajectory.times,
+            "z_p": trajectory.positions,
+            "U_p": trajectory.velocities,
+            "F_applied": trajectory.applied_forces,
+        })
+
+    trajectory_table = pd.concat(
+        (_trajectory_frame(passive_trajectory, "passive"),
+         _trajectory_frame(magnetic_trajectory, "magnetic")),
+        ignore_index=True,
+    )
+    for name, trajectory in (("passive", passive_trajectory),
+                             ("magnetic", magnetic_trajectory)):
+        print(f"{name}: {len(trajectory.times)} frames, "
+              f"exit={'span boundary' if trajectory.exited_domain else 'max steps'}, "
+              f"final z_p={float(trajectory.positions[-1]):.4f}, "
+              f"final U_p={float(trajectory.velocities[-1]):.4f}")
+    # CHANGED (A11): a trailing expression inside the `if` block produces no
+    # cell output in Jupyter, so the table never displayed. `display` emits it
+    # explicitly, strided to keep the PDF readable; the full table stays in
+    # memory for the frame guards.
+    display(trajectory_table.iloc[:: max(1, len(trajectory_table) // 24)])
+```
+
+```{python}
+#| label: check-animation-guards
+# NEW (A11): per-frame regression guards on the released particle.
+if RUN_ANIMATION:
+    noslip_max, velocity_error_max = 0.0, 0.0
+    for z_p, u_p in zip(magnetic_trajectory.positions.tolist(),
+                        magnetic_trajectory.velocities.tolist()):
+        frame_state = mfp.ParticleState(
+            position=torch.tensor((0.0, z_p), device=DEVICE, dtype=DTYPE),
+            velocity=torch.tensor((0.0, u_p), device=DEVICE, dtype=DTYPE),
+            time=0.0)
+        frame_flow = mfp.superposed_flow_at(
+            resistance.network_ambient, resistance.network_translating, domain,
+            float(z_p), particle_radius, ambient_amplitude=PEAK_VELOCITY_NONDIM,
+            particle_velocity=float(u_p), taper_margin=TAPER_MARGIN)
+        frame_noslip = mfp.evaluate_particle_noslip_error(
+            frame_flow, particle_config, frame_state,
+            reference_velocity=PEAK_VELOCITY_NONDIM, n_probe_points=181)
+        noslip_max = max(noslip_max, float(frame_noslip["max_abs_error"]))
+        velocity_error_max = max(velocity_error_max, abs(u_p - u_passive))
+    animation_noslip_check = mfp.evaluate_check(
+        "Animation no-slip guard", "Per-frame surface velocity error over the trajectory",
+        noslip_max, thresholds.noslip_tolerance, "<=")
+    verification_checks = verification_checks + (animation_noslip_check,)
+    verification_categories[animation_noslip_check.name] = VERIFICATION  # NEW
+    display(mfp.render_verification_table((animation_noslip_check,)))
+```
+
+```{python}
+#| label: fig-animation-frame
+#| fig-cap: "Animated magnetic-gradient trajectory: superposed velocity field around the released particle, saved as a looping GIF."
+#| output: asis
+# The per-frame rendering (velocity-magnitude map, masked streamlines, sphere
+# patch, square axes) is the same renderer as `plot_particle_flow_field`,
+# factorized in `plotting.py`; this cell only supplies the per-frame field.
+if RUN_ANIMATION:
+    from IPython.display import Image as IpyImage
+
+    def _frame_field(index):
+        """Return the superposed flow callable at trajectory state `index`.
+
+        Args:
+        - `index`: Position index into `magnetic_trajectory`.
+
+        Returns:
+        - Field mapping `(r, z)` to `(u_r, u_z, p)` at the particle state `index`.
+        """
+        return mfp.superposed_flow_at(
+            resistance.network_ambient, resistance.network_translating, domain,
+            float(magnetic_trajectory.positions[index]), particle_radius,
+            ambient_amplitude=PEAK_VELOCITY_NONDIM,
+            particle_velocity=float(magnetic_trajectory.velocities[index]),
+            taper_margin=TAPER_MARGIN)
+
+    animation_path = mfp.plot_particle_flow_animation(
+        domain=domain,
+        frame_field=_frame_field,
+        positions=magnetic_trajectory.positions,
+        velocities=magnetic_trajectory.velocities,
+        times=magnetic_trajectory.times,
+        particle_radius=particle_radius,
+        n_frames=ANIMATION_N_FRAMES,
+        resolution_r=ANIMATION_GRID[0],
+        resolution_z=ANIMATION_GRID[1],
+        fps=ANIMATION_FPS,
+        output_path=Path("animations") / f"{PARTICLE_RESIDUAL_FORM}_magnetic_trajectory.gif",
+    )
+
+    # CHANGED: Detect Quarto target format or default to relative path resolution
+    static_path = animation_path.with_suffix(".png")
+    target_format = os.environ.get("QUARTO_DOCUMENT_FORMAT", "html").lower()
+
+    if "pdf" in target_format or "latex" in target_format:
+        # PDF/LaTeX requires a static graphic format supported by \includegraphics
+        display(Markdown(f"![]({static_path.as_posix()})"))
+    else:
+        # HTML displays the looping animated GIF directly
+        display(Markdown(f"![]({animation_path.as_posix()})"))
+```
 
 # References
 

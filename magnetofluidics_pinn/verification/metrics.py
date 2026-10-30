@@ -31,7 +31,7 @@ already follows, avoiding the cross-device and cross-dtype mismatches
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -863,3 +863,72 @@ def compare_trajectory_to_analytical(
         for t, pr, ar, pz, az in zip(time_grid, predicted_r, analytical_r, predicted_z, analytical_z)
     ]
     return pd.DataFrame.from_records(records)
+    
+    
+def partition_evaluation_stations(
+    stations: Sequence[float],
+    particle_axial_position: float,
+    particle_radius: float = 0.0,
+    channel_length: float | None = None,
+    device: torch.device | str = "cpu",
+    dtype: torch.dtype = torch.float32,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""Partition evaluation stations into upstream and downstream tensors relative to an obstacle.
+
+    Filters discrete evaluation coordinates $\mathcal{Z}_{\mathrm{eval}}$ into
+    strictly upstream and downstream stations, excluding the obstacle interval:
+    $$\mathcal{Z}_{\mathrm{upstream}} = \left\{ z \in \mathcal{Z}_{\mathrm{eval}} : 0 < z \le z_p - a \right\}, \qquad
+    \mathcal{Z}_{\mathrm{downstream}} = \left\{ z \in \mathcal{Z}_{\mathrm{eval}} : z_p + a \le z < L \right\}.$$
+    Stations are sorted in ascending axial order and placed directly onto the
+    target computation device without intermediate host copies.
+
+    Args:
+    - `stations`: Sequence of scalar axial coordinates $z$.
+    - `particle_axial_position`: Dimensionless center position $z_p$ of the obstacle.
+    - `particle_radius`: Dimensionless radius $a$ of the obstacle.
+    - `channel_length`: Total dimensionless channel length $L$. Used to validate bounds.
+    - `device`: PyTorch device for tensor allocation (e.g., `'cuda'`, `'cpu'`).
+    - `dtype`: PyTorch floating-point data type.
+
+    Returns:
+    - A tuple `(z_upstream, z_downstream)` containing 1-D tensors allocated on `device` and `dtype`.
+
+    Raises:
+    - `ValueError`: If `stations` is empty, if any station lies outside $(0, L)$,
+      or if either partition contains zero stations.
+    """
+    if not stations:
+        raise ValueError("stations sequence must not be empty.")
+
+    if channel_length is not None:
+        if channel_length <= 0.0:
+            raise ValueError(f"channel_length must be strictly positive; got {channel_length!r}.")
+        out_of_bounds = [z for z in stations if not (0.0 < z < channel_length)]
+        if out_of_bounds:
+            raise ValueError(
+                f"Evaluation stations must lie strictly within (0, {channel_length}); "
+                f"out-of-bounds values: {out_of_bounds}."
+            )
+
+    z_p = float(particle_axial_position)
+    a = max(float(particle_radius), 0.0)
+
+    # Filter stations outside the particle body [z_p - a, z_p + a]
+    upstream_list = sorted(float(z) for z in stations if z <= (z_p - a))
+    downstream_list = sorted(float(z) for z in stations if z >= (z_p + a))
+
+    # Defensive fallback if stations lie within the boundary layer but outside center
+    if not upstream_list:
+        upstream_list = sorted(float(z) for z in stations if z < z_p)
+    if not downstream_list:
+        downstream_list = sorted(float(z) for z in stations if z > z_p)
+
+    if not upstream_list:
+        raise ValueError(f"No upstream evaluation stations found for z_p={z_p} in {stations}.")
+    if not downstream_list:
+        raise ValueError(f"No downstream evaluation stations found for z_p={z_p} in {stations}.")
+
+    z_upstream = torch.tensor(upstream_list, device=device, dtype=dtype)
+    z_downstream = torch.tensor(downstream_list, device=device, dtype=dtype)
+
+    return z_upstream, z_downstream
