@@ -206,9 +206,11 @@ print(f"{'RMS norm':<15} {metrics['u_r']['rms_norm']:<15.3e} {metrics['u_z']['rm
 #| label: fig-error-distribution
 #| fig-cap: "Error distribution in baseline network predictions: (a) radial velocity error, (b) axial velocity error, (c) pressure error. All errors are absolute values."
 
-import matplotlib.pyplot as plt
+# Use pure OO matplotlib for this dedicated multi-panel visualization
+import matplotlib.figure
 
-fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+figure = matplotlib.figure.Figure(figsize=(15, 4))
+axes = figure.subplots(1, 3)
 
 # u_r error
 im0 = axes[0].pcolormesh(
@@ -221,7 +223,7 @@ im0 = axes[0].pcolormesh(
 axes[0].set_xlabel("z*")
 axes[0].set_ylabel("r*")
 axes[0].set_title("Radial Velocity Error")
-plt.colorbar(im0, ax=axes[0], label="|u_r error|")
+figure.colorbar(im0, ax=axes[0], label="|u_r error|")
 
 # u_z error
 im1 = axes[1].pcolormesh(
@@ -234,7 +236,7 @@ im1 = axes[1].pcolormesh(
 axes[1].set_xlabel("z*")
 axes[1].set_ylabel("r*")
 axes[1].set_title("Axial Velocity Error")
-plt.colorbar(im1, ax=axes[1], label="|u_z error|")
+figure.colorbar(im1, ax=axes[1], label="|u_z error|")
 
 # p error
 im2 = axes[2].pcolormesh(
@@ -247,10 +249,10 @@ im2 = axes[2].pcolormesh(
 axes[2].set_xlabel("z*")
 axes[2].set_ylabel("r*")
 axes[2].set_title("Pressure Error")
-plt.colorbar(im2, ax=axes[2], label="|p error|")
+figure.colorbar(im2, ax=axes[2], label="|p error|")
 
-plt.tight_layout()
-plt.show()
+figure.tight_layout()
+display(figure)
 ```
 
 @fig-error-distribution shows the spatial distribution of errors across the domain. The errors should be:

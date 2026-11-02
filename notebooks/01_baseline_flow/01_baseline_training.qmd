@@ -158,7 +158,7 @@ print(f"\nLoss reduction: {loss_reduction:.3%}")
 #| label: fig-baseline-loss
 #| fig-cap: "Baseline network training loss by component: Adam epochs, then L-BFGS closure evaluations (phase separated by the vertical line)."
 
-mfp.plot_loss_history(baseline_history)
+display(plotting.plot_training_history(baseline_history, log_scale=True))
 ```
 
 The training loss in @fig-baseline-loss shows the convergence of the Adam optimizer followed by L-BFGS refinement. The loss contains contributions from:
@@ -252,8 +252,9 @@ print(f"  p max absolute error: {p_max_error:.3e}")
 n_stations = 5
 z_stations_profile = torch.linspace(0.0, L, n_stations, device=DEVICE, dtype=DTYPE)
 
-# Evaluate profiles
-profile_data = []
+# Evaluate profiles and prepare for plotting
+station_profiles = []
+labels = []
 for z_station in z_stations_profile:
     r_profile = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
     coords = torch.stack([r_profile, z_station.expand_as(r_profile)], dim=1)
@@ -263,31 +264,16 @@ for z_station in z_stations_profile:
     
     u_z_analytical = PEAK_VELOCITY_NONDIM * (1.0 - r_profile**2 / R**2)
     
-    profile_data.append({
-        "z": float(z_station.item()),
-        "r": r_profile.cpu().numpy(),
-        "u_z_network": u_z_network.cpu().numpy(),
-        "u_z_analytical": u_z_analytical.cpu().numpy(),
-    })
+    station_profiles.append((float(z_station.item()), u_z_network, u_z_analytical))
+    labels.append(f"z*={float(z_station.item()):.2f}")
 
-# Plot comparison
-import matplotlib.pyplot as plt
-
-fig, axes = plt.subplots(1, n_stations, figsize=(15, 3))
-for ax, data in zip(axes, profile_data):
-    ax.plot(data["r"], data["u_z_analytical"], "-", color="tab:blue", label="Analytical", linewidth=2)
-    ax.plot(data["r"], data["u_z_network"], "--", color="tab:orange", label="Network", linewidth=1.5)
-    ax.set_xlabel("r*")
-    ax.set_ylabel("u_z*")
-    ax.set_title(f"z* = {data['z']:.2f}")
-    ax.set_xlim(0.0, R)
-    ax.set_ylim(0.0, PEAK_VELOCITY_NONDIM * 1.05)
-    ax.grid(True, linestyle=":", alpha=0.5)
-    if ax == axes[0]:
-        ax.legend(fontsize=8)
-
-plt.tight_layout()
-plt.show()
+# Use plotting module function
+display(plotting.plot_station_profile_comparison(
+    r_profile,
+    station_profiles,
+    labels,
+    linewidth=1.6,
+))
 ```
 
 @fig-baseline-profile-comparison shows the axial velocity profile at `{python} n_stations` stations along the channel. The network predictions (dashed orange) closely match the analytical solution (solid blue) at all stations.
@@ -298,55 +284,15 @@ plt.show()
 #| label: fig-baseline-velocity-field
 #| fig-cap: "Baseline network velocity magnitude field. Streamlines show the parabolic flow profile."
 
-# Create grid for field visualization
-n_r_field = 60
-n_z_field = 120
-r_field = torch.linspace(0.0, R, n_r_field, device=DEVICE, dtype=DTYPE)
-z_field = torch.linspace(0.0, L, n_z_field, device=DEVICE, dtype=DTYPE)
-rr_field, zz_field = torch.meshgrid(r_field, z_field, indexing="ij")
-grid_field = torch.stack([rr_field.reshape(-1), zz_field.reshape(-1)], dim=1)
-
-with torch.no_grad():
-    field_pred = baseline_network(grid_field).reshape(n_r_field, n_z_field, 3)
-    u_r_field = field_pred[..., 0]
-    u_z_field = field_pred[..., 1]
-    vel_mag = torch.hypot(u_r_field, u_z_field)
-
-# Plot
-fig, ax = plt.subplots(figsize=(8, 5))
-
-# Velocity magnitude contour
-contour = ax.contourf(
-    zz_field.cpu().numpy(),
-    rr_field.cpu().numpy(),
-    vel_mag.cpu().numpy(),
-    levels=20,
-    cmap="viridis",
-)
-plt.colorbar(contour, ax=ax, label="Velocity Magnitude")
-
-# Streamlines
-ax.streamplot(
-    zz_field.cpu().numpy(),
-    rr_field.cpu().numpy(),
-    u_z_field.cpu().numpy(),
-    u_r_field.cpu().numpy(),
-    color="white",
+# Use plotting module function for streamlines
+display(plotting.plot_streamlines(
+    baseline_network,
+    domain,
+    resolution=120,
     density=1.5,
+    color="white",
     linewidth=0.5,
-    arrowstyle="->",
-    arrowsize=0.8,
-)
-
-ax.set_xlabel("z*")
-ax.set_ylabel("r*")
-ax.set_title("Baseline Velocity Field")
-ax.set_xlim(0.0, L)
-ax.set_ylim(0.0, R)
-ax.set_aspect("auto")
-
-plt.tight_layout()
-plt.show()
+))
 ```
 
 @fig-baseline-velocity-field shows the velocity magnitude field with streamlines. The parabolic profile characteristic of Hagen-Poiseuille flow is clearly visible.

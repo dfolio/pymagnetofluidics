@@ -24,6 +24,7 @@ for candidate in (Path.cwd(), Path.cwd().parent, Path.cwd().parent.parent):
         break
 
 import magnetofluidics_pinn as mfp
+from magnetofluidics_pinn.visualization import plotting
 
 resolved = Path(mfp.__file__).resolve()
 print(f"mfp imported from: {resolved}")
@@ -594,6 +595,7 @@ notebook_t0 = time.perf_counter()
 gpu_name = torch.cuda.get_device_name(DEVICE) if DEVICE.type == "cuda" else "no CUDA device"
 print(f"PyTorch: {torch.__version__} | Device: {DEVICE} ({gpu_name}) | dtype: {DTYPE}")
 print(f"magnetofluidics_pinn: v{mfp.__version__}")
+print(f"Plotting module: {plotting.__name__}")
 ```
 
 ## Summary
@@ -607,6 +609,7 @@ This configuration notebook provides:
 5. **Utility functions** to reduce code duplication
 6. **Checkpoint paths** for saving and loading trained networks
 7. **Verification categories** for consistent check organization
+8. **Plotting module import** for all visualization needs
 
 All other notebooks should import from this configuration to ensure consistency.
 

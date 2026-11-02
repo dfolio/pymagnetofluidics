@@ -148,10 +148,10 @@ print(f"  Maximum conservation error: {max_conservation_error:.3%}")
 #| label: fig-particle-flowrate
 #| fig-cap: "Predicted volumetric flow rate Q(z) upstream and downstream of particle."
 
-mfp.plot_flow_rate_reconnection(
+display(plotting.plot_flow_rate_reconnection(
     z_upstream, q_upstream_curve, z_downstream, q_downstream_curve,
     Q_REF, PARTICLE_AXIAL_POSITION_NONDIM, PARTICLE_RADIUS_NONDIM,
-)
+))
 ```
 
 @fig-particle-flowrate shows the flow rate upstream and downstream of the particle. Because incompressibility, the wall, and the symmetry axis hold identically in the ansatz, $Q(z)$ is constant along the channel by construction. Any deviation measures the inlet match plus whatever error the station quadrature commits.
@@ -395,12 +395,12 @@ residual_inside_particle = (
 momentum_z_residual = residual_grids["momentum_z"].clone()
 momentum_z_residual[residual_inside_particle] = float("nan")
 
-mfp.plot_residual_heatmap(
+display(plotting.plot_residual_heatmap(
     residual_radial_grid,
     residual_axial_grid,
     momentum_z_residual,
     "momentum_z"
-)
+))
 ```
 
 @fig-particle-residual shows the axial-momentum residual magnitude around the particle. The residual should be small throughout the domain, with potentially higher values near the particle where the flow is most complex.
@@ -471,14 +471,14 @@ print(f"  Worst station: z* = {worst_station_z_particle:.3f}")
 #| label: fig-predicted-vs-analytical-profiles
 #| fig-cap: "Predicted axial-velocity profile at stations vs. Hagen-Poiseuille."
 
-mfp.plot_velocity_profile_comparison(profile_evaluation_fluid_only)
+display(plotting.plot_velocity_profile_comparison(profile_evaluation_fluid_only))
 ```
 
 ```{python}
 #| label: fig-axial-velocity-profile-error
 #| fig-cap: "Axial-velocity profile error against analytical solution across stations."
 
-mfp.plot_profile_error(profile_evaluation_fluid_only)
+display(plotting.plot_profile_error(profile_evaluation_fluid_only))
 ```
 
 @fig-axial-velocity-profile-error shows the error in axial velocity profiles across all evaluation stations. The errors are **physical** (not numerical errors) - they represent the actual perturbation caused by the particle in the flow field.
@@ -492,7 +492,7 @@ mfp.plot_profile_error(profile_evaluation_fluid_only)
 radial_leakage_max = profile_evaluation_particle.predicted_ur.abs().max().item()
 radial_leakage_relative = radial_leakage_max / max(float(PEAK_VELOCITY_NONDIM), 1.0e-12)
 
-mfp.plot_radial_leakage(profile_evaluation_particle)
+display(plotting.plot_radial_leakage(profile_evaluation_particle))
 ```
 
 The radial-velocity leakage is quantified directly from the profile data. The maximum absolute radial velocity on the `{python} len(z_stations_eval)` stations is `{python} f"{radial_leakage_max:.3e}"`, corresponding to `{python} f"{radial_leakage_relative:.3%}"` of the reference velocity scale. A nonzero value is a local numerical diagnostic; it should decrease with training and sampling refinement.
@@ -519,13 +519,13 @@ analytical_pressure_baseline = mfp.hagen_poiseuille_pressure(
     REFERENCE_PRESSURE
 ).numpy()
 
-mfp.plot_pressure_through_particle(
+display(plotting.plot_pressure_through_particle(
     axial_positions_pressure,
     predicted_pressure_masked,
     analytical_pressure_baseline,
     PARTICLE_AXIAL_POSITION_NONDIM,
     PARTICLE_RADIUS_NONDIM,
-)
+))
 ```
 
 ```{python}

@@ -243,7 +243,7 @@ print(f"  Loss reduction: {training_loss_reduction:.3%}")
 #| label: fig-particle-loss
 #| fig-cap: "Stream-function training loss by component: Adam epochs, then L-BFGS closure evaluations (phase separated by the vertical line)."
 
-mfp.plot_stream_loss_history(particle_history)
+display(plotting.plot_stream_loss_history(particle_history, log_scale=True))
 ```
 
 The loss history in @fig-particle-loss shows the convergence of the training process. The objective contains only the terms that are not already exact:
@@ -287,74 +287,17 @@ print(f"Checkpoint size: {PARTICLE_CHECKPOINT.stat().st_size / 1024:.1f} KB")
 #| label: fig-particle-field
 #| fig-cap: "Velocity magnitude around the fixed particle. Solid disk marks excluded region."
 
-# Create grid for field visualization
-n_r_field = 140
-n_z_field = 260
-r_grid = torch.linspace(0.0, R, n_r_field, device=DEVICE, dtype=DTYPE)
-z_grid = torch.linspace(0.0, L, n_z_field, device=DEVICE, dtype=DTYPE)
-rr, zz = torch.meshgrid(r_grid, z_grid, indexing="ij")
-grid_pts = torch.stack([rr.reshape(-1), zz.reshape(-1)], dim=1)
-
-with torch.no_grad():
-    field_pred = particle_network(grid_pts).reshape(n_r_field, n_z_field, 3)
-    u_r_field = field_pred[..., 0]
-    u_z_field = field_pred[..., 1]
-    vel_mag = torch.hypot(u_r_field, u_z_field)
-
-# Create fluid mask (exclude particle interior)
-fluid_mask_field = ((zz - PARTICLE_AXIAL_POSITION_NONDIM) ** 2 + rr ** 2) >= PARTICLE_RADIUS_NONDIM ** 2
-velocity_magnitude_max = vel_mag[fluid_mask_field].max().item()
-velocity_magnitude_min = vel_mag[fluid_mask_field].min().item()
-
-# Plot
-import matplotlib.pyplot as plt
-
-fig, ax = plt.subplots(figsize=(8, 6))
-
-# Velocity magnitude contour
-contour = ax.contourf(
-    zz.cpu().numpy(),
-    rr.cpu().numpy(),
-    vel_mag.cpu().numpy(),
-    levels=30,
+# Use plotting module function for particle flow field
+display(plotting.plot_particle_flow_field(
+    particle_network,
+    domain,
+    particle_position=(0.0, PARTICLE_AXIAL_POSITION_NONDIM),
+    particle_radius=PARTICLE_RADIUS_NONDIM,
+    resolution_r=140,
+    resolution_z=260,
+    show_streamlines=True,
     cmap="viridis",
-)
-plt.colorbar(contour, ax=ax, label="Velocity Magnitude")
-
-# Mark particle
-particle_circle = plt.Circle(
-    (PARTICLE_AXIAL_POSITION_NONDIM, 0.0),
-    PARTICLE_RADIUS_NONDIM,
-    fill=True,
-    color="gray",
-    alpha=0.5,
-    label="Particle",
-)
-ax.add_patch(particle_circle)
-
-# Streamlines
-ax.streamplot(
-    zz.cpu().numpy(),
-    rr.cpu().numpy(),
-    u_z_field.cpu().numpy(),
-    u_r_field.cpu().numpy(),
-    color="white",
-    density=1.5,
-    linewidth=0.5,
-    arrowstyle="->",
-    arrowsize=0.8,
-)
-
-ax.set_xlabel("z*")
-ax.set_ylabel("r*")
-ax.set_title("Velocity Field Around Fixed Particle")
-ax.set_xlim(0.0, L)
-ax.set_ylim(0.0, R)
-ax.set_aspect("auto")
-ax.legend()
-
-plt.tight_layout()
-plt.show()
+))
 ```
 
 The fluid-region velocity magnitude spans `{python} f"{velocity_magnitude_min:.3e}"` to `{python} f"{velocity_magnitude_max:.3e}"` in the plotted domain. The presence of the spherical particle forces the flow around the rigid obstacle, generating local flow acceleration in the annular clearance and stagnation zones upstream and downstream.
@@ -390,9 +333,9 @@ for z_station, label in zip(profile_stations, profile_labels):
     station_profiles.append((float(z_station.item()), u_two_way, u_baseline))
 
 # Display the comparison
-mfp.plot_station_profile_comparison(
+display(plotting.plot_station_profile_comparison(
     radial_grid_profile, station_profiles, profile_labels,
-)
+))
 ```
 
 @fig-axial-velocity-profile-stations shows the axial velocity profiles at upstream and downstream stations. The largest pointwise difference between the coupled and undisturbed profiles is `{python} f"{max(profile_deviations):.3e}"` in dimensionless velocity units. These differences are **physical** (not errors) - they represent the actual perturbation caused by the particle.

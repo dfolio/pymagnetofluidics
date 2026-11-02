@@ -180,9 +180,11 @@ all_checks_df
 #| label: fig-verification-status
 #| fig-cap: "Verification status overview: (a) Counts by category, (b) Pass/fail distribution."
 
-import matplotlib.pyplot as plt
+# Use pure OO matplotlib for this dedicated multi-panel visualization
+import matplotlib.figure
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+figure = matplotlib.figure.Figure(figsize=(14, 5))
+axes = figure.subplots(1, 2)
 
 # Bar chart by category
 categories = [VERIFICATION, CONVERGENCE, VALIDATION]
@@ -216,8 +218,8 @@ axes[1].pie(
 )
 axes[1].set_title("Overall Verification Status")
 
-plt.tight_layout()
-plt.show()
+figure.tight_layout()
+display(figure)
 ```
 
 @fig-verification-status provides a visual overview of the verification results. Panel (a) shows the distribution of checks by category, and panel (b) shows the overall pass/fail ratio.

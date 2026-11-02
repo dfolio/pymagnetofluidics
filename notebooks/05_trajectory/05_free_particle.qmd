@@ -368,7 +368,7 @@ if RUN_ANIMATION:
         )
     
     print(f"Generating animation...")
-    animation_path = mfp.plot_particle_flow_animation(
+    animation_path = plotting.plot_particle_flow_animation(
         domain=domain,
         frame_field=_frame_field,
         positions=magnetic_trajectory.positions,
@@ -416,7 +416,12 @@ if RUN_ANIMATION:
     n_frames_to_show = min(4, len(magnetic_trajectory.positions))
     frame_indices = np.linspace(0, len(magnetic_trajectory.positions) - 1, n_frames_to_show, dtype=int)
     
-    fig, axes = plt.subplots(1, n_frames_to_show, figsize=(5 * n_frames_to_show, 4))
+    # Use pure OO matplotlib for this dedicated multi-panel visualization
+    import matplotlib.figure
+    import matplotlib.patches as patches
+    
+    figure = matplotlib.figure.Figure(figsize=(5 * n_frames_to_show, 4))
+    axes = figure.subplots(1, n_frames_to_show)
     
     if n_frames_to_show == 1:
         axes = [axes]
@@ -462,7 +467,7 @@ if RUN_ANIMATION:
         )
         
         # Mark particle
-        particle_circle = plt.Circle(
+        particle_circle = patches.Circle(
             (z_p, 0.0),
             PARTICLE_RADIUS_NONDIM,
             fill=True,
@@ -488,8 +493,8 @@ if RUN_ANIMATION:
         ax.set_xlim(0.0, L)
         ax.set_ylim(0.0, R)
     
-    plt.tight_layout()
-    plt.show()
+    figure.tight_layout()
+    display(figure)
 else:
     print(f"Animation disabled. Static frames not generated.")
 ```

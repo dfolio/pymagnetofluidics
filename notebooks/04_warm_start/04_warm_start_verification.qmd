@@ -544,9 +544,11 @@ mfp.render_verification_table(warm_checks)
 #| label: fig-warm-start-history
 #| fig-cap: "Total training loss against optimizer evaluations, cold and warm start at the shifted position."
 
-import matplotlib.pyplot as plt
+# Use pure OO matplotlib for this dedicated comparison visualization
+import matplotlib.figure
 
-fig, ax = plt.subplots(figsize=(8, 5))
+figure = matplotlib.figure.Figure(figsize=(8, 5))
+ax = figure.subplots()
 
 # Cold start
 totals_cold = [record[0] for record in cold_shifted_history.adam + cold_shifted_history.lbfgs]
@@ -562,8 +564,8 @@ ax.set_title("Warm-Start vs Cold-Start Convergence")
 ax.legend(fontsize=8)
 ax.grid(True, linestyle=":", alpha=0.5)
 
-plt.tight_layout()
-plt.show()
+figure.tight_layout()
+display(figure)
 ```
 
 @fig-warm-start-history shows the convergence of both cold and warm starts. The warm start should converge faster (fewer total optimizer evaluations) while achieving the same final loss.

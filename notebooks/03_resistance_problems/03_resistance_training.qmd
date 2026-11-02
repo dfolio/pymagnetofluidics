@@ -334,23 +334,17 @@ resistance_table
 ## Training History Visualization
 
 ```{python}
-#| label: fig-resistance-training-history
-#| fig-cap: "Training loss history for (a) ambient resistance network and (b) translating resistance network."
+#| label: fig-resistance-training-history-ambient
+#| fig-cap: "Training loss history for the ambient resistance network."
 
-import matplotlib.pyplot as plt
+display(plotting.plot_stream_loss_history(resistance.history_ambient, log_scale=True))
+```
 
-fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+```{python}
+#| label: fig-resistance-training-history-translating
+#| fig-cap: "Training loss history for the translating resistance network."
 
-# Ambient network history
-axes[0].set_title("Ambient Resistance Network")
-mfp.plot_stream_loss_history(resistance.history_ambient, ax=axes[0])
-
-# Translating network history
-axes[1].set_title("Translating Resistance Network")
-mfp.plot_stream_loss_history(resistance.history_translating, ax=axes[1])
-
-plt.tight_layout()
-plt.show()
+display(plotting.plot_stream_loss_history(resistance.history_translating, log_scale=True))
 ```
 
 @fig-resistance-training-history shows the training loss history for both resistance networks. Both should show good convergence with the loss decreasing significantly during training.
