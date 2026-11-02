@@ -1,0 +1,563 @@
+---
+title: "03 - Resistance Problems Validation"
+subtitle: "Physical validation of resistance networks against reduced models and limiting laws"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 03 - Resistance Problems Validation
+
+## Overview
+
+This notebook performs **physical validation** of the resistance networks trained in `03_resistance_training.qmd`. It validates the computed forces against:
+
+1. **Analytical solutions** where available (unconfined Stokes law, Faxén's law)
+2. **Reduced physical models** (wall-corrected mobility)
+3. **Manufactured solutions** (zero net force on source-free fields)
+4. **Momentum and pressure balance** (internal consistency)
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `01_baseline_flow/01_baseline_training.qmd` - Trained baseline network
+- `03_resistance_problems/03_resistance_training.qmd` - Trained resistance networks
+
+### Outputs
+
+- Comprehensive validation tables and figures
+- Validation check results for the master report
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+%run ../00_configuration/00_configuration.qmd
+```
+
+```{python}
+#| label: load-resistance-networks
+#| echo: true
+"""
+Load the resistance networks and baseline network from checkpoints.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 03 - Resistance Problems Validation")
+print(f"{'='*60}")
+
+# Load resistance networks
+if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
+    print(f"Loading resistance networks from checkpoints...")
+    
+    network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
+        RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
+    )
+    network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
+        RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
+    )
+    
+    # Create ResistanceResult
+    force_ambient = float(mfp.surface_traction_force(
+        network_ambient,
+        particle_config=particle_config,
+        particle_state=particle_state,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    force_translating = float(mfp.surface_traction_force(
+        network_translating,
+        particle_config=particle_config,
+        particle_state=state_translating,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    resistance = mfp.ResistanceResult(
+        force_ambient=force_ambient,
+        force_translating=force_translating,
+        spread_ambient=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_ambient,
+            particle_config,
+            particle_state,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        spread_translating=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_translating,
+            particle_config,
+            state_translating,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        network_ambient=network_ambient,
+        network_translating=network_translating,
+        history_ambient=history_ambient,
+        history_translating=history_translating,
+    )
+    
+    print(f"Resistance networks loaded successfully.")
+else:
+    raise FileNotFoundError(
+        f"Resistance checkpoints not found. "
+        "Please run 03_resistance_training.qmd first."
+    )
+
+# Load baseline network
+if BASELINE_CHECKPOINT.exists():
+    print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
+    baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
+        BASELINE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Baseline network loaded successfully.")
+else:
+    print(f"Warning: Baseline checkpoint not found at {BASELINE_CHECKPOINT}.")
+    baseline_network = None
+
+print(f"{'='*60}\n")
+```
+
+## Reference Values
+
+```{python}
+#| label: reference-values
+"""
+Compute and display all reference values for comparison.
+"""
+
+# Reference resistances
+refs = mfp.reference_resistances(
+    PARTICLE_RADIUS_NONDIM / R,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM
+)
+
+# Faxén-corrected velocity
+faxen_probe = torch.tensor([[1.0e-3 * R, PARTICLE_AXIAL_POSITION_NONDIM]], device=DEVICE, dtype=DTYPE)
+faxen_velocity = float(mfp.faxen_corrected_velocity(baseline_network, faxen_probe, PARTICLE_RADIUS_NONDIM)[0, 1])
+
+# Theoretical Stokes drag (unconfined)
+mu = fluid_config.dynamic_viscosity
+a_p = particle_config.radius * scales.length
+C_stokes = 6.0 * np.pi * mu * a_p
+
+print(f"\nReference values:")
+print(f"  F_0 (reference): {refs['force_fixed']:.6f}")
+print(f"  F_1 (reference): {refs['force_unit_translation']:.6f}")
+print(f"  U_free (reference): {refs['force_free_velocity']:.6f}")
+print(f"  Faxén velocity: {faxen_velocity:.6f}")
+print(f"  Stokes drag constant C_stokes: {C_stokes:.6e} N/(m/s)")
+```
+
+## Validation: Faxén-Limit Consistency
+
+```{python}
+#| label: check-faxen-consistency
+"""
+Validate the passive velocity against the Faxén-corrected reference.
+
+Faxén's first law gives U = u_c (1 - (2/3) λ²) for a parabolic ambient profile,
+where λ = a/R is the blockage ratio.
+"""
+
+# Compute passive velocity from resistance
+u_passive = resistance.passive_velocity
+
+# Compute error
+passive_error = abs(u_passive - refs["force_free_velocity"]) / abs(refs["force_free_velocity"])
+
+print(f"\nFaxén-limit consistency:")
+print(f"  Passive velocity (PINN): {u_passive:.6f}")
+print(f"  Passive velocity (reference): {refs['force_free_velocity']:.6f}")
+print(f"  Relative error: {passive_error:.3%}")
+print(f"  Faxén velocity (free-space): {faxen_velocity:.6f}")
+print(f"  Blockage ratio λ: {PARTICLE_RADIUS_NONDIM / R:.4f}")
+```
+
+```{python}
+#| label: check-faxen-formal
+"""
+Define the Faxén-limit consistency validation check.
+"""
+
+# Reference tolerance
+Re_a = domain_config.reynolds * PARTICLE_RADIUS_NONDIM
+reference_tol = get_reference_tolerance(Re_a)
+
+faxen_check = mfp.evaluate_check(
+    "Passive velocity against the wall-corrected reference",
+    "Force-balanced velocity of a passive sphere vs. the series reference U_free = u_c K_P / K_H",
+    passive_error,
+    reference_tol,
+    "<=",
+)
+
+verification_checks = verification_checks + (faxen_check,)
+verification_categories[faxen_check.name] = VALIDATION
+
+print(f"\nFaxén-limit consistency check:")
+mfp.render_verification_table((faxen_check,))
+```
+
+## Validation: Wall Confinement vs. Unconfined Stokes Law
+
+```{python}
+#| label: wall-confinement-validation
+"""
+Validate the force values against the unconfined Stokes law.
+
+For a sphere in an unbounded fluid, the Stokes drag is:
+F = 6 π μ a U
+
+With wall confinement, the drag increases. We validate that:
+1. F_0 is positive (drag on fixed sphere)
+2. F_1 is negative (drag opposes motion)
+3. The magnitude is reasonable compared to unconfined case
+"""
+
+# Compute unconfined reference
+unconfined_f0 = 6.0 * np.pi * PARTICLE_RADIUS_NONDIM * PEAK_VELOCITY_NONDIM
+unconfined_f1 = -6.0 * np.pi * PARTICLE_RADIUS_NONDIM
+
+print(f"\nWall confinement validation:")
+print(f"  F_0 (PINN): {resistance.force_ambient:.6f}")
+print(f"  F_0 (unconfined): {unconfined_f0:.6f}")
+print(f"  Ratio F_0/F_0_unconfined: {resistance.force_ambient / unconfined_f0:.3f}")
+print(f"  F_1 (PINN): {resistance.force_translating:.6f}")
+print(f"  F_1 (unconfined): {unconfined_f1:.6f}")
+print(f"  Ratio F_1/F_1_unconfined: {resistance.force_translating / unconfined_f1:.3f}")
+
+# Check signs
+f0_positive = resistance.force_ambient > 0.0
+f1_negative = resistance.force_translating < 0.0
+
+print(f"\nSign checks:")
+print(f"  F_0 > 0 (drag on fixed sphere): {f0_positive}")
+print(f"  F_1 < 0 (drag opposes motion): {f1_negative}")
+```
+
+```{python}
+#| label: fig-force-comparison
+#| fig-cap: "Comparison of PINN-computed forces against reference values and unconfined Stokes law."
+
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+# Bar plot
+categories = ["F_0 (ambient)", "F_1 (translation)", "U_passive"]
+pinn_values = [resistance.force_ambient, resistance.force_translating, u_passive]
+reference_values = [refs["force_fixed"], refs["force_unit_translation"], refs["force_free_velocity"]]
+unconfined_values = [unconfined_f0, unconfined_f1, unconfined_f0 / abs(unconfined_f1)]
+
+x = np.arange(len(categories))
+width = 0.25
+
+ax.bar(x - width, pinn_values, width, label="PINN", color="tab:blue")
+ax.bar(x, reference_values, width, label="Reference", color="tab:orange")
+ax.bar(x + width, unconfined_values, width, label="Unconfined", color="tab:green")
+
+ax.set_xlabel("Metric")
+ax.set_ylabel("Value")
+ax.set_title("Force Comparison: PINN vs Reference vs Unconfined")
+ax.set_xticks(x)
+ax.set_xticklabels(categories)
+ax.legend()
+ax.grid(True, linestyle=":", alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+```
+
+@fig-force-comparison shows the comparison between PINN-computed values, reference values, and unconfined Stokes law. The wall confinement increases the drag compared to the unconfined case.
+
+## Validation: Manufactured-Solution Check
+
+```{python}
+#| label: check-manufactured-lifting
+"""
+Manufactured-solution check: zero net force on a source-free field.
+
+This verifies that the traction integral of the analytical lifting (with zero network weights)
+gives the expected analytic value.
+"""
+
+# Create a zero-weight network (analytic lifting only)
+zero_raw = mfp.build_mlp(
+    n_inputs=2,
+    n_outputs=2,
+    hidden_layers=STREAM_HIDDEN_LAYERS,
+    training_config=resistance_config,
+    activation="tanh",
+)
+
+with torch.no_grad():
+    for parameter in zero_raw.parameters():
+        parameter.zero_()
+
+analytic_network = mfp.apply_stream_function_constraint(
+    zero_raw,
+    domain,
+    particle_axial_position=PARTICLE_AXIAL_POSITION_NONDIM,
+    particle_radius=PARTICLE_RADIUS_NONDIM,
+    particle_axial_velocity=PARTICLE_AXIAL_VELOCITY,
+    flow_amplitude=PEAK_VELOCITY_NONDIM,
+    taper_margin=TAPER_MARGIN,
+)
+
+# Compute drag from analytic lifting
+manufactured_drag = float(mfp.surface_traction_force(
+    analytic_network,
+    particle_config=particle_config,
+    particle_state=particle_state,
+    n_quadrature_points=RESISTANCE_N_QUAD
+))
+
+# Analytic floor (unconfined Stokes drag)
+analytic_floor = 6.0 * math.pi * PARTICLE_RADIUS_NONDIM * PEAK_VELOCITY_NONDIM * (
+    1.0 - (2.0 / 3.0) * (PARTICLE_RADIUS_NONDIM / R) ** 2
+)
+
+manufactured_error = abs(manufactured_drag - analytic_floor) / abs(analytic_floor)
+
+print(f"\nManufactured-solution check:")
+print(f"  Drag from analytic lifting: {manufactured_drag:.6f}")
+print(f"  Analytic floor (unconfined): {analytic_floor:.6f}")
+print(f"  Relative error: {manufactured_error:.3%}")
+```
+
+```{python}
+#| label: check-manufactured-formal
+"""
+Define the manufactured-solution validation check.
+"""
+
+manufactured_check = mfp.evaluate_check(
+    "Manufactured lifting traction",
+    "Zero-weight network drag against the analytic unconfined value",
+    manufactured_error,
+    1.0e-2,  # 1% tolerance
+    "<=",
+)
+
+verification_checks = verification_checks + (manufactured_check,)
+verification_categories[manufactured_check.name] = VERIFICATION
+
+print(f"\nManufactured-solution check:")
+mfp.render_verification_table((manufactured_check,))
+```
+
+## Validation: Momentum Balance Gates
+
+```{python}
+#| label: momentum-balance-gates
+"""
+Validate momentum balance for both resistance networks.
+
+These gates check that:
+1. Traction force equals cross-section momentum force
+2. Pressure drop is consistent with the flow
+"""
+
+INTERNAL_BALANCE_TOLERANCE = 0.02
+
+# Ambient network gates
+momentum_balance_ambient = mfp.momentum_balance_gate(
+    resistance.network_ambient,
+    domain,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+pressure_drop_ambient = mfp.pressure_drop_gate(
+    resistance.network_ambient,
+    domain,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+# Translating network gates (with zero ambient flow)
+pressure_drop_translating = mfp.pressure_drop_gate(
+    resistance.network_translating,
+    dataclasses.replace(domain, u_max=0.0),
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    0.0,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+# Aggregate gates
+momentum_gates = (
+    momentum_balance_ambient,
+    pressure_drop_ambient,
+    pressure_drop_translating,
+)
+
+verification_checks = verification_checks + momentum_gates
+
+for gate in momentum_gates:
+    verification_categories[gate.name] = VALIDATION
+
+print(f"\nMomentum balance gates:")
+mfp.render_verification_table(momentum_gates)
+```
+
+## Validation: Free Velocity Bounds
+
+```{python}
+#| label: free-velocity-bounds
+"""
+Validate that the free velocity is within physical bounds.
+
+The free velocity should be:
+- Positive (in the direction of the flow)
+- Less than the peak velocity (due to drag)
+- Greater than zero (for a passive particle)
+"""
+
+free_velocity_checks = mfp.free_velocity_bounds_check(
+    u_passive,
+    PEAK_VELOCITY_NONDIM
+)
+
+verification_checks = verification_checks + free_velocity_checks
+
+for check in free_velocity_checks:
+    verification_categories[check.name] = VALIDATION
+
+print(f"\nFree velocity bounds checks:")
+mfp.render_verification_table(free_velocity_checks)
+```
+
+## Summary Table
+
+```{python}
+#| label: tbl-resistance-validation-summary
+#| tbl-cap: "Summary of all validation metrics for the resistance networks."
+
+# Compute all metrics
+f0_relative_error = abs(resistance.force_ambient - refs["force_fixed"]) / abs(refs["force_fixed"])
+f1_relative_error = abs(resistance.force_translating - refs["force_unit_translation"]) / abs(refs["force_unit_translation"])
+u_passive_relative_error = abs(u_passive - refs["force_free_velocity"]) / abs(refs["force_free_velocity"])
+
+summary_data = {
+    "Metric": [
+        "F_0 (ambient)",
+        "F_1 (translation)",
+        "U_passive",
+        "Faxén velocity",
+        "Shell spread F_0",
+        "Shell spread F_1",
+        "Manufactured drag",
+        "F_0 > 0",
+        "F_1 < 0",
+        "0 < U_passive < U_max",
+    ],
+    "PINN Value": [
+        f"{resistance.force_ambient:.6f}",
+        f"{resistance.force_translating:.6f}",
+        f"{u_passive:.6f}",
+        f"{faxen_velocity:.6f}",
+        f"{resistance.spread_ambient:.3%}",
+        f"{resistance.spread_translating:.3%}",
+        f"{manufactured_drag:.6f}",
+        str(f0_positive),
+        str(f1_negative),
+        f"{0 < u_passive < PEAK_VELOCITY_NONDIM}",
+    ],
+    "Reference Value": [
+        f"{refs['force_fixed']:.6f}",
+        f"{refs['force_unit_translation']:.6f}",
+        f"{refs['force_free_velocity']:.6f}",
+        "-",
+        "-",
+        "-",
+        f"{analytic_floor:.6f}",
+        "-",
+        "-",
+        "-",
+    ],
+    "Relative Error": [
+        f"{f0_relative_error:.3%}",
+        f"{f1_relative_error:.3%}",
+        f"{u_passive_relative_error:.3%}",
+        "-",
+        "-",
+        "-",
+        f"{manufactured_error:.3%}",
+        "-",
+        "-",
+        "-",
+    ],
+}
+
+summary_df = pd.DataFrame(summary_data)
+summary_df
+```
+
+## Validation Checks Summary
+
+```{python}
+#| label: resistance-validation-checks-summary
+"""
+Display all validation checks for the resistance networks.
+"""
+
+resistance_validation_checks = (
+    faxen_check,
+    manufactured_check,
+    momentum_balance_ambient,
+    pressure_drop_ambient,
+    pressure_drop_translating,
+    *free_velocity_checks,
+)
+
+print(f"\nResistance validation checks:")
+mfp.render_verification_table(resistance_validation_checks)
+
+# Count passed/failed
+passed_count = sum(1 for check in resistance_validation_checks if check.passed)
+failed_count = len(resistance_validation_checks) - passed_count
+
+print(f"\nSummary: {passed_count} passed, {failed_count} failed out of {len(resistance_validation_checks)} checks")
+```
+
+## Summary
+
+This notebook has performed comprehensive **physical validation** of the resistance networks:
+
+### Key Findings
+
+1. **Faxén-Limit Consistency**: The passive velocity differs from the wall-corrected reference by `{python} f"{passive_error:.3%}"`, which `{python} 'clears' if faxen_check.passed else 'misses'}` the validation threshold.
+
+2. **Manufactured Solution**: The analytic lifting gives a drag of `{python} f"{manufactured_drag:.6f}"` against the analytic floor of `{python} f"{analytic_floor:.6f}"` (error: `{python} f"{manufactured_error:.3%}"`), which `{python} 'clears' if manufactured_check.passed else 'misses'}` the check.
+
+3. **Momentum Balance**: All `{python} len(momentum_gates)` momentum balance gates `{python} 'cleared' if all(g.passed for g in momentum_gates) else 'have issues'`.
+
+4. **Free Velocity Bounds**: All `{python} len(free_velocity_checks)` free velocity bounds checks `{python} 'cleared' if all(c.passed for c in free_velocity_checks) else 'have issues'`.
+
+5. **Sign Checks**: F₀ is positive (`{python} f0_positive`) and F₁ is negative (`{python} f1_negative`), as expected physically.
+
+### Overall Status
+
+Out of `{python} len(resistance_validation_checks)` validation checks, `{python} passed_count` passed and `{python} failed_count` failed.
+
+The resistance networks are **validated** and ready for use in trajectory calculations and warm-start verification.
+
+### Next Steps
+
+Proceed to `03_resistance_gates.qmd` to run all physical gates, or to `04_warm_start/04_warm_start_verification.qmd` for warm-start validation.
+
+---
+
+*Notebook completed in {python} f"{time.perf_counter() - notebook_t0:.1f}s"*

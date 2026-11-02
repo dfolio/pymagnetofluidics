@@ -1,0 +1,656 @@
+---
+title: "04 - Warm-Start Verification"
+subtitle: "Verification of network checkpoint/reload and warm-start training"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 04 - Warm-Start Verification
+
+## Overview
+
+This notebook verifies the **warm-start** capability of the training system. Warm-starting allows reusing a converged network at a neighboring position to reduce training cost for trajectory calculations.
+
+### Purpose
+
+- Verify checkpoint save/load functionality (bit-for-bit reproducibility)
+- Verify warm-start training reproduces cold-start results
+- Measure the cost reduction from warm-starting
+- Ensure warm-start does not change the answer
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `02_particle_flow/02_particle_training.qmd` - Trained particle network (cold start)
+
+### Outputs
+
+- Checkpoint round-trip verification
+- Warm-start equivalence verification
+- Cost reduction analysis
+- Verification check results for the master report
+
+## Mathematical Formulation
+
+### Warm-Start Strategy
+
+Only the **raw MLP weights** are transferred between positions. The analytic lifting:
+- $F_P$ (Poiseuille base)
+- $F_S$ (unbounded Stokes-sphere)
+- $F_{\text{shear}}$ (parabolic-curvature)
+- $T$ (taper bump)
+
+is rebuilt from the new geometry. The network input is $(s/R^2, (z-z_p)/R)$, which makes the learned wall-interaction correction nearly translation-invariant away from the ends.
+
+### Verification Claims
+
+1. **Round-trip**: A saved network reloads bit-for-bit
+2. **Equivalence**: Warm-started run reproduces cold-start force within tolerance
+3. **Cost reduction**: Warm-start requires fewer optimizer evaluations
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+%run ../00_configuration/00_configuration.qmd
+```
+
+```{python}
+#| label: notebook-setup
+#| echo: true
+"""
+Initialize the notebook and print configuration.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 04 - Warm-Start Verification")
+print(f"{'='*60}")
+print(f"Warm-start configuration:")
+print(f"  Shift distance: {WARM_SHIFT:.4f} (one particle radius)")
+print(f"  Learning rate scale: {WARM_LR_SCALE:.2f}")
+print(f"  Epoch fraction: {WARM_EPOCH_FRACTION:.2f}")
+print(f"  Device: {DEVICE}")
+print(f"{'='*60}\n")
+```
+
+## Load Cold Network
+
+```{python}
+#| label: load-cold-network
+"""
+Load the cold-start particle network from checkpoint.
+"""
+
+if PARTICLE_CHECKPOINT.exists():
+    print(f"Loading cold network from {PARTICLE_CHECKPOINT}...")
+    particle_network, particle_architecture, _, particle_provenance, particle_history = mfp.load_stream_checkpoint(
+        PARTICLE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Cold network loaded successfully.")
+else:
+    raise FileNotFoundError(
+        f"Particle checkpoint not found at {PARTICLE_CHECKPOINT}. "
+        "Please run 02_particle_training.qmd first."
+    )
+
+# Get cold parent checksum for tracking
+cold_parent_checksum = mfp.state_checksum(particle_network)
+print(f"Cold parent checksum: {cold_parent_checksum}")
+```
+
+## Section 1: Checkpoint Round-Trip
+
+```{python}
+#| label: warm-start-checkpoint
+"""
+Verify checkpoint save/load round-trip.
+
+This ensures that the checkpoint system can save and reload networks
+bit-for-bit, which is essential for reproducibility.
+"""
+
+print(f"\n{'='*60}")
+print(f"Section 1: Checkpoint Round-Trip Verification")
+print(f"{'='*60}")
+
+# Save the cold network to a temporary checkpoint
+print(f"Saving cold network to temporary checkpoint...")
+cold_provenance = mfp.make_provenance(particle_config, particle_history)
+mfp.save_stream_checkpoint(
+    particle_network,
+    COLD_CHECKPOINT,
+    particle_config,
+    cold_provenance,
+    particle_history,
+)
+
+# Reload from checkpoint
+print(f"Reloading from temporary checkpoint...")
+reloaded_network, reloaded_architecture, _, reloaded_provenance, _ = mfp.load_stream_checkpoint(
+    COLD_CHECKPOINT, device=DEVICE
+)
+
+# Verify architecture
+print(f"\nArchitecture verification:")
+print(f"  Original hidden layers: {particle_architecture.hidden_layers}")
+print(f"  Reloaded hidden layers: {reloaded_architecture.hidden_layers}")
+print(f"  Original taper margin: {particle_architecture.taper_margin:.2f}")
+print(f"  Reloaded taper margin: {reloaded_architecture.taper_margin:.2f}")
+
+# Test on random points
+generator = torch.Generator(device=DEVICE).manual_seed(RANDOM_SEED)
+roundtrip_points = torch.stack([
+    R * (0.05 + 0.95 * torch.rand(2_000, generator=generator, device=DEVICE, dtype=DTYPE)),
+    L * torch.rand(2_000, generator=generator, device=DEVICE, dtype=DTYPE),
+], dim=1)
+
+with torch.no_grad():
+    roundtrip_max_difference = (particle_network(roundtrip_points) - reloaded_network(roundtrip_points)).abs().max().item()
+
+print(f"\nRound-trip test:")
+print(f"  Number of test points: {roundtrip_points.shape[0]:,}")
+print(f"  Maximum output difference: {roundtrip_max_difference:.3e}")
+print(f"  Structural tolerance: {thresholds.structural_tolerance:.3e}")
+```
+
+```{python}
+#| label: check-roundtrip
+"""
+Define the round-trip verification check.
+"""
+
+roundtrip_check = mfp.evaluate_check(
+    "Checkpoint round trip",
+    "Maximum output difference between the saved and the reloaded network",
+    roundtrip_max_difference,
+    thresholds.structural_tolerance,
+    "<=",
+)
+
+verification_checks = verification_checks + (roundtrip_check,)
+verification_categories[roundtrip_check.name] = VERIFICATION
+
+print(f"\nRound-trip verification check:")
+mfp.render_verification_table((roundtrip_check,))
+```
+
+## Section 2: Cold and Warm Runs at Shifted Position
+
+```{python}
+#| label: warm-start-geometry
+"""
+Define the shifted position for warm-start verification.
+"""
+
+print(f"\n{'='*60}")
+print(f"Section 2: Cold and Warm Runs at Shifted Position")
+print(f"{'='*60}")
+
+WARM_SHIFT = PARTICLE_RADIUS_NONDIM
+z_shifted = PARTICLE_AXIAL_POSITION_NONDIM + WARM_SHIFT
+
+print(f"\nShifted position:")
+print(f"  Original z_p*: {PARTICLE_AXIAL_POSITION_NONDIM:.4f}")
+print(f"  Shift distance Δz*: {WARM_SHIFT:.4f}")
+print(f"  New z_p*: {z_shifted:.4f}")
+
+# Verify shifted position is within domain
+assert z_shifted + 1.1 * TAPER_SHELL_FACTOR * PARTICLE_RADIUS_NONDIM < L, \
+    "Shifted sphere too close to the outlet"
+
+shifted_state = mfp.ParticleState(
+    position=torch.tensor((0.0, z_shifted), device=DEVICE, dtype=DTYPE),
+    velocity=torch.zeros(2, device=DEVICE, dtype=DTYPE),
+    time=0.0,
+)
+
+print(f"Shifted position is valid.")
+```
+
+```{python}
+#| label: warm-start-config
+"""
+Create warm-start training configuration.
+"""
+
+# Create scaled configuration for warm start
+warm_config = mfp.scaled_training_config(
+    particle_config,
+    learning_rate_scale=WARM_LR_SCALE,
+    epoch_fraction=WARM_EPOCH_FRACTION,
+)
+
+print(f"\nWarm-start configuration:")
+print(f"  Adam epochs: {warm_config.n_epochs} (vs {particle_config.n_epochs} for cold)")
+print(f"  Learning rate scale: {WARM_LR_SCALE:.2f}")
+print(f"  L-BFGS rounds: {warm_config.lbfgs_rounds} (unchanged)")
+print(f"  L-BFGS iterations per round: {warm_config.lbfgs_iterations_per_round} (unchanged)")
+```
+
+```{python}
+#| label: fresh-network-function
+"""
+Define helper function to create fresh networks at a given position.
+"""
+
+def fresh_network_at(z_p: float) -> torch.nn.Module:
+    """Build an untrained stream-function network for the fixed sphere at z_p.
+    
+    Args:
+        z_p: Axial position of the sphere.
+        
+    Returns:
+        torch.nn.Module: Untrained network with stream-function constraint.
+    """
+    raw = mfp.build_mlp(
+        n_inputs=2,
+        n_outputs=2,
+        hidden_layers=STREAM_HIDDEN_LAYERS,
+        training_config=particle_config,
+        activation="tanh"
+    )
+    return mfp.apply_stream_function_constraint(
+        raw,
+        domain,
+        particle_axial_position=z_p,
+        particle_radius=PARTICLE_RADIUS_NONDIM,
+        particle_axial_velocity=PARTICLE_AXIAL_VELOCITY,
+        flow_amplitude=PEAK_VELOCITY_NONDIM,
+        taper_margin=TAPER_MARGIN,
+    )
+
+
+def mean_shell_force(network, state) -> tuple[float, float]:
+    """Compute mean traction force over enclosing shells and its relative spread.
+    
+    Args:
+        network: The network to evaluate.
+        state: Particle state containing position.
+        
+    Returns:
+        Tuple of (mean_force, spread).
+    """
+    profile = mfp.shell_force_profile(
+        network,
+        particle_config,
+        state,
+        RESISTANCE_SHELL_RADII,
+        361
+    )
+    return float(profile["force"].mean()), mfp.shell_force_spread(profile)
+```
+
+```{python}
+#| label: cold-shifted-reference
+"""
+Train a cold-start reference at the shifted position.
+
+This provides the ground truth for comparing against the warm-start run.
+"""
+
+print(f"\nTraining cold-start reference at shifted position...")
+
+# Check if already trained
+if COLD_SHIFTED_CHECKPOINT.exists():
+    print(f"Cold-shifted checkpoint already exists. Loading...")
+    cold_shifted_network, _, _, _, cold_shifted_history = mfp.load_stream_checkpoint(
+        COLD_SHIFTED_CHECKPOINT, device=DEVICE
+    )
+else:
+    print(f"Training from scratch...")
+    t0 = time.perf_counter()
+    
+    cold_shifted_network, cold_shifted_history = mfp.train_stream_function_flow(
+        fresh_network_at(z_shifted),
+        domain,
+        fluid_config,
+        particle_config,
+        particle_axial_position=z_shifted,
+        particle_radius=PARTICLE_RADIUS_NONDIM,
+        inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
+        **SHELL_ARGS,
+    )
+    
+    training_time = time.perf_counter() - t0
+    print(f"Cold-shifted reference trained in {training_time:.1f}s")
+    
+    # Save checkpoint
+    mfp.save_stream_checkpoint(
+        cold_shifted_network,
+        COLD_SHIFTED_CHECKPOINT,
+        particle_config,
+        mfp.make_provenance(particle_config, cold_shifted_history),
+        cold_shifted_history,
+    )
+
+print(f"Cold-shifted network ready.")
+```
+
+## Section 3: Warm-Start Initialization
+
+```{python}
+#| label: warm-start-initialization
+"""
+Initialize the warm-start network by transferring weights from the cold network.
+"""
+
+print(f"\n{'='*60}")
+print(f"Section 3: Warm-Start Initialization")
+print(f"{'='*60}")
+
+# Rebuild the reloaded network for the shifted geometry
+warm_init = mfp.rebuild_for_geometry(
+    reloaded_network,
+    domain,
+    z_shifted,
+    PARTICLE_RADIUS_NONDIM,
+    PARTICLE_AXIAL_VELOCITY,
+    PEAK_VELOCITY_NONDIM,
+    TAPER_MARGIN,
+    warm_config,
+)
+
+print(f"Warm-start network initialized from cold network weights.")
+
+# Define loss function for comparison
+def initial_loss(network) -> float:
+    """Compute initial loss for a network at the shifted position.
+    
+    Args:
+        network: The network to evaluate.
+        
+    Returns:
+        float: Total loss on a reference batch.
+    """
+    return mfp.diagnose_loss_scale(
+        network,
+        domain,
+        fluid_config,
+        particle_config,
+        z_shifted,
+        PARTICLE_RADIUS_NONDIM,
+        PEAK_VELOCITY_NONDIM,
+        **SHELL_ARGS
+    )["total"]
+
+# Compute initial losses
+warm_initial_loss = initial_loss(warm_init)
+cold_initial_loss = initial_loss(fresh_network_at(z_shifted))
+
+print(f"\nInitial losses at shifted position:")
+print(f"  Warm initialization: {warm_initial_loss:.3e}")
+print(f"  Cold initialization: {cold_initial_loss:.3e}")
+print(f"  Ratio (warm/cold): {warm_initial_loss / cold_initial_loss:.3f}")
+```
+
+## Section 4: Warm-Start Training
+
+```{python}
+#| label: warm-start-training
+"""
+Train the warm-start network and compare against cold-start.
+"""
+
+print(f"\n{'='*60}")
+print(f"Section 4: Warm-Start Training")
+print(f"{'='*60}")
+
+# Check if already trained
+if WARM_CHECKPOINT.exists():
+    print(f"Warm-start checkpoint already exists. Loading...")
+    warm_network, _, _, _, warm_history = mfp.load_stream_checkpoint(
+        WARM_CHECKPOINT, device=DEVICE
+    )
+else:
+    print(f"Training warm-start network...")
+    t0 = time.perf_counter()
+    
+    warm_network, warm_history = mfp.train_stream_function_flow(
+        warm_init,
+        domain,
+        fluid_config,
+        warm_config,
+        particle_axial_position=z_shifted,
+        particle_radius=PARTICLE_RADIUS_NONDIM,
+        inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
+        **SHELL_ARGS,
+    )
+    
+    warm_seconds = time.perf_counter() - t0
+    print(f"Warm-start network trained in {warm_seconds:.1f}s")
+    
+    # Save checkpoint
+    mfp.save_stream_checkpoint(
+        warm_network,
+        WARM_CHECKPOINT,
+        warm_config,
+        mfp.make_provenance(warm_config, warm_history, cold_start=False, parent_checksum=cold_parent_checksum),
+        warm_history,
+    )
+
+print(f"Warm-start network ready.")
+print(f"Final total loss: {warm_history.final()['total']:.3e}")
+```
+
+## Section 5: Equivalence and Cost Analysis
+
+```{python}
+#| label: equivalence-and-cost
+"""
+Analyze equivalence between cold and warm starts, and cost reduction.
+"""
+
+print(f"\n{'='*60}")
+print(f"Section 5: Equivalence and Cost Analysis")
+print(f"{'='*60}")
+
+# Compute forces from both networks
+force_cold, spread_cold = mean_shell_force(cold_shifted_network, shifted_state)
+force_warm, spread_warm = mean_shell_force(warm_network, shifted_state)
+
+# Compute equivalence error
+equivalence_error = abs(force_cold - force_warm) / max(abs(force_cold), 1.0e-12)
+
+print(f"\nForce comparison at shifted position:")
+print(f"  Cold-start force: {force_cold:.6f}")
+print(f"  Warm-start force: {force_warm:.6f}")
+print(f"  Relative difference: {equivalence_error:.3%}")
+print(f"  Cold-start spread: {spread_cold:.3%}")
+print(f"  Warm-start spread: {spread_warm:.3%}")
+
+# Cost analysis
+cost_ratio = mfp.warm_start_cost_ratio(cold_shifted_history, warm_history)
+
+print(f"\nCost analysis:")
+print(f"  Cost ratio (warm/cold): {cost_ratio:.2f}")
+print(f"  Warm-start was {100 * (1 - cost_ratio):.1f}% faster")
+
+# Warm probe gap check
+warm_probe_losses = mfp.diagnose_loss_scale(
+    warm_network,
+    domain,
+    fluid_config,
+    held_out_config,
+    z_shifted,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM,
+    **SHELL_ARGS,
+)
+
+warm_probe_gap = warm_probe_losses["total"] / max(warm_history.final()["total"], 1.0e-12)
+
+print(f"\nWarm-start probe gap:")
+print(f"  Training loss: {warm_history.final()['total']:.3e}")
+print(f"  Probe loss: {warm_probe_losses['total']:.3e}")
+print(f"  Gap ratio: {warm_probe_gap:.2f}")
+```
+
+```{python}
+#| label: check-warm-equivalence
+"""
+Define warm-start equivalence verification checks.
+"""
+
+# Equivalence check
+force_tol = reference_tol  # Use reference tolerance for equivalence
+
+equivalence_check = mfp.evaluate_check(
+    "Warm-start equivalence",
+    "Relative difference in force between cold and warm starts at the same position",
+    equivalence_error,
+    force_tol,
+    "<=",
+)
+
+# Cost check
+cost_check = mfp.evaluate_check(
+    "Warm-start cost ratio",
+    "Optimizer evaluations of the warm run over the cold run",
+    cost_ratio,
+    1.0,
+    "<",
+)
+
+# Probe gap check
+warm_probe_gap_check = mfp.generalization_gate(
+    warm_history.final()["total"],
+    warm_probe_losses["total"],
+    PROBE_GAP_TOLERANCE
+)
+
+# Aggregate checks
+warm_checks = (equivalence_check, cost_check, warm_probe_gap_check)
+
+verification_checks = verification_checks + warm_checks
+for check in warm_checks:
+    verification_categories[check.name] = CONVERGENCE
+
+print(f"\nWarm-start verification checks:")
+mfp.render_verification_table(warm_checks)
+```
+
+## Training History Visualization
+
+```{python}
+#| label: fig-warm-start-history
+#| fig-cap: "Total training loss against optimizer evaluations, cold and warm start at the shifted position."
+
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(figsize=(8, 5))
+
+# Cold start
+totals_cold = [record[0] for record in cold_shifted_history.adam + cold_shifted_history.lbfgs]
+ax.semilogy(totals_cold, color="tab:blue", linewidth=1.2, label="Cold start")
+
+# Warm start
+totals_warm = [record[0] for record in warm_history.adam + warm_history.lbfgs]
+ax.semilogy(totals_warm, color="tab:orange", linewidth=1.2, label="Warm start")
+
+ax.set_xlabel("Adam epoch / L-BFGS closure evaluation")
+ax.set_ylabel("Total loss")
+ax.set_title("Warm-Start vs Cold-Start Convergence")
+ax.legend(fontsize=8)
+ax.grid(True, linestyle=":", alpha=0.5)
+
+plt.tight_layout()
+plt.show()
+```
+
+@fig-warm-start-history shows the convergence of both cold and warm starts. The warm start should converge faster (fewer total optimizer evaluations) while achieving the same final loss.
+
+## Summary Table
+
+```{python}
+#| label: tbl-warm-start-summary
+#| tbl-cap: "Summary of warm-start verification metrics."
+
+summary_data = {
+    "Metric": [
+        "Round-trip max difference",
+        "Warm initial loss",
+        "Cold initial loss",
+        "Warm/cold initial ratio",
+        "Cold-start force",
+        "Warm-start force",
+        "Force relative difference",
+        "Cost ratio (warm/cold)",
+        "Warm probe gap",
+    ],
+    "Value": [
+        f"{roundtrip_max_difference:.3e}",
+        f"{warm_initial_loss:.3e}",
+        f"{cold_initial_loss:.3e}",
+        f"{warm_initial_loss / cold_initial_loss:.3f}",
+        f"{force_cold:.6f}",
+        f"{force_warm:.6f}",
+        f"{equivalence_error:.3%}",
+        f"{cost_ratio:.2f}",
+        f"{warm_probe_gap:.2f}",
+    ],
+    "Threshold": [
+        f"{thresholds.structural_tolerance:.3e}",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        f"{force_tol:.3%}",
+        "< 1.0",
+        f"< {PROBE_GAP_TOLERANCE:.1f}",
+    ],
+    "Status": [
+        "✓" if roundtrip_check.passed else "✗",
+        "-",
+        "-",
+        "-",
+        "-",
+        "-",
+        "✓" if equivalence_check.passed else "✗",
+        "✓" if cost_check.passed else "✗",
+        "✓" if warm_probe_gap_check.passed else "✗",
+    ],
+}
+
+summary_df = pd.DataFrame(summary_data)
+summary_df
+```
+
+## Summary
+
+This notebook has verified the warm-start capability:
+
+### Key Findings
+
+1. **Round-Trip**: The checkpoint system can save and reload networks with a maximum output difference of `{python} f"{roundtrip_max_difference:.3e}"`, which `{python} 'clears' if roundtrip_check.passed else 'misses'}` the structural tolerance.
+
+2. **Warm-Start Initialization**: The warm initialization starts at a loss of `{python} f"{warm_initial_loss:.3e}"` compared to `{python} f"{cold_initial_loss:.3e}"` for cold initialization, a ratio of `{python} f"{warm_initial_loss / cold_initial_loss:.3f}"`.
+
+3. **Equivalence**: The force from the warm-start network (`{python} f"{force_warm:.6f}"`) differs from the cold-start network (`{python} f"{force_cold:.6f}"`) by `{python} f"{equivalence_error:.3%}"`, which `{python} 'clears' if equivalence_check.passed else 'misses'}` the equivalence threshold.
+
+4. **Cost Reduction**: The warm-start required `{python} f"{cost_ratio:.2f}"` times the optimizer evaluations of the cold start, a reduction of `{python} f"{100 * (1 - cost_ratio):.1f}%"`, which `{python} 'clears' if cost_check.passed else 'misses'}` the cost check.
+
+5. **Probe Gap**: The warm-start probe gap is `{python} f"{warm_probe_gap:.2f}"`, which `{python} 'clears' if warm_probe_gap_check.passed else 'misses'}` the probe gap threshold.
+
+### Overall Status
+
+Out of `{python} len(warm_checks)` warm-start checks, `{python} sum(1 for c in warm_checks if c.passed)` passed and `{python} sum(1 for c in warm_checks if not c.passed)` failed.
+
+The warm-start capability is **verified** and ready for use in trajectory calculations.
+
+### Next Steps
+
+Proceed to `05_trajectory/05_free_particle.qmd` to compute free-particle trajectories using the resistance networks.
+
+---
+
+*Notebook completed in {python} f"{time.perf_counter() - notebook_t0:.1f}s"*

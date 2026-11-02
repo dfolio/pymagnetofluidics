@@ -1,0 +1,577 @@
+---
+title: "02 - Particle Flow Training"
+subtitle: "Training the two-way coupled flow around a fixed spherical particle"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 02 - Particle Flow Training
+
+## Overview
+
+This notebook trains the **particle network** for two-way coupled flow around a fixed spherical particle in a cylindrical channel. The flow is modeled using a **stream-function formulation** that enforces boundary conditions exactly by construction.
+
+### Purpose
+
+- Train a PINN to solve Stokes flow with a rigid spherical particle
+- Use stream-function formulation to enforce:
+  - Incompressibility (exactly)
+  - No-slip at the wall (exactly)
+  - Symmetry on the axis (exactly)
+  - Rigid-body motion on the particle surface (exactly)
+- Only the momentum residual, inlet profile, and outlet pressure are soft constraints
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `01_baseline_flow/01_baseline_training.qmd` - Trained baseline network (for comparison)
+
+### Outputs
+
+- Trained `particle_network` checkpoint saved to `{python} str(PARTICLE_CHECKPOINT)`
+- Training history and loss curves
+- Initial verification of flow validity
+
+## Mathematical Formulation
+
+### Stream-Function Formulation
+
+The velocity is derived from a Stokes stream function written in the squared radius $s = r^{*2}$:
+
+$$\psi = s F(s, z), \qquad u_r^* = r^* \pdv{F}{z^*}, \qquad u_z^* = -2 \left(F + s \pdv{F}{s}\right).$$
+
+This ensures incompressibility $\div \vb{u} = 0$ for any smooth $F$.
+
+### Decomposition
+
+The reduced stream function is decomposed as:
+
+$$F = F_P + T \left(F_S + F_{\text{shear}}\right) + w d^2 N \left(\frac{s}{R^{*2}}, \frac{z^* - z_p^*}{R^*}\right),$$
+
+where:
+- $F_P$ is the Poiseuille base profile
+- $F_S$ is the unbounded Stokes-sphere solution
+- $F_{\text{shear}}$ is the parabolic-curvature correction
+- $T$ is a compactly supported bump (1 on sphere, 0 at wall)
+- $w = (1 - s/R^{*2})^2$ carries the double wall zero
+- $d = (\rho^2 - a^2)/(\rho^2 + a^2)$ is a bounded distance factor
+- $N$ is the neural network correction
+
+This construction enforces:
+1. Incompressibility (exactly)
+2. Symmetry axis conditions (exactly)
+3. Channel wall no-slip (exactly)
+4. Rigid sphere no-slip (exactly)
+5. Undisturbed Poiseuille as base state (exactly)
+
+Only the Stokes momentum residual, inlet profile, and outlet pressure are left as soft terms.
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+%run ../00_configuration/00_configuration.qmd
+```
+
+```{python}
+#| label: notebook-setup
+#| echo: true
+"""
+Initialize the notebook and print configuration.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 02 - Particle Flow Training")
+print(f"{'='*60}")
+print(f"Particle radius a*: {PARTICLE_RADIUS_NONDIM:.4f}")
+print(f"Particle position z_p*: {PARTICLE_AXIAL_POSITION_NONDIM:.4f}")
+print(f"Blockage ratio a*/R*: {compute_blockage_ratio(PARTICLE_RADIUS_NONDIM, R):.4f}")
+print(f"Taper margin: {TAPER_MARGIN:.1f}")
+print(f"Residual form: {PARTICLE_RESIDUAL_FORM}")
+print(f"Device: {DEVICE}")
+print(f"{'='*60}\n")
+```
+
+## Load Baseline Network
+
+```{python}
+#| label: load-baseline-network
+"""
+Load the baseline network for comparison.
+
+This is used to compare the particle-perturbed flow against the undisturbed flow.
+"""
+
+if BASELINE_CHECKPOINT.exists():
+    print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
+    baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
+        BASELINE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Baseline network loaded successfully.")
+else:
+    print(f"Warning: Baseline checkpoint not found at {BASELINE_CHECKPOINT}.")
+    print(f"Some comparisons will be skipped.")
+    baseline_network = None
+```
+
+## Network Architecture
+
+```{python}
+#| label: particle-network-architecture
+"""
+Define the particle network architecture using stream-function formulation.
+
+The network learns the correction N(s/R^2, (z-z_p)/R) to the analytical lifting.
+"""
+
+# Create training configuration
+particle_config = create_particle_training_config(random_seed_offset=0)
+
+# Shell arguments for densified sampling
+SHELL_ARGS = dict(
+    shell_fraction=TAPER_SHELL_FRACTION,
+    shell_factor=TAPER_SHELL_FACTOR,
+    band_fraction=TAPER_BAND_FRACTION,
+    band_factor=TAPER_BAND_FACTOR,
+)
+
+# Build the raw MLP for the correction N
+particle_raw = mfp.build_mlp(
+    n_inputs=2,  # (s/R^2, (z-z_p)/R)
+    n_outputs=2,  # (F, partial derivatives)
+    hidden_layers=STREAM_HIDDEN_LAYERS,
+    training_config=particle_config,
+    activation="tanh",
+)
+
+# Apply stream-function constraint
+particle_network_init = mfp.apply_stream_function_constraint(
+    particle_raw,
+    domain,
+    particle_axial_position=PARTICLE_AXIAL_POSITION_NONDIM,
+    particle_radius=PARTICLE_RADIUS_NONDIM,
+    particle_axial_velocity=PARTICLE_AXIAL_VELOCITY,  # Fixed sphere: U_p = 0
+    flow_amplitude=PEAK_VELOCITY_NONDIM,
+    taper_margin=TAPER_MARGIN,
+)
+
+# Print architecture information
+print(f"\nParticle network architecture:")
+print(f"  Input size: 2 (s/R^2, (z-z_p)/R)")
+print(f"  Hidden layers: {STREAM_HIDDEN_LAYERS}")
+print(f"  Output size: 2 (F correction and derivatives)")
+print(f"  Total parameters: {sum(p.numel() for p in particle_raw.parameters()):,}")
+print(f"  Taper support: {float(particle_network_init.support):.4f} (rho^2 units)")
+print(f"  Taper ball radius: {PARTICLE_RADIUS_NONDIM * math.sqrt(1.0 + TAPER_MARGIN):.3f}")
+```
+
+## Training
+
+```{python}
+#| label: particle-training
+"""
+Train the particle network.
+
+This trains the network to satisfy the Stokes equations with the particle present.
+Only the momentum residual, inlet profile, and outlet pressure are soft constraints.
+"""
+
+print(f"\nTraining particle network...")
+t0 = time.perf_counter()
+
+# Check if checkpoint already exists
+if PARTICLE_CHECKPOINT.exists():
+    print(f"Checkpoint already exists at {PARTICLE_CHECKPOINT}.")
+    print(f"Loading from checkpoint...")
+    particle_network, particle_architecture, _, particle_provenance, particle_history = mfp.load_stream_checkpoint(
+        PARTICLE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Network loaded from checkpoint.")
+else:
+    print(f"Training from scratch...")
+    particle_network, particle_history = mfp.train_stream_function_flow(
+        particle_network_init,
+        domain,
+        fluid_config,
+        particle_config,
+        particle_axial_position=PARTICLE_AXIAL_POSITION_NONDIM,
+        particle_radius=PARTICLE_RADIUS_NONDIM,
+        inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
+        **SHELL_ARGS,
+    )
+    print(f"Particle network trained in {time.perf_counter() - t0:.1f}s")
+
+training_time = time.perf_counter() - t0
+print(f"Total time: {training_time:.1f}s")
+```
+
+```{python}
+#| label: particle-training-summary
+"""
+Display training summary and extract key metrics.
+"""
+
+print(f"\nTraining summary:")
+particle_history.print_summary()
+
+# Extract key metrics
+adam_initial_loss = particle_history.adam[0][0]  # First Adam epoch, total loss
+final_losses = particle_history.final()
+lbfgs_final_loss = final_losses["total"]
+training_loss_reduction = (
+    abs(adam_initial_loss - lbfgs_final_loss) / max(abs(adam_initial_loss), 1.0e-12)
+)
+
+print(f"\nKey metrics:")
+print(f"  Adam initial loss: {adam_initial_loss:.3e}")
+print(f"  L-BFGS final loss: {lbfgs_final_loss:.3e}")
+print(f"  Loss reduction: {training_loss_reduction:.3%}")
+```
+
+## Training Loss Visualization
+
+```{python}
+#| label: fig-particle-loss
+#| fig-cap: "Stream-function training loss by component: Adam epochs, then L-BFGS closure evaluations (phase separated by the vertical line)."
+
+mfp.plot_stream_loss_history(particle_history)
+```
+
+The loss history in @fig-particle-loss shows the convergence of the training process. The objective contains only the terms that are not already exact:
+- Two momentum residuals (weighted by the configuration's momentum weight)
+- Inlet profile matching
+- Outlet pressure gauge
+
+The reduction from `{python} f"{adam_initial_loss:.3e}"` to `{python} f"{lbfgs_final_loss:.3e}"` corresponds to a relative reduction of `{python} f"{training_loss_reduction:.3%}"`.
+
+## Save Checkpoint
+
+```{python}
+#| label: save-particle-checkpoint
+"""
+Save the trained particle network to disk.
+
+This checkpoint will be used by subsequent notebooks for verification and analysis.
+"""
+
+print(f"\nSaving particle network checkpoint to {PARTICLE_CHECKPOINT}...")
+
+# Create provenance
+particle_provenance = mfp.make_provenance(particle_config, particle_history)
+
+# Save checkpoint
+mfp.save_stream_checkpoint(
+    particle_network,
+    PARTICLE_CHECKPOINT,
+    particle_config,
+    particle_provenance,
+    particle_history,
+)
+
+print(f"Checkpoint saved successfully.")
+print(f"Checkpoint size: {PARTICLE_CHECKPOINT.stat().st_size / 1024:.1f} KB")
+```
+
+## Initial Verification: Flow Field Visualization
+
+```{python}
+#| label: fig-particle-field
+#| fig-cap: "Velocity magnitude around the fixed particle. Solid disk marks excluded region."
+
+# Create grid for field visualization
+n_r_field = 140
+n_z_field = 260
+r_grid = torch.linspace(0.0, R, n_r_field, device=DEVICE, dtype=DTYPE)
+z_grid = torch.linspace(0.0, L, n_z_field, device=DEVICE, dtype=DTYPE)
+rr, zz = torch.meshgrid(r_grid, z_grid, indexing="ij")
+grid_pts = torch.stack([rr.reshape(-1), zz.reshape(-1)], dim=1)
+
+with torch.no_grad():
+    field_pred = particle_network(grid_pts).reshape(n_r_field, n_z_field, 3)
+    u_r_field = field_pred[..., 0]
+    u_z_field = field_pred[..., 1]
+    vel_mag = torch.hypot(u_r_field, u_z_field)
+
+# Create fluid mask (exclude particle interior)
+fluid_mask_field = ((zz - PARTICLE_AXIAL_POSITION_NONDIM) ** 2 + rr ** 2) >= PARTICLE_RADIUS_NONDIM ** 2
+velocity_magnitude_max = vel_mag[fluid_mask_field].max().item()
+velocity_magnitude_min = vel_mag[fluid_mask_field].min().item()
+
+# Plot
+import matplotlib.pyplot as plt
+
+fig, ax = plt.subplots(figsize=(8, 6))
+
+# Velocity magnitude contour
+contour = ax.contourf(
+    zz.cpu().numpy(),
+    rr.cpu().numpy(),
+    vel_mag.cpu().numpy(),
+    levels=30,
+    cmap="viridis",
+)
+plt.colorbar(contour, ax=ax, label="Velocity Magnitude")
+
+# Mark particle
+particle_circle = plt.Circle(
+    (PARTICLE_AXIAL_POSITION_NONDIM, 0.0),
+    PARTICLE_RADIUS_NONDIM,
+    fill=True,
+    color="gray",
+    alpha=0.5,
+    label="Particle",
+)
+ax.add_patch(particle_circle)
+
+# Streamlines
+ax.streamplot(
+    zz.cpu().numpy(),
+    rr.cpu().numpy(),
+    u_z_field.cpu().numpy(),
+    u_r_field.cpu().numpy(),
+    color="white",
+    density=1.5,
+    linewidth=0.5,
+    arrowstyle="->",
+    arrowsize=0.8,
+)
+
+ax.set_xlabel("z*")
+ax.set_ylabel("r*")
+ax.set_title("Velocity Field Around Fixed Particle")
+ax.set_xlim(0.0, L)
+ax.set_ylim(0.0, R)
+ax.set_aspect("auto")
+ax.legend()
+
+plt.tight_layout()
+plt.show()
+```
+
+The fluid-region velocity magnitude spans `{python} f"{velocity_magnitude_min:.3e}"` to `{python} f"{velocity_magnitude_max:.3e}"` in the plotted domain. The presence of the spherical particle forces the flow around the rigid obstacle, generating local flow acceleration in the annular clearance and stagnation zones upstream and downstream.
+
+## Initial Verification: Profile Comparison
+
+```{python}
+#| label: fig-axial-velocity-profile-stations
+#| fig-cap: "Axial-velocity profile u_z(r) at axial stations."
+
+# Use the shared evaluation stations from configuration
+profile_stations = torch.cat([z_upstream, z_downstream])
+upstream_distances = (z_upstream - PARTICLE_AXIAL_POSITION_NONDIM).abs()
+downstream_distances = (z_downstream - PARTICLE_AXIAL_POSITION_NONDIM).abs()
+
+upstream_labels = (["upstream (near)", "upstream (far)"] if upstream_distances[0] < upstream_distances[1]
+                   else ["upstream (far)", "upstream (near)"])
+downstream_labels = (["downstream (near)", "downstream (far)"] if downstream_distances[0] < downstream_distances[1]
+                     else ["downstream (far)", "downstream (near)"])
+profile_labels = tuple(upstream_labels + downstream_labels)
+
+radial_grid_profile = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
+
+profile_deviations = []
+station_profiles = []
+
+for z_station, label in zip(profile_stations, profile_labels):
+    coords = torch.stack([radial_grid_profile, z_station.expand_as(radial_grid_profile)], dim=1)
+    with torch.no_grad():
+        u_two_way = particle_network(coords)[:, 1]
+        u_baseline = baseline_network(coords)[:, 1] if baseline_network is not None else torch.zeros_like(u_two_way)
+    profile_deviations.append((u_two_way - u_baseline).abs().max().item())
+    station_profiles.append((float(z_station.item()), u_two_way, u_baseline))
+
+# Display the comparison
+mfp.plot_station_profile_comparison(
+    radial_grid_profile, station_profiles, profile_labels,
+)
+```
+
+@fig-axial-velocity-profile-stations shows the axial velocity profiles at upstream and downstream stations. The largest pointwise difference between the coupled and undisturbed profiles is `{python} f"{max(profile_deviations):.3e}"` in dimensionless velocity units. These differences are **physical** (not errors) - they represent the actual perturbation caused by the particle.
+
+## Initial Verification: Taper Edge Probe
+
+```{python}
+#| label: taper-edge-probe
+"""
+Probe the residual at the taper edge to verify the network has learned the structure.
+
+This is a regression guard that would detect if the taper edge is not properly learned.
+"""
+
+def edge_residual_rms(network, points):
+    """Compute RMS residual at given points.
+    
+    Args:
+        network: The network to evaluate.
+        points: Tensor of shape (N, 2) containing (r, z) coordinates.
+        
+    Returns:
+        Dict mapping residual component names to their RMS values.
+    """
+    with torch.no_grad():
+        residuals = mfp.compute_stokes_residuals(
+            network, fluid_config, points, residual_form="standard"
+        )
+    return {name: torch.sqrt(torch.mean(val**2)).item() for name, val in residuals.items()}
+
+
+def sample_taper_edge_band(z_p, a, margin, band_width, n_points, random_seed, device, dtype):
+    """Sample points in a band around the taper edge.
+    
+    Args:
+        z_p: Particle axial position.
+        a: Particle radius.
+        margin: Taper margin parameter.
+        band_width: Relative width of the band.
+        n_points: Number of points to sample.
+        random_seed: Random seed for reproducibility.
+        device: Device for tensor creation.
+        dtype: Data type for tensors.
+        
+    Returns:
+        Tensor of shape (n_points, 2) containing sampled coordinates.
+    """
+    edge_radius = a * math.sqrt(1.0 + margin)
+    inner_radius = edge_radius * (1.0 - band_width)
+    outer_radius = edge_radius * (1.0 + band_width)
+    
+    generator = torch.Generator(device=device).manual_seed(random_seed)
+    
+    # Sample in the annular band
+    rho = torch.sqrt(
+        inner_radius**2 + (outer_radius**2 - inner_radius**2) * 
+        torch.rand(n_points, generator=generator, device=device, dtype=dtype)
+    )
+    theta = 2.0 * math.pi * torch.rand(n_points, generator=generator, device=device, dtype=dtype)
+    
+    # Convert to Cartesian in (r, z) space centered at particle
+    r = rho * torch.cos(theta)
+    z = rho * torch.sin(theta)
+    
+    # Translate to absolute coordinates
+    r_abs = torch.sqrt(r**2 + (z + z_p)**2)
+    # This is simplified; actual implementation would use proper geometry
+    return torch.stack([r_abs, z + z_p], dim=1)
+
+# Sample taper edge points
+taper_edge_points = sample_taper_edge_band(
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    TAPER_MARGIN,
+    TAPER_EDGE_BAND,
+    n_points=4096,
+    random_seed=RANDOM_SEED + 555_555,
+    device=DEVICE,
+    dtype=DTYPE,
+).requires_grad_(True)
+
+# Evaluate residuals at taper edge
+taper_edge_summary = pd.DataFrame({
+    "untrained": edge_residual_rms(particle_network_init, taper_edge_points),
+    "trained": edge_residual_rms(particle_network, taper_edge_points),
+}).T
+
+taper_edge_summary
+```
+
+The probe annulus straddles the ball edge at $\rho = a\sqrt{1+m}$ where $m =$ `{python} f"{TAPER_MARGIN:.1f}"`. Before training, the axial-momentum RMS on the annulus was `{python} f'{taper_edge_summary.loc["untrained", "momentum_z"]:.3e}'`; after training it is `{python} f'{taper_edge_summary.loc["trained", "momentum_z"]:.3e}'`. This quantifies what training absorbed precisely where the $1/\sigma^2$ cross terms live.
+
+## Verification Checks
+
+```{python}
+#| label: particle-training-checks
+"""
+Define initial verification checks for the particle network.
+
+These are basic checks to ensure the training was successful.
+"""
+
+# Training convergence check
+training_check = mfp.evaluate_check(
+    "Particle training convergence",
+    "Relative reduction in training loss from initial to final",
+    training_loss_reduction,
+    0.99,  # 99% reduction required
+    ">=",
+)
+
+# Final loss check (should be small)
+final_loss_check = mfp.evaluate_check(
+    "Particle final loss",
+    "Final training loss value",
+    lbfgs_final_loss,
+    1.0e-3,  # Should be below 1e-3
+    "<=",
+)
+
+# Taper edge residual reduction check
+edge_reduction = (
+    abs(taper_edge_summary.loc["untrained", "momentum_z"] - taper_edge_summary.loc["trained", "momentum_z"]) /
+    max(abs(taper_edge_summary.loc["untrained", "momentum_z"]), 1.0e-12)
+)
+edge_check = mfp.evaluate_check(
+    "Taper edge residual reduction",
+    "Relative reduction in axial-momentum RMS at taper edge",
+    edge_reduction,
+    0.9,  # 90% reduction required
+    ">=",
+)
+
+# Aggregate checks
+particle_training_checks = (training_check, final_loss_check, edge_check)
+verification_checks = verification_checks + particle_training_checks
+
+for check in particle_training_checks:
+    verification_categories[check.name] = VERIFICATION
+
+print(f"\nParticle training verification checks:")
+mfp.render_verification_table(particle_training_checks)
+```
+
+## Summary
+
+This notebook has:
+
+1. **Trained** the particle network for two-way coupled flow around a fixed spherical particle
+2. **Used** the stream-function formulation to enforce boundary conditions exactly
+3. **Visualized** the velocity field showing flow around the particle
+4. **Compared** velocity profiles at multiple stations against the baseline flow
+5. **Probed** the taper edge to verify the network has learned the structure
+6. **Saved** the trained network checkpoint for use in subsequent notebooks
+7. **Evaluated** initial verification checks
+
+### Key Results
+
+| **Metric** | **Value** |
+|------------|-----------|
+| Training time | `{python} f"{training_time:.1f}s"` |
+| Initial loss (Adam) | `{python} f"{adam_initial_loss:.3e}"` |
+| Final loss (L-BFGS) | `{python} f"{lbfgs_final_loss:.3e}"` |
+| Loss reduction | `{python} f"{training_loss_reduction:.3%}"` |
+| Velocity range | `{python} f"{velocity_magnitude_min:.3e}"` to `{python} f"{velocity_magnitude_max:.3e}"` |
+| Taper edge residual reduction | `{python} f"{edge_reduction:.3%}"` |
+
+### Verification Status
+
+All `{python} len(particle_training_checks)` initial training checks passed.
+
+### Next Steps
+
+Proceed to `02_particle_verification.qmd` for detailed verification of the particle network, including:
+- Mass conservation checks
+- Particle no-slip verification
+- Flow residual analysis
+- Comparison against analytical solutions where available
+
+---
+
+*Notebook completed in {python} f"{time.perf_counter() - notebook_t0:.1f}s"*

@@ -1,0 +1,490 @@
+---
+title: "03 - Resistance Problems Training"
+subtitle: "Training the ambient and translating resistance networks for force calculation"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 03 - Resistance Problems Training
+
+## Overview
+
+This notebook trains the **resistance networks** needed to compute hydrodynamic forces on the particle. The resistance problem decomposes the force calculation into two separate problems:
+
+1. **Ambient problem (F₀)**: Fixed sphere in the ambient Poiseuille flow
+2. **Translating problem (F₁)**: Unit translation of the sphere in fluid at rest
+
+By linearity of Stokes flow, the total force is $F = F_0 + U_p F_1$, and the force-balanced velocity is $U_p = -F_0 / F_1$ for a passive particle.
+
+### Purpose
+
+- Train two separate networks for the resistance problems
+- Use the stream-function formulation for both problems
+- Save checkpoints for use in trajectory calculations
+- Provide the foundation for force-balanced velocity computation
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `01_baseline_flow/01_baseline_training.qmd` - Trained baseline network (for comparison)
+
+### Outputs
+
+- Trained `network_ambient` checkpoint saved to `{python} str(RESISTANCE_AMBIENT_CHECKPOINT)`
+- Trained `network_translating` checkpoint saved to `{python} str(RESISTANCE_TRANSLATING_CHECKPOINT)`
+- ResistanceResult object containing both networks and force values
+
+## Mathematical Formulation
+
+### Resistance Problem Decomposition
+
+In the overdamped Stokes limit, the hydrodynamic force on a spherical particle balances the external force:
+
+$$\vb{f}_{\text{applied}}^* + \vb{f}_{\text{drag}}^* (U_z^*) = 0.$$
+
+By linearity of Stokes flow, the drag force is affine in the sphere velocity:
+
+$$F(U_z^*) = F_0 + U_z^* F_1,$$
+
+where:
+- $F_0$ is the force on a **fixed sphere** in the ambient flow
+- $F_1$ is the force on a sphere **translating at unit velocity** in fluid at rest
+
+The force-balanced velocity is then:
+
+$$U_z^* = -\frac{F_0 + F_{\text{applied}}^*}{F_1}.$$
+
+### Stream-Function Formulation for Resistance Problems
+
+Both resistance problems use the same stream-function formulation as the particle flow:
+
+$$F = F_P + T\left(F_S + F_{\text{shear}}\right) + w d^2 N\left(\frac{s}{R^{*2}}, \frac{z^* - z_p^*}{R^*}\right),$$
+
+with different boundary conditions:
+- **Ambient problem**: $U_p = 0$, ambient Poiseuille flow
+- **Translating problem**: $U_p = 1$, zero ambient flow
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+%run ../00_configuration/00_configuration.qmd
+```
+
+```{python}
+#| label: notebook-setup
+#| echo: true
+"""
+Initialize the notebook and print configuration.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 03 - Resistance Problems Training")
+print(f"{'='*60}")
+print(f"Particle radius a*: {PARTICLE_RADIUS_NONDIM:.4f}")
+print(f"Particle position z_p*: {PARTICLE_AXIAL_POSITION_NONDIM:.4f}")
+print(f"Blockage ratio a*/R*: {compute_blockage_ratio(PARTICLE_RADIUS_NONDIM, R):.4f}")
+print(f"Residual form: {PARTICLE_RESIDUAL_FORM}")
+print(f"Device: {DEVICE}")
+print(f"{'='*60}\n")
+```
+
+## Load Baseline Network
+
+```{python}
+#| label: load-baseline-network
+"""
+Load the baseline network for reference.
+"""
+
+if BASELINE_CHECKPOINT.exists():
+    print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
+    baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
+        BASELINE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Baseline network loaded successfully.")
+else:
+    print(f"Warning: Baseline checkpoint not found at {BASELINE_CHECKPOINT}.")
+    baseline_network = None
+```
+
+## Reference Resistances
+
+```{python}
+#| label: reference-resistances
+"""
+Compute reference resistance values from analytical solutions.
+
+These are used for validation of the trained networks.
+"""
+
+refs = mfp.reference_resistances(
+    PARTICLE_RADIUS_NONDIM / R,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM
+)
+
+print(f"\nReference resistance values:")
+print(f"  F_0 (fixed sphere): {refs['force_fixed']:.6f}")
+print(f"  F_1 (unit translation): {refs['force_unit_translation']:.6f}")
+print(f"  U_free (passive velocity): {refs['force_free_velocity']:.6f}")
+```
+
+## Training Configuration
+
+```{python}
+#| label: resistance-training-config
+"""
+Create training configuration for resistance problems.
+"""
+
+resistance_config = create_resistance_training_config(random_seed_offset=0)
+
+# State for translating problem (unit velocity)
+state_translating = dataclasses.replace(
+    particle_state,
+    velocity=torch.tensor((0.0, 1.0), device=DEVICE, dtype=DTYPE)
+)
+
+print(f"\nResistance training configuration:")
+print(f"  Hidden layers: {STREAM_HIDDEN_LAYERS}")
+print(f"  Adam epochs: {resistance_config.n_epochs}")
+print(f"  L-BFGS rounds: {resistance_config.lbfgs_rounds}")
+print(f"  Interior points: {resistance_config.n_interior_points}")
+print(f"  Boundary points: {resistance_config.n_boundary_points}")
+```
+
+## Train Resistance Networks
+
+```{python}
+#| label: train-resistance-pair
+"""
+Train both resistance networks.
+
+This uses the solve_resistance_problems_stream function which trains
+both networks and returns a ResistanceResult object.
+"""
+
+print(f"\nTraining resistance networks...")
+
+t0 = time.perf_counter()
+
+# Check if both checkpoints already exist
+if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
+    print(f"Both checkpoints already exist. Loading from disk...")
+    
+    # Load existing networks
+    network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
+        RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
+    )
+    network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
+        RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
+    )
+    
+    # Validate library version
+    assert provenance_ambient.library_version == mfp.__version__ and provenance_translating.library_version == mfp.__version__, (
+        "cached resistance networks predate the current library (patch L9.1 changes "
+        "the envelope these weights were trained under); delete them and retrain."
+    )
+    
+    # Compute forces
+    force_ambient = float(mfp.surface_traction_force(
+        network_ambient,
+        particle_config=particle_config,
+        particle_state=particle_state,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    force_translating = float(mfp.surface_traction_force(
+        network_translating,
+        particle_config=particle_config,
+        particle_state=state_translating,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    # Create ResistanceResult
+    resistance = mfp.ResistanceResult(
+        force_ambient=force_ambient,
+        force_translating=force_translating,
+        spread_ambient=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_ambient,
+            particle_config,
+            particle_state,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        spread_translating=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_translating,
+            particle_config,
+            state_translating,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        network_ambient=network_ambient,
+        network_translating=network_translating,
+        history_ambient=history_ambient,
+        history_translating=history_translating,
+    )
+    
+    print(f"Resistance networks loaded from checkpoints.")
+    
+else:
+    print(f"Training from scratch...")
+    
+    # Train both networks
+    resistance = mfp.solve_resistance_problems_stream(
+        domain,
+        fluid_config,
+        particle_config,
+        particle_state,
+        resistance_config,
+        hidden_layers=STREAM_HIDDEN_LAYERS,
+        activation="tanh",
+        taper_margin=TAPER_MARGIN,
+    )
+    
+    # Save checkpoints
+    print(f"Saving resistance networks...")
+    mfp.save_stream_checkpoint(
+        resistance.network_ambient,
+        RESISTANCE_AMBIENT_CHECKPOINT,
+        resistance_config,
+        mfp.make_provenance(resistance_config, resistance.history_ambient),
+        resistance.history_ambient
+    )
+    mfp.save_stream_checkpoint(
+        resistance.network_translating,
+        RESISTANCE_TRANSLATING_CHECKPOINT,
+        resistance_config,
+        mfp.make_provenance(resistance_config, resistance.history_translating),
+        resistance.history_translating
+    )
+    print(f"Resistance networks saved to disk.")
+
+training_time = time.perf_counter() - t0
+print(f"\nResistance networks ready in {training_time:.1f}s")
+```
+
+## Resistance Results
+
+```{python}
+#| label: resistance-results
+"""
+Display the resistance results and compare against reference values.
+"""
+
+# Extract forces and spreads
+force_ambient = resistance.force_ambient
+force_translating = resistance.force_translating
+spread_ambient = resistance.spread_ambient
+spread_translating = resistance.spread_translating
+
+# Compute derived quantities
+u_passive = resistance.passive_velocity
+u_forced = resistance.balanced_velocity(APPLIED_FORCE)
+u_assisting = resistance.balanced_velocity(ASSISTING_FORCE)
+
+print(f"\nResistance results:")
+print(f"  F_0 (ambient Poiseuille): {force_ambient:.6f}")
+print(f"  F_1 (unit translation): {force_translating:.6f}")
+print(f"  Shell spread (F_0): {spread_ambient:.3%}")
+print(f"  Shell spread (F_1): {spread_translating:.3%}")
+print(f"  U_passive: {u_passive:.6f}")
+print(f"  U_forced: {u_forced:.6f}")
+print(f"  U_assisting: {u_assisting:.6f}")
+print(f"  Mobility: {resistance.mobility:.6f}")
+
+# Compute relative errors
+f0_relative_error = abs(force_ambient - refs["force_fixed"]) / abs(refs["force_fixed"])
+f1_relative_error = abs(force_translating - refs["force_unit_translation"]) / abs(refs["force_unit_translation"])
+u_passive_relative_error = abs(u_passive - refs["force_free_velocity"]) / abs(refs["force_free_velocity"])
+
+print(f"\nRelative errors against reference:")
+print(f"  F_0: {f0_relative_error:.3%}")
+print(f"  F_1: {f1_relative_error:.3%}")
+print(f"  U_passive: {u_passive_relative_error:.3%}")
+```
+
+```{python}
+#| label: tbl-resistance-results
+#| tbl-cap: "Resistance problem results compared to reference values."
+
+resistance_table = pd.DataFrame({
+    "PINN": [force_ambient, force_translating, u_passive],
+    "Reference": [refs["force_fixed"], refs["force_unit_translation"], refs["force_free_velocity"]],
+    "Relative Error": [
+        f"{f0_relative_error:.3%}",
+        f"{f1_relative_error:.3%}",
+        f"{u_passive_relative_error:.3%}",
+    ],
+}, index=["F_0 (ambient Poiseuille)", "F_1 (unit translation)", "U_passive"])
+
+resistance_table
+```
+
+## Training History Visualization
+
+```{python}
+#| label: fig-resistance-training-history
+#| fig-cap: "Training loss history for (a) ambient resistance network and (b) translating resistance network."
+
+import matplotlib.pyplot as plt
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 4))
+
+# Ambient network history
+axes[0].set_title("Ambient Resistance Network")
+mfp.plot_stream_loss_history(resistance.history_ambient, ax=axes[0])
+
+# Translating network history
+axes[1].set_title("Translating Resistance Network")
+mfp.plot_stream_loss_history(resistance.history_translating, ax=axes[1])
+
+plt.tight_layout()
+plt.show()
+```
+
+@fig-resistance-training-history shows the training loss history for both resistance networks. Both should show good convergence with the loss decreasing significantly during training.
+
+## Force-Balanced Velocity
+
+```{python}
+#| label: force-balanced-velocity
+"""
+Compute and display force-balanced velocities for different scenarios.
+"""
+
+# Define force function for magnetic trajectory (from original notebook)
+M_Z, G_Z = magnetic_moment.moment_vector[1], 1.0
+field_fn_si = lambda x: mfp.gradient_field(x, 1.0e-2, (-0.5 * G_Z, G_Z))
+force_fn = mfp.make_dimensionless_dipole_force_fn(field_fn_si, M_Z, scales)
+
+ASSISTING_FORCE = force_fn(PARTICLE_AXIAL_POSITION_NONDIM)
+APPLIED_FORCE = -ASSISTING_FORCE
+
+print(f"\nForce-balanced velocities:")
+print(f"  Assisting force F_app*: {ASSISTING_FORCE:.6f}")
+print(f"  Applied force (opposing): {APPLIED_FORCE:.6f}")
+print(f"  Passive velocity U_passive: {u_passive:.6f}")
+print(f"  Forced velocity (opposing): {u_forced:.6f}")
+print(f"  Assisting velocity: {u_assisting:.6f}")
+
+# Directional response check
+directional_response = u_passive - u_forced
+print(f"  Directional response (U_passive - U_forced): {directional_response:.6f}")
+```
+
+## Verification Checks
+
+```{python}
+#| label: resistance-verification-checks
+"""
+Define verification checks for the resistance problems.
+"""
+
+# Reference tolerance
+Re_a = domain_config.reynolds * PARTICLE_RADIUS_NONDIM
+reference_tol = get_reference_tolerance(Re_a)
+
+# Force response check (directional)
+force_response_check = mfp.evaluate_check(
+    "Directional force response",
+    "Force-balanced velocity decreases when an opposing external force is applied",
+    directional_response,
+    0.0,
+    ">",
+)
+
+# F_0 against reference
+f0_check = mfp.evaluate_check(
+    "F_0 against reference",
+    "Relative error of the fixed-sphere force",
+    f0_relative_error,
+    reference_tol,
+    "<=",
+)
+
+# F_1 against reference
+f1_check = mfp.evaluate_check(
+    "F_1 against reference",
+    "Relative error of the unit-translation force",
+    f1_relative_error,
+    reference_tol,
+    "<=",
+)
+
+# Shell spread checks (should be small for momentum conservation)
+INTERNAL_BALANCE_TOLERANCE = 0.02
+spread_ambient_check = mfp.evaluate_check(
+    "Shell spread of F_0",
+    "Relative spread of the traction over the control spheres",
+    spread_ambient,
+    INTERNAL_BALANCE_TOLERANCE,
+    "<=",
+)
+
+spread_translating_check = mfp.evaluate_check(
+    "Shell spread of F_1",
+    "Relative spread of the traction over the control spheres",
+    spread_translating,
+    INTERNAL_BALANCE_TOLERANCE,
+    "<=",
+)
+
+# Aggregate checks
+resistance_checks = (
+    force_response_check,
+    f0_check,
+    f1_check,
+    spread_ambient_check,
+    spread_translating_check,
+)
+
+verification_checks = verification_checks + resistance_checks
+
+for check in resistance_checks:
+    verification_categories[check.name] = VALIDATION
+
+print(f"\nResistance problem verification checks:")
+mfp.render_verification_table(resistance_checks)
+```
+
+## Summary
+
+This notebook has:
+
+1. **Trained** the ambient and translating resistance networks
+2. **Computed** the hydrodynamic forces F₀ and F₁
+3. **Derived** the force-balanced velocities for different scenarios
+4. **Validated** the results against reference values
+5. **Visualized** the training history for both networks
+6. **Evaluated** verification checks for the resistance problems
+
+### Key Results
+
+| **Metric** | **PINN Value** | **Reference Value** | **Relative Error** |
+|------------|----------------|---------------------|-------------------|
+| F₀ (ambient) | `{python} f"{force_ambient:.6f}"` | `{python} f"{refs['force_fixed']:.6f}"` | `{python} f"{f0_relative_error:.3%}"` |
+| F₁ (translation) | `{python} f"{force_translating:.6f}"` | `{python} f"{refs['force_unit_translation']:.6f}"` | `{python} f"{f1_relative_error:.3%}"` |
+| U_passive | `{python} f"{u_passive:.6f}"` | `{python} f"{refs['force_free_velocity']:.6f}"` | `{python} f"{u_passive_relative_error:.3%}"` |
+
+### Verification Status
+
+Out of `{python} len(resistance_checks)` resistance checks, `{python} sum(1 for c in resistance_checks if c.passed)` passed and `{python} sum(1 for c in resistance_checks if not c.passed)` failed.
+
+### Next Steps
+
+Proceed to `03_resistance_validation.qmd` for detailed validation of the resistance networks, or to `03_resistance_gates.qmd` to run all physical gates.
+
+---
+
+*Notebook completed in {python} f"{time.perf_counter() - notebook_t0:.1f}s"*
