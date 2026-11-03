@@ -40,14 +40,14 @@ print(f"{'='*60}")
 # Load resistance networks
 if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
     print(f"Loading resistance networks from checkpoints...")
-    
+
     network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
         RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
     )
     network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
         RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
     )
-    
+
     # Create ResistanceResult
     force_ambient = float(mfp.surface_traction_force(
         network_ambient,
@@ -55,14 +55,14 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
         particle_state=particle_state,
         n_quadrature_points=RESISTANCE_N_QUAD
     ))
-    
+
     force_translating = float(mfp.surface_traction_force(
         network_translating,
         particle_config=particle_config,
         particle_state=state_translating,
         n_quadrature_points=RESISTANCE_N_QUAD
     ))
-    
+
     resistance = mfp.ResistanceResult(
         force_ambient=force_ambient,
         force_translating=force_translating,
@@ -85,7 +85,7 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
         history_ambient=history_ambient,
         history_translating=history_translating,
     )
-    
+
     print(f"Resistance networks loaded successfully.")
 else:
     raise FileNotFoundError(

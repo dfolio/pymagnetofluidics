@@ -89,11 +89,11 @@ These are used for comparison against the network predictions.
 
 def hagen_poiseuille_velocity(r: torch.Tensor, z: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """Computes analytical Hagen-Poiseuille velocity field.
-    
+
     Args:
         r: Radial coordinate tensor.
         z: Axial coordinate tensor.
-        
+
     Returns:
         Tuple of (u_r, u_z) velocity components.
     """
@@ -104,10 +104,10 @@ def hagen_poiseuille_velocity(r: torch.Tensor, z: torch.Tensor) -> tuple[torch.T
 
 def hagen_poiseuille_pressure(z: torch.Tensor) -> torch.Tensor:
     """Computes analytical Hagen-Poiseuille pressure field.
-    
+
     Args:
         z: Axial coordinate tensor.
-        
+
     Returns:
         Pressure tensor.
     """
@@ -116,10 +116,10 @@ def hagen_poiseuille_pressure(z: torch.Tensor) -> torch.Tensor:
 
 def hagen_poiseuille_velocity_field(coordinates: torch.Tensor) -> torch.Tensor:
     """Computes analytical Hagen-Poiseuille velocity field with network calling convention.
-    
+
     Args:
         coordinates: Tensor of shape (N, 2) containing (r, z) coordinates.
-        
+
     Returns:
         Tensor of shape (N, 3) containing (u_r, u_z, p) fields.
     """

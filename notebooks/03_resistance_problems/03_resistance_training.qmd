@@ -181,7 +181,7 @@ t0 = time.perf_counter()
 # Check if both checkpoints already exist
 if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
     print(f"Both checkpoints already exist. Loading from disk...")
-    
+
     # Load existing networks
     network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
         RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
@@ -189,13 +189,13 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
     network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
         RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
     )
-    
+
     # Validate library version
     assert provenance_ambient.library_version == mfp.__version__ and provenance_translating.library_version == mfp.__version__, (
         "cached resistance networks predate the current library (patch L9.1 changes "
         "the envelope these weights were trained under); delete them and retrain."
     )
-    
+
     # Compute forces
     force_ambient = float(mfp.surface_traction_force(
         network_ambient,
@@ -203,14 +203,14 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
         particle_state=particle_state,
         n_quadrature_points=RESISTANCE_N_QUAD
     ))
-    
+
     force_translating = float(mfp.surface_traction_force(
         network_translating,
         particle_config=particle_config,
         particle_state=state_translating,
         n_quadrature_points=RESISTANCE_N_QUAD
     ))
-    
+
     # Create ResistanceResult
     resistance = mfp.ResistanceResult(
         force_ambient=force_ambient,
@@ -234,12 +234,12 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
         history_ambient=history_ambient,
         history_translating=history_translating,
     )
-    
+
     print(f"Resistance networks loaded from checkpoints.")
-    
+
 else:
     print(f"Training from scratch...")
-    
+
     # Train both networks
     resistance = mfp.solve_resistance_problems_stream(
         domain,
@@ -251,7 +251,7 @@ else:
         activation="tanh",
         taper_margin=TAPER_MARGIN,
     )
-    
+
     # Save checkpoints
     print(f"Saving resistance networks...")
     mfp.save_stream_checkpoint(

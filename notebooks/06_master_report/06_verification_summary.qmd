@@ -136,11 +136,11 @@ for category in [VERIFICATION, CONVERGENCE, VALIDATION]:
         checks = checks_by_category[category]
         passed = sum(1 for c in checks if c.passed)
         failed = len(checks) - passed
-        
+
         # Compute average metric value for passed checks
         passed_metrics = [c.metric_value for c in checks if c.passed]
         avg_metric = sum(passed_metrics) / len(passed_metrics) if passed_metrics else 0.0
-        
+
         summary_data.append({
             "Category": category,
             "Total": len(checks),
@@ -235,7 +235,7 @@ def render_verification_pie(
         autopct="%1.1f%%",
         startangle=90,
     )
-    
+
 figure = matplotlib.figure.Figure(figsize=(14, 5))
 axes = figure.subplots(1, 2)
 
@@ -330,7 +330,7 @@ for notebook, expected_checks in notebook_organization.items():
     notebook_checks = [c for c in verification_checks if c.name in expected_checks]
     passed = sum(1 for c in notebook_checks if c.passed)
     failed = len(notebook_checks) - passed
-    
+
     notebook_data.append({
         "Notebook": notebook,
         "Total Checks": len(notebook_checks),

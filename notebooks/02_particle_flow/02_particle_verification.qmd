@@ -710,7 +710,7 @@ This notebook has performed comprehensive verification of the particle network:
 
 ### Key Findings
 
-1. **Mass Conservation**: Maximum flow rate error is `{python} f"{max_conservation_error:.3%}"`, 
+1. **Mass Conservation**: Maximum flow rate error is `{python} f"{max_conservation_error:.3%}"`,
    which `{python} 'clears' if conservation_check.passed else 'misses'` the threshold.
 
 2. **Particle No-Slip**: Surface velocity error is at float32 round-off level:

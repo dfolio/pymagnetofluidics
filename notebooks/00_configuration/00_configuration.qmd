@@ -288,10 +288,10 @@ These ensure consistent training configurations across all notebooks.
 
 def create_baseline_training_config(random_seed_offset: int = 0) -> mfp.TrainingConfig:
     """Creates a training configuration for baseline (undisturbed) flow.
-    
+
     Args:
         random_seed_offset: Offset to add to RANDOM_SEED for this configuration.
-        
+
     Returns:
         TrainingConfig: Configured for baseline flow training.
     """
@@ -314,10 +314,10 @@ def create_baseline_training_config(random_seed_offset: int = 0) -> mfp.Training
 
 def create_particle_training_config(random_seed_offset: int = 0) -> mfp.TrainingConfig:
     """Creates a training configuration for particle-perturbed flow.
-    
+
     Args:
         random_seed_offset: Offset to add to RANDOM_SEED for this configuration.
-        
+
     Returns:
         TrainingConfig: Configured for particle flow training.
     """
@@ -342,10 +342,10 @@ PARTICLE_TRAINING_CONFIG=create_particle_training_config(RANDOM_SEED)
 
 def create_resistance_training_config(random_seed_offset: int = 0) -> mfp.TrainingConfig:
     """Creates a training configuration for resistance problems.
-    
+
     Args:
         random_seed_offset: Offset to add to RANDOM_SEED for this configuration.
-        
+
     Returns:
         TrainingConfig: Configured for resistance problem training.
     """
@@ -365,7 +365,7 @@ def create_resistance_training_config(random_seed_offset: int = 0) -> mfp.Traini
         log_every=LOG_EVERY,
     )
 
-RESISTANCE_TRAINING_CONFIG = create_resistance_training_config(random_seed_offset=0)    
+RESISTANCE_TRAINING_CONFIG = create_resistance_training_config(random_seed_offset=0)
 ```
 
 ## Verification Thresholds
@@ -406,10 +406,10 @@ REFERENCE_UNCERTAINTY: float = 0.05
 
 def get_reference_tolerance(reynolds_number: float) -> float:
     """Computes reference tolerance based on Reynolds number and uncertainty.
-    
+
     Args:
         reynolds_number: Reynolds number for the flow.
-        
+
     Returns:
         float: Tolerance for reference comparisons.
     """
@@ -443,24 +443,24 @@ z_stations_eval = [
 
 # Ensure all stations are clear of the taper ball
 assert all(
-    abs(z - PARTICLE_AXIAL_POSITION_NONDIM) >= STATION_CLEARANCE 
+    abs(z - PARTICLE_AXIAL_POSITION_NONDIM) >= STATION_CLEARANCE
     for z in z_stations_eval
 ), "Evaluation stations must be clear of the taper ball"
 
 # Flow rate evaluation stations
 z_upstream = torch.linspace(
-    0.05 * L, 
-    PARTICLE_AXIAL_POSITION_NONDIM - PARTICLE_RADIUS_NONDIM, 
-    N_FLOWRATE_STATIONS, 
-    device=DEVICE, 
+    0.05 * L,
+    PARTICLE_AXIAL_POSITION_NONDIM - PARTICLE_RADIUS_NONDIM,
+    N_FLOWRATE_STATIONS,
+    device=DEVICE,
     dtype=DTYPE
 )
 
 z_downstream = torch.linspace(
-    PARTICLE_AXIAL_POSITION_NONDIM + PARTICLE_RADIUS_NONDIM, 
-    0.95 * L, 
-    N_FLOWRATE_STATIONS, 
-    device=DEVICE, 
+    PARTICLE_AXIAL_POSITION_NONDIM + PARTICLE_RADIUS_NONDIM,
+    0.95 * L,
+    N_FLOWRATE_STATIONS,
+    device=DEVICE,
     dtype=DTYPE
 )
 
@@ -481,11 +481,11 @@ These functions encapsulate common operations to reduce code duplication.
 
 def compute_blockage_ratio(PARTICLE_RADIUS: float, channel_radius: float) -> float:
     """Computes the blockage ratio a*/R*.
-    
+
     Args:
         PARTICLE_RADIUS: Particle radius (non-dimensional).
         channel_radius: Channel radius (non-dimensional).
-        
+
     Returns:
         float: Blockage ratio a*/R*.
     """
@@ -494,24 +494,24 @@ def compute_blockage_ratio(PARTICLE_RADIUS: float, channel_radius: float) -> flo
 
 def compute_reynolds_number(domain_config: mfp.DomainConfig) -> float:
     """Computes the channel Reynolds number.
-    
+
     Args:
         domain_config: Domain configuration object.
-        
+
     Returns:
         float: Reynolds number Re_R.
     """
     return domain_config.reynolds
 
 
-def compute_particle_reynolds(domain_config: mfp.DomainConfig, 
+def compute_particle_reynolds(domain_config: mfp.DomainConfig,
                               particle_config: mfp.ParticleConfig) -> float:
     """Computes the particle-scale Reynolds number.
-    
+
     Args:
         domain_config: Domain configuration object.
         particle_config: Particle configuration object.
-        
+
     Returns:
         float: Particle-scale Reynolds number Re_p.
     """
@@ -531,26 +531,26 @@ def compute_particle_reynolds(domain_config: mfp.DomainConfig,
     )
 
 
-def local_particle_chord_radius(axial_position: float, 
-                                PARTICLE_AXIAL_POSITION: float, 
+def local_particle_chord_radius(axial_position: float,
+                                PARTICLE_AXIAL_POSITION: float,
                                 PARTICLE_RADIUS: float) -> float:
     """Computes the radial half-chord of the sphere's cross-section at a given axial position.
-    
+
     At axial position z, the sphere (z - z_p)^2 + r^2 = a^2 intersects the
     meridian plane only where |z - z_p| <= a, over the radial interval
     r ∈ [0, r_c(z)], with
-    
+
     r_c(z) = sqrt(max(0, a^2 - (z - z_p)^2)).
-    
+
     Args:
         axial_position: Axial coordinate z at which the chord is evaluated.
         PARTICLE_AXIAL_POSITION: Sphere center z_p.
         PARTICLE_RADIUS: Sphere radius a.
-        
+
     Returns:
         float: The half-chord radius r_c(z); 0.0 where the station does not
             intersect the sphere.
-        
+
     Raises:
         ValueError: If PARTICLE_RADIUS is not finite and strictly positive.
     """

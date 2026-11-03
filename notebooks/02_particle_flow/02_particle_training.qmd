@@ -377,17 +377,17 @@ This is a regression guard that would detect if the taper edge is not properly l
 
 def edge_residual_rms(network, points):
     """Compute RMS residual at given points.
-    
+
     Args:
         network: The network to evaluate.
         points: Tensor of shape (N, 2) containing (r, z) coordinates.
-        
+
     Returns:
         Dict mapping residual component names to their RMS values.
     """
     # with torch.no_grad():
     residuals = mfp.stokes_residual(
-      network, coordinates=points, config=fluid_config, 
+      network, coordinates=points, config=fluid_config,
       residual_form=PARTICLE_RESIDUAL_FORM
       )
     # return {name: torch.sqrt(torch.mean(val**2)).item() for name, val in residuals.items()}
@@ -397,7 +397,7 @@ def edge_residual_rms(network, points):
 
 def sample_taper_edge_band(z_p, a, margin, band_width, n_points, random_seed, device, dtype):
     """Sample points in a band around the taper edge.
-    
+
     Args:
         z_p: Particle axial position.
         a: Particle radius.
@@ -407,27 +407,27 @@ def sample_taper_edge_band(z_p, a, margin, band_width, n_points, random_seed, de
         random_seed: Random seed for reproducibility.
         device: Device for tensor creation.
         dtype: Data type for tensors.
-        
+
     Returns:
         Tensor of shape (n_points, 2) containing sampled coordinates.
     """
     edge_radius = a * math.sqrt(1.0 + margin)
     inner_radius = edge_radius * (1.0 - band_width)
     outer_radius = edge_radius * (1.0 + band_width)
-    
+
     generator = torch.Generator(device=device).manual_seed(random_seed)
-    
+
     # Sample in the annular band
     rho = torch.sqrt(
-        inner_radius**2 + (outer_radius**2 - inner_radius**2) * 
+        inner_radius**2 + (outer_radius**2 - inner_radius**2) *
         torch.rand(n_points, generator=generator, device=device, dtype=dtype)
     )
     theta = 2.0 * math.pi * torch.rand(n_points, generator=generator, device=device, dtype=dtype)
-    
+
     # Convert to Cartesian in (r, z) space centered at particle
     r = rho * torch.cos(theta)
     z = rho * torch.sin(theta)
-    
+
     # Translate to absolute coordinates
     r_abs = torch.sqrt(r**2 + (z + z_p)**2)
     # This is simplified; actual implementation would use proper geometry

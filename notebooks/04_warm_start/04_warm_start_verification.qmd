@@ -258,10 +258,10 @@ Define helper function to create fresh networks at a given position.
 
 def fresh_network_at(z_p: float) -> torch.nn.Module:
     """Build an untrained stream-function network for the fixed sphere at z_p.
-    
+
     Args:
         z_p: Axial position of the sphere.
-        
+
     Returns:
         torch.nn.Module: Untrained network with stream-function constraint.
     """
@@ -285,11 +285,11 @@ def fresh_network_at(z_p: float) -> torch.nn.Module:
 
 def mean_shell_force(network, state) -> tuple[float, float]:
     """Compute mean traction force over enclosing shells and its relative spread.
-    
+
     Args:
         network: The network to evaluate.
         state: Particle state containing position.
-        
+
     Returns:
         Tuple of (mean_force, spread).
     """
@@ -322,7 +322,7 @@ if COLD_SHIFTED_CHECKPOINT.exists():
 else:
     print(f"Training from scratch...")
     t0 = time.perf_counter()
-    
+
     cold_shifted_network, cold_shifted_history = mfp.train_stream_function_flow(
         fresh_network_at(z_shifted),
         domain,
@@ -333,10 +333,10 @@ else:
         inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
         **SHELL_ARGS,
     )
-    
+
     training_time = time.perf_counter() - t0
     print(f"Cold-shifted reference trained in {training_time:.1f}s")
-    
+
     # Save checkpoint
     mfp.save_stream_checkpoint(
         cold_shifted_network,
@@ -378,10 +378,10 @@ print(f"Warm-start network initialized from cold network weights.")
 # Define loss function for comparison
 def initial_loss(network) -> float:
     """Compute initial loss for a network at the shifted position.
-    
+
     Args:
         network: The network to evaluate.
-        
+
     Returns:
         float: Total loss on a reference batch.
     """
@@ -427,7 +427,7 @@ if WARM_CHECKPOINT.exists():
 else:
     print(f"Training warm-start network...")
     t0 = time.perf_counter()
-    
+
     warm_network, warm_history = mfp.train_stream_function_flow(
         warm_init,
         domain,
@@ -438,10 +438,10 @@ else:
         inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
         **SHELL_ARGS,
     )
-    
+
     warm_seconds = time.perf_counter() - t0
     print(f"Warm-start network trained in {warm_seconds:.1f}s")
-    
+
     # Save checkpoint
     mfp.save_stream_checkpoint(
         warm_network,

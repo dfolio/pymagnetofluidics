@@ -164,7 +164,7 @@ display(plotting.plot_training_history(baseline_history, log_scale=True))
 
 The training loss in @fig-baseline-loss shows the convergence of the Adam optimizer followed by L-BFGS refinement. The loss contains contributions from:
 - Radial momentum residual
-- Axial momentum residual  
+- Axial momentum residual
 - Continuity residual
 - Inlet profile matching
 - Outlet pressure gauge
@@ -259,12 +259,12 @@ labels = []
 for z_station in z_stations_profile:
     r_profile = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
     coords = torch.stack([r_profile, z_station.expand_as(r_profile)], dim=1)
-    
+
     with torch.no_grad():
         u_z_network = baseline_network(coords)[:, 1]
-    
+
     u_z_analytical = PEAK_VELOCITY_NONDIM * (1.0 - r_profile**2 / R**2)
-    
+
     station_profiles.append((float(z_station.item()), u_z_network, u_z_analytical))
     labels.append(f"z*={float(z_station.item()):.2f}")
 
@@ -311,10 +311,10 @@ SAVE_BASELINE_CHECKPOINT = True
 # mfp.make_provenance work with StreamLossHistory
 if SAVE_BASELINE_CHECKPOINT:
     print(f"\nSaving baseline network checkpoint to {BASELINE_CHECKPOINT}...")
-    
+
     # Create provenance
     baseline_provenance = mfp.make_provenance(baseline_config, baseline_history)
-    
+
     # Save checkpoint
     mfp.save_stream_checkpoint(
         baseline_network,
@@ -323,7 +323,7 @@ if SAVE_BASELINE_CHECKPOINT:
         baseline_provenance,
         baseline_history,
     )
-    
+
     print(f"Checkpoint saved successfully.")
     print(f"Checkpoint size: {BASELINE_CHECKPOINT.stat().st_size / 1024:.1f} KB")
 ```

@@ -128,14 +128,14 @@ Load the resistance networks from checkpoints.
 
 if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
     print(f"Loading resistance networks from checkpoints...")
-    
+
     network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
         RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
     )
     network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
         RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
     )
-    
+
     # Create ResistanceResult
     force_ambient = float(mfp.surface_traction_force(
         network_ambient,
@@ -143,14 +143,14 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
         particle_state=particle_state,
         n_quadrature_points=RESISTANCE_N_QUAD
     ))
-    
+
     force_translating = float(mfp.surface_traction_force(
         network_translating,
         particle_config=particle_config,
         particle_state=state_translating,
         n_quadrature_points=RESISTANCE_N_QUAD
     ))
-    
+
     resistance = mfp.ResistanceResult(
         force_ambient=force_ambient,
         force_translating=force_translating,
@@ -173,7 +173,7 @@ if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.
         history_ambient=history_ambient,
         history_translating=history_translating,
     )
-    
+
     print(f"Resistance networks loaded successfully.")
 else:
     raise FileNotFoundError(
@@ -228,7 +228,7 @@ print(f"{'='*60}")
 
 if RUN_ANIMATION:
     print(f"Computing trajectories...")
-    
+
     passive_trajectory = mfp.free_particle_trajectory(
         resistance,
         lambda z: 0.0,  # Zero force for passive particle
@@ -237,7 +237,7 @@ if RUN_ANIMATION:
         ANIMATION_MAX_STEPS,
         initial_position=ANIMATION_START
     )
-    
+
     magnetic_trajectory = mfp.free_particle_trajectory(
         resistance,
         force_fn,
@@ -246,7 +246,7 @@ if RUN_ANIMATION:
         ANIMATION_MAX_STEPS,
         initial_position=ANIMATION_START
     )
-    
+
     # Display trajectory summary
     for name, trajectory in (("passive", passive_trajectory), ("magnetic", magnetic_trajectory)):
         print(f"\n{name.capitalize()} trajectory:")
@@ -254,7 +254,7 @@ if RUN_ANIMATION:
         print(f"  Exit reason: {'span boundary' if trajectory.exited_domain else 'max steps'}")
         print(f"  Final z_p*: {float(trajectory.positions[-1]):.4f}")
         print(f"  Final U_p*: {float(trajectory.velocities[-1]):.4f}")
-    
+
     # Create trajectory table
     def _trajectory_frame(trajectory, label):
         """Return one trajectory as a frame table with a disambiguating column."""
@@ -265,13 +265,13 @@ if RUN_ANIMATION:
             "U_p": trajectory.velocities,
             "F_applied": trajectory.applied_forces,
         })
-    
+
     trajectory_table = pd.concat(
         (_trajectory_frame(passive_trajectory, "passive"),
          _trajectory_frame(magnetic_trajectory, "magnetic")),
         ignore_index=True,
     )
-    
+
     # Display strided table for readability
     display(trajectory_table.iloc[::max(1, len(trajectory_table) // 24)])
 else:
@@ -287,7 +287,7 @@ Per-frame regression guards on the released particle.
 
 This verifies that no-slip is maintained at every frame of the trajectory.
 """
-    
+
 noslip_max = 0.0
 velocity_error_max = 0.0
 
@@ -295,9 +295,9 @@ if RUN_ANIMATION:
     print(f"\n{'='*60}")
     print(f"Trajectory Verification: No-Slip Guard")
     print(f"{'='*60}")
-    
+
     domain_channel = dataclasses.replace(domain, length=float(L))
-    
+
     for z_p, u_p in zip(
         magnetic_trajectory.positions.tolist(),
         magnetic_trajectory.velocities.tolist()
@@ -307,7 +307,7 @@ if RUN_ANIMATION:
             velocity=torch.tensor((0.0, u_p), device=DEVICE, dtype=DTYPE),
             time=0.0
         )
-        
+
         frame_flow = mfp.superposed_flow_at(
             resistance.network_ambient,
             resistance.network_translating,
@@ -318,7 +318,7 @@ if RUN_ANIMATION:
             particle_velocity=float(u_p),
             taper_margin=TAPER_MARGIN
         )
-        
+
         frame_noslip = mfp.evaluate_particle_noslip_error(
             frame_flow,
             particle_config,
@@ -326,15 +326,15 @@ if RUN_ANIMATION:
             reference_velocity=PEAK_VELOCITY_NONDIM,
             n_probe_points=181
         )
-        
+
         noslip_max = max(noslip_max, float(frame_noslip["max_abs_error"]))
         velocity_error_max = max(velocity_error_max, abs(u_p - resistance.passive_velocity))
-    
+
     print(f"\nPer-frame verification:")
     print(f"  Maximum no-slip error: {noslip_max:.3e}")
     print(f"  Maximum velocity error: {velocity_error_max:.3e}")
     print(f"  No-slip threshold: {thresholds.noslip_tolerance:.3e}")
-    
+
     # Define check
     animation_noslip_check = mfp.evaluate_check(
         "Animation no-slip guard",
@@ -343,10 +343,10 @@ if RUN_ANIMATION:
         thresholds.noslip_tolerance,
         "<=",
     )
-    
+
     verification_checks = verification_checks + (animation_noslip_check,)
     verification_categories[animation_noslip_check.name] = VERIFICATION
-    
+
     print(f"\nAnimation no-slip check:")
     mfp.render_verification_table((animation_noslip_check,))
 else:
@@ -363,17 +363,17 @@ if RUN_ANIMATION:
     print(f"\n{'='*60}")
     print(f"Animation Generation")
     print(f"{'='*60}")
-    
+
     from IPython.display import Image as IpyImage
-    
+
     domain_channel = dataclasses.replace(domain, length=float(L))
-    
+
     def _frame_field(index):
         """Return the superposed flow callable at trajectory state index.
-        
+
         Args:
             index: Position index into magnetic_trajectory.
-            
+
         Returns:
             Field mapping (r, z) to (u_r, u_z, p) at the particle state index.
         """
@@ -387,7 +387,7 @@ if RUN_ANIMATION:
             particle_velocity=float(magnetic_trajectory.velocities[index]),
             taper_margin=TAPER_MARGIN
         )
-    
+
     print(f"Generating animation...")
     animation_path = plotting.plot_particle_flow_animation(
         domain=domain_channel,
@@ -402,14 +402,14 @@ if RUN_ANIMATION:
         fps=ANIMATION_FPS,
         output_path=ANIMATION_PATH,
     )
-    
+
     print(f"Animation saved to {animation_path}")
     print(f"Animation size: {animation_path.stat().st_size / 1024:.1f} KB")
-    
+
     # Display animation based on output format
     static_path = animation_path.with_suffix(".png")
     target_format = os.environ.get("QUARTO_DOCUMENT_FORMAT", "html").lower()
-    
+
     if "pdf" in target_format or "latex" in target_format:
         # PDF/LaTeX requires a static graphic
         print(f"PDF output detected. Using static image: {static_path}")
@@ -432,27 +432,27 @@ if RUN_ANIMATION:
     print(f"\n{'='*60}")
     print(f"Static Frame Visualization")
     print(f"{'='*60}")
-    
+
     # Select a few frames to display
     n_frames_to_show = min(4, len(magnetic_trajectory.positions))
     frame_indices = np.linspace(0, len(magnetic_trajectory.positions) - 1, n_frames_to_show, dtype=int)
     domain_channel = dataclasses.replace(domain, length=float(L))
-    
+
     # Use pure OO matplotlib for this dedicated multi-panel visualization
     import matplotlib.figure
     import matplotlib.patches as patches
-    
+
     figure = matplotlib.figure.Figure(figsize=(5 * n_frames_to_show, 4))
     axes = figure.subplots(1, n_frames_to_show)
-    
+
     if n_frames_to_show == 1:
         axes = [axes]
-    
+
     for ax, idx in zip(axes, frame_indices):
         z_p = float(magnetic_trajectory.positions[idx])
         u_p = float(magnetic_trajectory.velocities[idx])
         t = float(magnetic_trajectory.times[idx])
-        
+
         # Create frame field
         frame_field = mfp.superposed_flow_at(
             resistance.network_ambient,
@@ -464,7 +464,7 @@ if RUN_ANIMATION:
             particle_velocity=u_p,
             taper_margin=TAPER_MARGIN
         )
-        
+
         # Create grid
         n_r_frame = 60
         n_z_frame = 120
@@ -472,13 +472,13 @@ if RUN_ANIMATION:
         z_frame = torch.linspace(0.0, L, n_z_frame, device=DEVICE, dtype=DTYPE)
         rr_frame, zz_frame = torch.meshgrid(r_frame, z_frame, indexing="ij")
         grid_frame = torch.stack([rr_frame.reshape(-1), zz_frame.reshape(-1)], dim=1)
-        
+
         with torch.no_grad():
             field_pred = frame_field(grid_frame).reshape(n_r_frame, n_z_frame, 3)
             u_r_frame = field_pred[..., 0]
             u_z_frame = field_pred[..., 1]
             vel_mag_frame = torch.hypot(u_r_frame, u_z_frame)
-        
+
         # Plot
         contour = ax.contourf(
             zz_frame.cpu().numpy(),
@@ -487,7 +487,7 @@ if RUN_ANIMATION:
             levels=20,
             cmap="viridis",
         )
-        
+
         # Mark particle
         particle_circle = patches.Circle(
             (z_p, 0.0),
@@ -497,7 +497,7 @@ if RUN_ANIMATION:
             alpha=0.7,
         )
         ax.add_patch(particle_circle)
-        
+
         # Streamlines
         ax.streamplot(
             zz_frame.cpu().numpy(),
@@ -508,13 +508,13 @@ if RUN_ANIMATION:
             density=1.0,
             linewidth=0.5,
         )
-        
+
         ax.set_xlabel("z*")
         ax.set_ylabel("r*")
         ax.set_title(f"t* = {t:.2f}, z_p* = {z_p:.2f}")
         ax.set_xlim(0.0, L)
         ax.set_ylim(0.0, R)
-    
+
     figure.tight_layout()
     display(figure)
 else:
@@ -554,7 +554,7 @@ if RUN_ANIMATION:
             f"{velocity_error_max:.3e}",
         ],
     }
-    
+
     summary_df = pd.DataFrame(summary_data)
     display(summary_df)
 else:
@@ -571,18 +571,18 @@ Display all trajectory verification checks.
 
 if RUN_ANIMATION:
     trajectory_checks = (animation_noslip_check,)
-    
+
     print(f"\n{'='*60}")
     print(f"Trajectory Verification Checks")
     print(f"{'='*60}")
-    
+
     print(f"\nTrajectory verification checks:")
     mfp.render_verification_table(trajectory_checks)
-    
+
     # Count passed/failed
     passed_count = sum(1 for check in trajectory_checks if check.passed)
     failed_count = len(trajectory_checks) - passed_count
-    
+
     print(f"\nSummary: {passed_count} passed, {failed_count} failed out of {len(trajectory_checks)} checks")
 else:
     print(f"Animation disabled. No trajectory verification checks evaluated.")
