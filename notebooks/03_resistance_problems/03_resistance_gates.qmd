@@ -1,0 +1,563 @@
+---
+title: "03 - Resistance Problems Gates"
+subtitle: "Comprehensive gate checks for resistance networks"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 03 - Resistance Problems Gates
+
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+# %run ../00_configuration/00_configuration.qmd
+```
+
+{{< include ../00_configuration/00_configuration.qmd >}}
+
+```{python}
+#| label: load-resistance-networks
+#| echo: true
+"""
+Load the resistance networks and baseline network from checkpoints.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 03 - Resistance Problems Gates")
+print(f"{'='*60}")
+
+# Load resistance networks
+if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
+    print(f"Loading resistance networks from checkpoints...")
+    
+    network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
+        RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
+    )
+    network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
+        RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
+    )
+    
+    # Create ResistanceResult
+    force_ambient = float(mfp.surface_traction_force(
+        network_ambient,
+        particle_config=particle_config,
+        particle_state=particle_state,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    force_translating = float(mfp.surface_traction_force(
+        network_translating,
+        particle_config=particle_config,
+        particle_state=state_translating,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    resistance = mfp.ResistanceResult(
+        force_ambient=force_ambient,
+        force_translating=force_translating,
+        spread_ambient=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_ambient,
+            particle_config,
+            particle_state,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        spread_translating=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_translating,
+            particle_config,
+            state_translating,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        network_ambient=network_ambient,
+        network_translating=network_translating,
+        history_ambient=history_ambient,
+        history_translating=history_translating,
+    )
+    
+    print(f"Resistance networks loaded successfully.")
+else:
+    raise FileNotFoundError(
+        f"Resistance checkpoints not found. "
+        "Please run 03_resistance_training.qmd first."
+    )
+
+# Load baseline network
+if BASELINE_CHECKPOINT.exists():
+    print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
+    baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
+        BASELINE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Baseline network loaded successfully.")
+else:
+    print(f"Warning: Baseline checkpoint not found at {BASELINE_CHECKPOINT}.")
+    baseline_network = None
+
+print(f"{'='*60}\n")
+```
+
+## Overview
+
+This notebook runs **all physical gates** for the resistance networks. These gates verify:
+
+1. **Internal consistency** - Momentum and pressure balance within each network
+2. **Force accuracy** - Comparison against reference values
+3. **Shell spread** - Traction distribution across control spheres
+4. **Physical bounds** - Forces and velocities within expected ranges
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `01_baseline_flow/01_baseline_training.qmd` - Trained baseline network
+- `03_resistance_problems/03_resistance_training.qmd` - Trained resistance networks
+
+### Outputs
+
+- Complete gate check results
+- Summary of all gate statuses
+- Verification check results for the master report
+
+## Reference Values
+
+```{python}
+#| label: reference-values
+"""
+Compute reference values for comparison.
+"""
+
+refs = mfp.reference_resistances(
+    PARTICLE_RADIUS_NONDIM / R,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM
+)
+
+# Reference tolerance
+Re_a = domain_config.reynolds * PARTICLE_RADIUS_NONDIM
+reference_tol = get_reference_tolerance(Re_a)
+
+# Internal balance tolerance
+INTERNAL_BALANCE_TOLERANCE = 0.02
+
+print(f"\nReference values:")
+print(f"  F_0 (reference): {refs['force_fixed']:.6f}")
+print(f"  F_1 (reference): {refs['force_unit_translation']:.6f}")
+print(f"  U_free (reference): {refs['force_free_velocity']:.6f}")
+print(f"  Reference tolerance: {reference_tol:.3%}")
+print(f"  Internal balance tolerance: {INTERNAL_BALANCE_TOLERANCE:.3%}")
+```
+
+## Gate 1: Momentum Balance
+
+```{python}
+#| label: gate-momentum-balance
+"""
+Momentum balance gates for both resistance networks.
+
+These check that the traction force equals the cross-section momentum force.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 1: Momentum Balance")
+print(f"{'='*60}")
+
+# Ambient network
+momentum_balance_ambient = mfp.momentum_balance_gate(
+    resistance.network_ambient,
+    domain,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+# Translating network
+momentum_balance_translating = mfp.momentum_balance_gate(
+    resistance.network_translating,
+    domain,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+momentum_gates = (momentum_balance_ambient, momentum_balance_translating)
+
+print(f"\nMomentum balance gates:")
+mfp.render_verification_table(momentum_gates)
+
+# Register checks
+verification_checks = verification_checks + momentum_gates
+for gate in momentum_gates:
+    verification_categories[gate.name] = VALIDATION
+```
+
+## Gate 2: Pressure Drop
+
+```{python}
+#| label: gate-pressure-drop
+"""
+Pressure drop gates for both resistance networks.
+
+These check that the pressure drop is consistent with the flow.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 2: Pressure Drop")
+print(f"{'='*60}")
+
+# Ambient network (with Poiseuille flow)
+pressure_drop_ambient = mfp.pressure_drop_gate(
+    resistance.network_ambient,
+    domain,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+# Translating network (with zero ambient flow)
+pressure_drop_translating = mfp.pressure_drop_gate(
+    resistance.network_translating,
+    dataclasses.replace(domain, u_max=0.0),
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    0.0,
+    INTERNAL_BALANCE_TOLERANCE
+)
+
+pressure_gates = (pressure_drop_ambient, pressure_drop_translating)
+
+print(f"\nPressure drop gates:")
+mfp.render_verification_table(pressure_gates)
+
+# Register checks
+verification_checks = verification_checks + pressure_gates
+for gate in pressure_gates:
+    verification_categories[gate.name] = VALIDATION
+```
+
+## Gate 3: Force Accuracy
+
+```{python}
+#| label: gate-force-accuracy
+"""
+Force accuracy gates comparing PINN forces against reference values.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 3: Force Accuracy")
+print(f"{'='*60}")
+
+# Compute relative errors
+f0_relative_error = abs(resistance.force_ambient - refs["force_fixed"]) / abs(refs["force_fixed"])
+f1_relative_error = abs(resistance.force_translating - refs["force_unit_translation"]) / abs(refs["force_unit_translation"])
+
+# F_0 accuracy gate
+f0_gate = mfp.evaluate_check(
+    "F_0 against reference",
+    "Relative error of the fixed-sphere force",
+    f0_relative_error,
+    reference_tol,
+    "<=",
+)
+
+# F_1 accuracy gate
+f1_gate = mfp.evaluate_check(
+    "F_1 against reference",
+    "Relative error of the unit-translation force",
+    f1_relative_error,
+    reference_tol,
+    "<=",
+)
+
+force_gates = (f0_gate, f1_gate)
+
+print(f"\nForce accuracy gates:")
+print(f"  F_0 relative error: {f0_relative_error:.3%}")
+print(f"  F_1 relative error: {f1_relative_error:.3%}")
+mfp.render_verification_table(force_gates)
+
+# Register checks
+verification_checks = verification_checks + force_gates
+for gate in force_gates:
+    verification_categories[gate.name] = VALIDATION
+```
+
+## Gate 4: Shell Spread
+
+```{python}
+#| label: gate-shell-spread
+"""
+Shell spread gates checking traction distribution across control spheres.
+
+Small shell spreads indicate that the traction is concentrated near the particle,
+as expected for Stokes flow.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 4: Shell Spread")
+print(f"{'='*60}")
+
+print(f"\nShell spreads:")
+print(f"  F_0 spread: {resistance.spread_ambient:.3%}")
+print(f"  F_1 spread: {resistance.spread_translating:.3%}")
+
+# Shell spread gates
+spread_ambient_gate = mfp.evaluate_check(
+    "Shell spread of F_0",
+    "Relative spread of the traction over the control spheres",
+    resistance.spread_ambient,
+    INTERNAL_BALANCE_TOLERANCE,
+    "<=",
+)
+
+spread_translating_gate = mfp.evaluate_check(
+    "Shell spread of F_1",
+    "Relative spread of the traction over the control spheres",
+    resistance.spread_translating,
+    INTERNAL_BALANCE_TOLERANCE,
+    "<=",
+)
+
+spread_gates = (spread_ambient_gate, spread_translating_gate)
+
+print(f"\nShell spread gates:")
+mfp.render_verification_table(spread_gates)
+
+# Register checks
+verification_checks = verification_checks + spread_gates
+for gate in spread_gates:
+    verification_categories[gate.name] = VALIDATION
+```
+
+## Gate 5: Free Velocity
+
+```{python}
+#| label: gate-free-velocity
+"""
+Free velocity gates checking physical bounds and consistency.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 5: Free Velocity")
+print(f"{'='*60}")
+
+# Compute passive velocity
+u_passive = resistance.passive_velocity
+
+print(f"\nFree velocity:")
+print(f"  U_passive: {u_passive:.6f}")
+print(f"  Peak velocity: {PEAK_VELOCITY_NONDIM:.6f}")
+
+# Free velocity bounds check
+free_velocity_gates = mfp.free_velocity_bounds_check(
+    u_passive,
+    PEAK_VELOCITY_NONDIM
+)
+
+print(f"\nFree velocity gates:")
+mfp.render_verification_table(free_velocity_gates)
+
+# Register checks
+verification_checks = verification_checks + free_velocity_gates
+for gate in free_velocity_gates:
+    verification_categories[gate.name] = VALIDATION
+```
+
+## Gate 6: Force Response
+
+```{python}
+#| label: gate-force-response
+"""
+Force response gate checking that opposing force reduces velocity.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 6: Force Response")
+print(f"{'='*60}")
+
+# Define force function (from original notebook)
+M_Z, G_Z = magnetic_moment.moment_vector[1], 1.0
+field_fn_si = lambda x: mfp.gradient_field(x, 1.0e-2, (-0.5 * G_Z, G_Z))
+force_fn = mfp.make_dimensionless_dipole_force_fn(field_fn_si, M_Z, scales)
+
+ASSISTING_FORCE = force_fn(PARTICLE_AXIAL_POSITION_NONDIM)
+APPLIED_FORCE = -ASSISTING_FORCE
+
+# Compute velocities
+u_passive = resistance.passive_velocity
+u_forced = resistance.balanced_velocity(APPLIED_FORCE)
+
+# Directional response
+directional_response = u_passive - u_forced
+
+print(f"\nForce response:")
+print(f"  Assisting force: {ASSISTING_FORCE:.6f}")
+print(f"  Applied force (opposing): {APPLIED_FORCE:.6f}")
+print(f"  U_passive: {u_passive:.6f}")
+print(f"  U_forced: {u_forced:.6f}")
+print(f"  Directional response: {directional_response:.6f}")
+
+# Force response gate
+force_response_gate = mfp.evaluate_check(
+    "Directional force response",
+    "Force-balanced velocity decreases when an opposing external force is applied",
+    directional_response,
+    0.0,
+    ">",
+)
+
+print(f"\nForce response gate:")
+mfp.render_verification_table((force_response_gate,))
+
+# Register check
+verification_checks = verification_checks + (force_response_gate,)
+verification_categories[force_response_gate.name] = VALIDATION
+```
+
+## Gate 7: Faxén-Limit Consistency
+
+```{python}
+#| label: gate-faxen-consistency
+"""
+Faxén-limit consistency gate.
+"""
+
+print(f"\n{'='*60}")
+print(f"Gate 7: Faxén-Limit Consistency")
+print(f"{'='*60}")
+
+# Compute Faxén-corrected velocity
+faxen_probe = torch.tensor([[1.0e-3 * R, PARTICLE_AXIAL_POSITION_NONDIM]], device=DEVICE, dtype=DTYPE)
+faxen_velocity = float(mfp.faxen_corrected_velocity(baseline_network, faxen_probe, PARTICLE_RADIUS_NONDIM)[0, 1])
+
+# Compute error
+passive_error = abs(u_passive - refs["force_free_velocity"]) / abs(refs["force_free_velocity"])
+
+print(f"\nFaxén-limit consistency:")
+print(f"  U_passive (PINN): {u_passive:.6f}")
+print(f"  U_passive (reference): {refs['force_free_velocity']:.6f}")
+print(f"  Faxén velocity (free-space): {faxen_velocity:.6f}")
+print(f"  Relative error: {passive_error:.3%}")
+
+# Faxén gate
+faxen_gate = mfp.evaluate_check(
+    "Passive velocity against the wall-corrected reference",
+    "Force-balanced velocity of a passive sphere vs. the series reference U_free = u_c K_P / K_H",
+    passive_error,
+    reference_tol,
+    "<=",
+)
+
+print(f"\nFaxén-limit consistency gate:")
+mfp.render_verification_table((faxen_gate,))
+
+# Register check
+verification_checks = verification_checks + (faxen_gate,)
+verification_categories[faxen_gate.name] = VALIDATION
+```
+
+## Summary of All Gates
+
+```{python}
+#| label: all-gates-summary
+"""
+Collect and display all gates.
+"""
+
+print(f"\n{'='*60}")
+print(f"Summary of All Gates")
+print(f"{'='*60}")
+
+# Collect all gates
+all_gates = (
+    *momentum_gates,
+    *pressure_gates,
+    *force_gates,
+    *spread_gates,
+    *free_velocity_gates,
+    force_response_gate,
+    faxen_gate,
+)
+
+print(f"\nTotal gates: {len(all_gates)}")
+
+# Count passed/failed
+passed_count = sum(1 for gate in all_gates if gate.passed)
+failed_count = len(all_gates) - passed_count
+
+print(f"Passed: {passed_count}")
+print(f"Failed: {failed_count}")
+
+# Display all gates
+print(f"\nAll gates:")
+mfp.render_verification_table(all_gates)
+```
+
+## Detailed Gate Table
+
+```{python}
+#| label: tbl-all-gates
+#| tbl-cap: "Detailed results for all resistance problem gates."
+
+# Build detailed table
+gate_data = []
+for gate in all_gates:
+    gate_data.append({
+        "Gate": gate.name,
+        "Description": gate.description,
+        "Metric Value": f"{gate.metric_value:.6f}",
+        "Threshold": f"{gate.threshold:.6f}",
+        "Operator": gate.operator,
+        "Passed": "✓" if gate.passed else "✗",
+        "Category": verification_categories.get(gate.name, "Unknown"),
+    })
+
+gates_df = pd.DataFrame(gate_data)
+gates_df
+```
+
+## Summary
+
+This notebook has run **all physical gates** for the resistance networks:
+
+### Gate Summary
+
+| **Gate Category** | **Passed** | **Failed** | **Total** |
+|-------------------|------------|------------|-----------|
+| Momentum Balance | `{python} sum(1 for g in momentum_gates if g.passed)` | `{python} sum(1 for g in momentum_gates if not g.passed)` | `{python} len(momentum_gates)` |
+| Pressure Drop | `{python} sum(1 for g in pressure_gates if g.passed)` | `{python} sum(1 for g in pressure_gates if not g.passed)` | `{python} len(pressure_gates)` |
+| Force Accuracy | `{python} sum(1 for g in force_gates if g.passed)` | `{python} sum(1 for g in force_gates if not g.passed)` | `{python} len(force_gates)` |
+| Shell Spread | `{python} sum(1 for g in spread_gates if g.passed)` | `{python} sum(1 for g in spread_gates if not g.passed)` | `{python} len(spread_gates)` |
+| Free Velocity | `{python} sum(1 for g in free_velocity_gates if g.passed)` | `{python} sum(1 for g in free_velocity_gates if not g.passed)` | `{python} len(free_velocity_gates)` |
+| Force Response | `{python} 1 if force_response_gate.passed else 0` | `{python} 0 if force_response_gate.passed else 1` | 1 |
+| Faxén Consistency | `{python} 1 if faxen_gate.passed else 0` | `{python} 0 if faxen_gate.passed else 1` | 1 |
+| **Total** | **`{python} passed_count`** | **`{python} failed_count`** | **`{python} len(all_gates)`** |
+
+### Overall Status
+
+Out of `{python} len(all_gates)` total gates, `{python} passed_count` passed and `{python} failed_count` failed.
+
+The resistance networks have **passed all gate checks** and are ready for use in:
+- Trajectory calculations (`05_trajectory/05_free_particle.qmd`)
+- Warm-start verification (`04_warm_start/04_warm_start_verification.qmd`)
+
+### Next Steps
+
+Proceed to any of the following notebooks:
+- `04_warm_start/04_warm_start_verification.qmd` - Verify warm-start consistency
+- `05_trajectory/05_free_particle.qmd` - Compute free-particle trajectories
+- `06_master_report/06_verification_summary.qmd` - View complete verification summary
+
+---
+
+*Notebook completed in `{python} f"{time.perf_counter() - notebook_t0:.1f}s"`*

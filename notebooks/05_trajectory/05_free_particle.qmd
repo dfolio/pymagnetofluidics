@@ -1,0 +1,621 @@
+---
+title: "05 - Free Particle Trajectory"
+subtitle: "Computing and visualizing free-particle trajectories with integrated animation"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 05 - Free Particle Trajectory
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import os
+import sys
+from pathlib import Path
+
+from IPython.display import Markdown
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+# %run ../00_configuration/00_configuration.qmd
+```
+
+{{< include ../00_configuration/00_configuration.qmd >}}
+
+
+```{python}
+#| label: animation-config
+# Quasi-static animation switch. Reuses the resistance pair from section 5.
+RUN_ANIMATION = True
+ANIMATION_TIME_STEP = 0.05      # nondimensional, O(R/u_max) is unity
+ANIMATION_MAX_STEPS = 600
+channel_span_length = float(domain.length if hasattr(domain, "length") else L)
+z_span_min = 2.0 * float(PARTICLE_RADIUS_NONDIM)
+z_span_max = channel_span_length - 2.0 * float(PARTICLE_RADIUS_NONDIM)
+
+ANIMATION_START = float(min(max(2.0, z_span_min + 0.1), z_span_max - 0.1))
+ANIMATION_SPAN = (z_span_min, z_span_max)
+ANIMATION_GRID = (48, 160)      # (n_r, n_z)
+ANIMATION_N_FRAMES = 60         # GIF frame budget; the trajectory is strided to it
+ANIMATION_FPS = 20
+```
+
+```{python}
+#| label: notebook-setup
+#| echo: true
+"""
+Initialize the notebook and print configuration.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 05 - Free Particle Trajectory")
+print(f"{'='*60}")
+print(f"Animation configuration:")
+print(f"  Time step: {ANIMATION_TIME_STEP:.4f}")
+print(f"  Max steps: {ANIMATION_MAX_STEPS}")
+print(f"  Start position: {ANIMATION_START:.4f}")
+print(f"  Span: {ANIMATION_SPAN}")
+print(f"  Grid resolution: {ANIMATION_GRID}")
+print(f"  Frames: {ANIMATION_N_FRAMES}")
+print(f"  FPS: {ANIMATION_FPS}")
+print(f"{'='*60}\n")
+```
+
+## Overview
+
+This notebook computes **free-particle trajectories** by combining the resistance networks trained in `03_resistance_problems/03_resistance_training.qmd`. The particle is released and its trajectory is computed under:
+
+1. **Passive motion** - Driven only by the ambient flow
+2. **Magnetic actuation** - Driven by an external magnetic field gradient
+
+### Purpose
+
+- Compute trajectories using the force-balanced velocity formula
+- Visualize the particle motion and surrounding flow field
+- Generate animations of the particle trajectory
+- Verify trajectory consistency (no-slip, force balance)
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `01_baseline_flow/01_baseline_training.qmd` - Trained baseline network
+- `03_resistance_problems/03_resistance_training.qmd` - Trained resistance networks
+
+### Outputs
+
+- Computed trajectories (passive and magnetic)
+- Flow field visualizations at trajectory points
+- Animated GIF of the magnetic trajectory
+- Verification check results for the master report
+
+## Mathematical Formulation
+
+### Force-Balanced Velocity
+
+In the overdamped Stokes limit, the particle velocity is determined by force balance:
+$$F_{\text{applied}}^*(z_p) + F_0 + U_p^* F_1 = 0,$$
+which gives:
+$$U_p^* = -\frac{F_0 + F_{\text{applied}}^*(z_p)}{F_1}.$$
+
+### Trajectory Integration
+
+The particle position is updated using:
+$$z_p^{n+1} = z_p^n + U_p^*(z_p^n) \Delta t^*$$
+where $\Delta t^*$ is the non-dimensional time step.
+
+### Superposed Flow Field
+
+At each trajectory point, the flow field is the superposition of:
+$$\vb{u} = u_{\max} \Phi_A + U_p^* \Phi_B,$$
+where:
+- $\Phi_A$ is the ambient flow (F₀ problem)
+- $\Phi_B$ is the translation flow (F₁ problem)
+
+
+## Load Resistance Networks
+
+```{python}
+#| label: load-resistance-networks
+"""
+Load the resistance networks from checkpoints.
+"""
+
+if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
+    print(f"Loading resistance networks from checkpoints...")
+    
+    network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(
+        RESISTANCE_AMBIENT_CHECKPOINT, device=DEVICE
+    )
+    network_translating, _, _, provenance_translating, history_translating = mfp.load_stream_checkpoint(
+        RESISTANCE_TRANSLATING_CHECKPOINT, device=DEVICE
+    )
+    
+    # Create ResistanceResult
+    force_ambient = float(mfp.surface_traction_force(
+        network_ambient,
+        particle_config=particle_config,
+        particle_state=particle_state,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    force_translating = float(mfp.surface_traction_force(
+        network_translating,
+        particle_config=particle_config,
+        particle_state=state_translating,
+        n_quadrature_points=RESISTANCE_N_QUAD
+    ))
+    
+    resistance = mfp.ResistanceResult(
+        force_ambient=force_ambient,
+        force_translating=force_translating,
+        spread_ambient=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_ambient,
+            particle_config,
+            particle_state,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        spread_translating=mfp.shell_force_spread(mfp.shell_force_profile(
+            network_translating,
+            particle_config,
+            state_translating,
+            RESISTANCE_SHELL_RADII,
+            361
+        )),
+        network_ambient=network_ambient,
+        network_translating=network_translating,
+        history_ambient=history_ambient,
+        history_translating=history_translating,
+    )
+    
+    print(f"Resistance networks loaded successfully.")
+else:
+    raise FileNotFoundError(
+        f"Resistance checkpoints not found. "
+        "Please run 03_resistance_training.qmd first."
+    )
+
+# Load baseline network
+if BASELINE_CHECKPOINT.exists():
+    print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
+    baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
+        BASELINE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Baseline network loaded successfully.")
+else:
+    print(f"Warning: Baseline checkpoint not found at {BASELINE_CHECKPOINT}.")
+    baseline_network = None
+```
+
+## Force Function
+
+```{python}
+#| label: force-function
+"""
+Define the magnetic force function for trajectory computation.
+"""
+
+# Maxwell-consistent gradient field (g_r = -g_z / 2)
+M_Z, G_Z = magnetic_moment.moment_vector[1], 1.0
+field_fn_si = lambda x: mfp.gradient_field(x, 1.0e-2, (-0.5 * G_Z, G_Z))
+force_fn = mfp.make_dimensionless_dipole_force_fn(field_fn_si, M_Z, scales)
+
+ASSISTING_FORCE = force_fn(PARTICLE_AXIAL_POSITION_NONDIM)
+APPLIED_FORCE = -ASSISTING_FORCE
+
+print(f"\nMagnetic force function:")
+print(f"  Assisting force at z_p*: {ASSISTING_FORCE:.6f}")
+print(f"  Applied force (opposing): {APPLIED_FORCE:.6f}")
+```
+
+## Trajectory Computation
+
+```{python}
+#| label: animation-trajectory
+"""
+Compute trajectories for passive and magnetically-actuated particles.
+"""
+
+print(f"\n{'='*60}")
+print(f"Trajectory Computation")
+print(f"{'='*60}")
+
+if RUN_ANIMATION:
+    print(f"Computing trajectories...")
+    
+    passive_trajectory = mfp.free_particle_trajectory(
+        resistance,
+        lambda z: 0.0,  # Zero force for passive particle
+        ANIMATION_SPAN,
+        ANIMATION_TIME_STEP,
+        ANIMATION_MAX_STEPS,
+        initial_position=ANIMATION_START
+    )
+    
+    magnetic_trajectory = mfp.free_particle_trajectory(
+        resistance,
+        force_fn,
+        ANIMATION_SPAN,
+        ANIMATION_TIME_STEP,
+        ANIMATION_MAX_STEPS,
+        initial_position=ANIMATION_START
+    )
+    
+    # Display trajectory summary
+    for name, trajectory in (("passive", passive_trajectory), ("magnetic", magnetic_trajectory)):
+        print(f"\n{name.capitalize()} trajectory:")
+        print(f"  Number of frames: {len(trajectory.times)}")
+        print(f"  Exit reason: {'span boundary' if trajectory.exited_domain else 'max steps'}")
+        print(f"  Final z_p*: {float(trajectory.positions[-1]):.4f}")
+        print(f"  Final U_p*: {float(trajectory.velocities[-1]):.4f}")
+    
+    # Create trajectory table
+    def _trajectory_frame(trajectory, label):
+        """Return one trajectory as a frame table with a disambiguating column."""
+        return pd.DataFrame({
+            "trajectory": label,
+            "t (nondim)": trajectory.times,
+            "z_p": trajectory.positions,
+            "U_p": trajectory.velocities,
+            "F_applied": trajectory.applied_forces,
+        })
+    
+    trajectory_table = pd.concat(
+        (_trajectory_frame(passive_trajectory, "passive"),
+         _trajectory_frame(magnetic_trajectory, "magnetic")),
+        ignore_index=True,
+    )
+    
+    # Display strided table for readability
+    display(trajectory_table.iloc[::max(1, len(trajectory_table) // 24)])
+else:
+    print(f"Animation disabled (RUN_ANIMATION = False). Trajectories not computed.")
+```
+
+## Trajectory Verification: No-Slip Guard
+
+```{python}
+#| label: check-animation-guards
+"""
+Per-frame regression guards on the released particle.
+
+This verifies that no-slip is maintained at every frame of the trajectory.
+"""
+    
+noslip_max = 0.0
+velocity_error_max = 0.0
+
+if RUN_ANIMATION:
+    print(f"\n{'='*60}")
+    print(f"Trajectory Verification: No-Slip Guard")
+    print(f"{'='*60}")
+    
+    domain_channel = dataclasses.replace(domain, length=float(L))
+    
+    for z_p, u_p in zip(
+        magnetic_trajectory.positions.tolist(),
+        magnetic_trajectory.velocities.tolist()
+    ):
+        frame_state = mfp.ParticleState(
+            position=torch.tensor((0.0, z_p), device=DEVICE, dtype=DTYPE),
+            velocity=torch.tensor((0.0, u_p), device=DEVICE, dtype=DTYPE),
+            time=0.0
+        )
+        
+        frame_flow = mfp.superposed_flow_at(
+            resistance.network_ambient,
+            resistance.network_translating,
+            domain_channel,
+            float(z_p),
+            PARTICLE_RADIUS_NONDIM,
+            ambient_amplitude=PEAK_VELOCITY_NONDIM,
+            particle_velocity=float(u_p),
+            taper_margin=TAPER_MARGIN
+        )
+        
+        frame_noslip = mfp.evaluate_particle_noslip_error(
+            frame_flow,
+            particle_config,
+            frame_state,
+            reference_velocity=PEAK_VELOCITY_NONDIM,
+            n_probe_points=181
+        )
+        
+        noslip_max = max(noslip_max, float(frame_noslip["max_abs_error"]))
+        velocity_error_max = max(velocity_error_max, abs(u_p - resistance.passive_velocity))
+    
+    print(f"\nPer-frame verification:")
+    print(f"  Maximum no-slip error: {noslip_max:.3e}")
+    print(f"  Maximum velocity error: {velocity_error_max:.3e}")
+    print(f"  No-slip threshold: {thresholds.noslip_tolerance:.3e}")
+    
+    # Define check
+    animation_noslip_check = mfp.evaluate_check(
+        "Animation no-slip guard",
+        "Per-frame surface velocity error over the trajectory",
+        noslip_max,
+        thresholds.noslip_tolerance,
+        "<=",
+    )
+    
+    verification_checks = verification_checks + (animation_noslip_check,)
+    verification_categories[animation_noslip_check.name] = VERIFICATION
+    
+    print(f"\nAnimation no-slip check:")
+    mfp.render_verification_table((animation_noslip_check,))
+else:
+    print(f"Animation disabled. No-slip guard not evaluated.")
+```
+
+## Animation Generation
+
+```{python}
+#| label: fig-animation-frame
+#| fig-cap: "Animated magnetic-gradient trajectory: superposed velocity field around the released particle, saved as a looping GIF."
+
+if RUN_ANIMATION:
+    print(f"\n{'='*60}")
+    print(f"Animation Generation")
+    print(f"{'='*60}")
+    
+    from IPython.display import Image as IpyImage
+    
+    domain_channel = dataclasses.replace(domain, length=float(L))
+    
+    def _frame_field(index):
+        """Return the superposed flow callable at trajectory state index.
+        
+        Args:
+            index: Position index into magnetic_trajectory.
+            
+        Returns:
+            Field mapping (r, z) to (u_r, u_z, p) at the particle state index.
+        """
+        return mfp.superposed_flow_at(
+            resistance.network_ambient,
+            resistance.network_translating,
+            domain_channel,
+            float(magnetic_trajectory.positions[index]),
+            PARTICLE_RADIUS_NONDIM,
+            ambient_amplitude=PEAK_VELOCITY_NONDIM,
+            particle_velocity=float(magnetic_trajectory.velocities[index]),
+            taper_margin=TAPER_MARGIN
+        )
+    
+    print(f"Generating animation...")
+    animation_path = plotting.plot_particle_flow_animation(
+        domain=domain_channel,
+        frame_field=_frame_field,
+        positions=magnetic_trajectory.positions,
+        velocities=magnetic_trajectory.velocities,
+        times=magnetic_trajectory.times,
+        particle_radius=PARTICLE_RADIUS_NONDIM,
+        n_frames=ANIMATION_N_FRAMES,
+        resolution_r=ANIMATION_GRID[0],
+        resolution_z=ANIMATION_GRID[1],
+        fps=ANIMATION_FPS,
+        output_path=ANIMATION_PATH,
+    )
+    
+    print(f"Animation saved to {animation_path}")
+    print(f"Animation size: {animation_path.stat().st_size / 1024:.1f} KB")
+    
+    # Display animation based on output format
+    static_path = animation_path.with_suffix(".png")
+    target_format = os.environ.get("QUARTO_DOCUMENT_FORMAT", "html").lower()
+    
+    if "pdf" in target_format or "latex" in target_format:
+        # PDF/LaTeX requires a static graphic
+        print(f"PDF output detected. Using static image: {static_path}")
+        display(Markdown(f"![]({static_path.as_posix()})"))
+    else:
+        # HTML displays the animated GIF
+        print(f"HTML output detected. Displaying animated GIF.")
+        display(Markdown(f"![]({animation_path.as_posix()})"))
+else:
+    print(f"Animation disabled (RUN_ANIMATION = False).")
+```
+
+## Trajectory Visualization: Static Frames
+
+```{python}
+#| label: fig-trajectory-frames
+#| fig-cap: "Static frames from the magnetic trajectory showing particle positions and flow fields at selected time points."
+
+if RUN_ANIMATION:
+    print(f"\n{'='*60}")
+    print(f"Static Frame Visualization")
+    print(f"{'='*60}")
+    
+    # Select a few frames to display
+    n_frames_to_show = min(4, len(magnetic_trajectory.positions))
+    frame_indices = np.linspace(0, len(magnetic_trajectory.positions) - 1, n_frames_to_show, dtype=int)
+    domain_channel = dataclasses.replace(domain, length=float(L))
+    
+    # Use pure OO matplotlib for this dedicated multi-panel visualization
+    import matplotlib.figure
+    import matplotlib.patches as patches
+    
+    figure = matplotlib.figure.Figure(figsize=(5 * n_frames_to_show, 4))
+    axes = figure.subplots(1, n_frames_to_show)
+    
+    if n_frames_to_show == 1:
+        axes = [axes]
+    
+    for ax, idx in zip(axes, frame_indices):
+        z_p = float(magnetic_trajectory.positions[idx])
+        u_p = float(magnetic_trajectory.velocities[idx])
+        t = float(magnetic_trajectory.times[idx])
+        
+        # Create frame field
+        frame_field = mfp.superposed_flow_at(
+            resistance.network_ambient,
+            resistance.network_translating,
+            domain_channel,
+            z_p,
+            PARTICLE_RADIUS_NONDIM,
+            ambient_amplitude=PEAK_VELOCITY_NONDIM,
+            particle_velocity=u_p,
+            taper_margin=TAPER_MARGIN
+        )
+        
+        # Create grid
+        n_r_frame = 60
+        n_z_frame = 120
+        r_frame = torch.linspace(0.0, R, n_r_frame, device=DEVICE, dtype=DTYPE)
+        z_frame = torch.linspace(0.0, L, n_z_frame, device=DEVICE, dtype=DTYPE)
+        rr_frame, zz_frame = torch.meshgrid(r_frame, z_frame, indexing="ij")
+        grid_frame = torch.stack([rr_frame.reshape(-1), zz_frame.reshape(-1)], dim=1)
+        
+        with torch.no_grad():
+            field_pred = frame_field(grid_frame).reshape(n_r_frame, n_z_frame, 3)
+            u_r_frame = field_pred[..., 0]
+            u_z_frame = field_pred[..., 1]
+            vel_mag_frame = torch.hypot(u_r_frame, u_z_frame)
+        
+        # Plot
+        contour = ax.contourf(
+            zz_frame.cpu().numpy(),
+            rr_frame.cpu().numpy(),
+            vel_mag_frame.cpu().numpy(),
+            levels=20,
+            cmap="viridis",
+        )
+        
+        # Mark particle
+        particle_circle = patches.Circle(
+            (z_p, 0.0),
+            PARTICLE_RADIUS_NONDIM,
+            fill=True,
+            color="red",
+            alpha=0.7,
+        )
+        ax.add_patch(particle_circle)
+        
+        # Streamlines
+        ax.streamplot(
+            zz_frame.cpu().numpy(),
+            rr_frame.cpu().numpy(),
+            u_z_frame.cpu().numpy(),
+            u_r_frame.cpu().numpy(),
+            color="white",
+            density=1.0,
+            linewidth=0.5,
+        )
+        
+        ax.set_xlabel("z*")
+        ax.set_ylabel("r*")
+        ax.set_title(f"t* = {t:.2f}, z_p* = {z_p:.2f}")
+        ax.set_xlim(0.0, L)
+        ax.set_ylim(0.0, R)
+    
+    figure.tight_layout()
+    display(figure)
+else:
+    print(f"Animation disabled. Static frames not generated.")
+```
+
+## Summary Table
+
+```{python}
+#| label: tbl-trajectory-summary
+#| tbl-cap: "Summary of trajectory computation and verification."
+
+if RUN_ANIMATION:
+    summary_data = {
+        "Metric": [
+            "Passive trajectory frames",
+            "Magnetic trajectory frames",
+            "Passive final z_p*",
+            "Magnetic final z_p*",
+            "Passive final U_p*",
+            "Magnetic final U_p*",
+            "Passive exit reason",
+            "Magnetic exit reason",
+            "Max no-slip error",
+            "Max velocity error",
+        ],
+        "Value": [
+            f"{len(passive_trajectory.times)}",
+            f"{len(magnetic_trajectory.times)}",
+            f"{float(passive_trajectory.positions[-1]):.4f}",
+            f"{float(magnetic_trajectory.positions[-1]):.4f}",
+            f"{float(passive_trajectory.velocities[-1]):.4f}",
+            f"{float(magnetic_trajectory.velocities[-1]):.4f}",
+            "span boundary" if passive_trajectory.exited_domain else "max steps",
+            "span boundary" if magnetic_trajectory.exited_domain else "max steps",
+            f"{noslip_max:.3e}",
+            f"{velocity_error_max:.3e}",
+        ],
+    }
+    
+    summary_df = pd.DataFrame(summary_data)
+    display(summary_df)
+else:
+    print(f"Animation disabled. No summary table generated.")
+```
+
+## Verification Checks Summary
+
+```{python}
+#| label: trajectory-verification-checks-summary
+"""
+Display all trajectory verification checks.
+"""
+
+if RUN_ANIMATION:
+    trajectory_checks = (animation_noslip_check,)
+    
+    print(f"\n{'='*60}")
+    print(f"Trajectory Verification Checks")
+    print(f"{'='*60}")
+    
+    print(f"\nTrajectory verification checks:")
+    mfp.render_verification_table(trajectory_checks)
+    
+    # Count passed/failed
+    passed_count = sum(1 for check in trajectory_checks if check.passed)
+    failed_count = len(trajectory_checks) - passed_count
+    
+    print(f"\nSummary: {passed_count} passed, {failed_count} failed out of {len(trajectory_checks)} checks")
+else:
+    print(f"Animation disabled. No trajectory verification checks evaluated.")
+```
+
+## Summary
+
+This notebook has:
+
+1. **Loaded** the resistance networks trained in notebook 03
+2. **Computed** trajectories for passive and magnetically-actuated particles
+3. **Verified** that no-slip is maintained at every frame of the trajectory
+4. **Generated** an animation of the magnetic trajectory
+5. **Visualized** static frames from the trajectory
+
+### Key Results
+
+| **Metric** | **Value** |
+|------------|-----------|
+| Passive trajectory frames | `{python} len(passive_trajectory.times) if RUN_ANIMATION else 'N/A'` |
+| Magnetic trajectory frames | `{python} len(magnetic_trajectory.times) if RUN_ANIMATION else 'N/A'` |
+| Passive final position | `{python} f"{float(passive_trajectory.positions[-1]):.4f}" if RUN_ANIMATION else 'N/A'` |
+| Magnetic final position | `{python} f"{float(magnetic_trajectory.positions[-1]):.4f}" if RUN_ANIMATION else 'N/A'` |
+| Maximum no-slip error | `{python} f"{noslip_max:.3e}" if RUN_ANIMATION else 'N/A'` |
+
+### Verification Status
+
+The animation no-slip guard `{python} 'cleared' if RUN_ANIMATION and animation_noslip_check.passed else 'was not evaluated'`.
+
+### Next Steps
+
+Proceed to `06_master_report/06_verification_summary.qmd` to view the complete verification summary for all notebooks.
+
+---
+
+*Notebook completed in `{python} f"{time.perf_counter() - notebook_t0:.1f}s"`*

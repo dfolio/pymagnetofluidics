@@ -1,0 +1,408 @@
+---
+title: "01 - Baseline Flow Training"
+subtitle: "Training the undisturbed Hagen-Poiseuille flow network"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 01 - Baseline Flow Training
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+# %run ../00_configuration/00_configuration.qmd
+```
+
+{{< include ../00_configuration/00_configuration.qmd >}}
+
+```{python}
+#| label: notebook-setup
+print(f"\n{'='*60}")
+print(f"Notebook: 01 - Baseline Flow Training")
+print(f"{'='*60}")
+print(f"Channel radius R*: {R:.4f}")
+print(f"Channel length L*: {L:.4f}")
+print(f"Peak velocity: {PEAK_VELOCITY_NONDIM:.4f}")
+print(f"Residual form: {BASELINE_RESIDUAL_FORM}")
+print(f"Device: {DEVICE}")
+print(f"{'='*60}\n")
+```
+
+## Overview
+
+This notebook trains the **baseline network** for undisturbed Hagen-Poiseuille flow in a cylindrical channel. This serves as the reference solution against which all particle-perturbed flows are compared.
+
+### Purpose
+
+- Train a PINN to solve the steady Stokes flow in a cylindrical channel
+- Validate against the analytical Hagen-Poiseuille solution
+- Provide a reference flow field for subsequent particle-perturbed simulations
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+
+### Outputs
+
+- Trained `baseline_network` checkpoint saved to `{python} str(BASELINE_CHECKPOINT)`
+- Training history and loss curves
+- Global L2 error against analytical solution
+
+## Mathematical Formulation
+
+The baseline flow satisfies the steady Stokes equations in cylindrical coordinates $(r^*, z^*)$:
+
+$$-\pdv{p^*}{r^*} + \laplacian u_r^* - \frac{u_r^*}{r^{*2}} = 0,$$
+$$-\pdv{p^*}{z^*} + \laplacian u_z^* = 0,$$
+$$\frac{1}{r^*}\pdv{ (r^* u_r^*)}{r^*} + \pdv{u_z^*}{z^*} = 0,$$
+
+with boundary conditions:
+- No-slip at the wall: $\vb{u}^* = \vb{0}$ at $r^* = R^*$
+- Symmetry on the axis: $u_r^* = 0$, $\pdv{u_z^*}{r^*} = 0$ at $r^* = 0$
+- Parabolic inlet profile: $u_z^* = u_{\max} \left(1 - \frac{r^{*2}}{R^{*2}}\right)$ at $z^* = 0$
+- Outlet pressure gauge: $p^* = 0$ at $z^* = L^*$
+
+The analytical solution is:
+$$u_z^*(r^*) = u_{\max} \left(1 - \frac{r^{*2}}{R^{*2}}\right), \qquad u_r^* = 0, \qquad p^*(z^*) = -\frac{2 u_{\max} \mu}{R^{*2}} (L^* - z^*).$$
+
+## Network Architecture
+
+```{python}
+#| label: baseline-network-architecture
+"""
+Define the baseline network architecture.
+
+The baseline network uses a simple MLP with 3 outputs (u_r, u_z, p)
+and hard wall constraints to enforce no-slip at the boundary.
+"""
+
+# Create training configuration
+baseline_config = create_baseline_training_config(random_seed_offset=0)
+
+# Build the raw MLP
+baseline_raw = mfp.build_mlp(
+    n_inputs=2,  # (r, z)
+    n_outputs=3,  # (u_r, u_z, p)
+    hidden_layers=(32, 32, 32),
+    training_config=baseline_config,
+    activation="tanh",
+)
+
+# Apply hard wall constraint
+baseline_network = mfp.apply_hard_wall_constraint(baseline_raw, domain)
+
+print(f"Baseline network architecture:")
+print(f"  Input size: 2 (r, z)")
+print(f"  Hidden layers: (32, 32, 32)")
+print(f"  Output size: 3 (u_r, u_z, p)")
+print(f"  Total parameters: {sum(p.numel() for p in baseline_network.parameters()):,}")
+```
+
+## Training
+
+```{python}
+#| label: baseline-training
+#| echo: true
+"""
+Train the baseline network.
+
+This cell trains the network to satisfy the Stokes equations with
+Hagen-Poiseuille boundary conditions.
+"""
+
+print(f"\nTraining baseline network...")
+t0 = time.perf_counter()
+
+baseline_network, baseline_history = mfp.train(
+    network=baseline_network,
+    domain=domain,
+    fluid_config=fluid_config,
+    field_config=field_config,
+    training_config=baseline_config,
+)
+
+training_time = time.perf_counter() - t0
+print(f"Baseline trained in {training_time:.1f}s")
+print(f"Final total loss: {baseline_history.adam.total[-1]:.3e}")
+```
+
+```{python}
+#| label: baseline-training-summary
+"""
+Display training summary and loss history.
+"""
+
+print(f"\nTraining summary:")
+baseline_history.print_summary()
+
+# Extract key metrics
+initial_loss = baseline_history.adam.total[0]
+final_loss = baseline_history.adam.total[-1]
+loss_reduction = (abs(initial_loss - final_loss) / max(abs(initial_loss), 1.0e-12))
+
+print(f"\nLoss reduction: {loss_reduction:.3%}")
+```
+
+## Training Loss Visualization
+
+```{python}
+#| label: fig-baseline-loss
+#| fig-cap: "Baseline network training loss by component: Adam epochs, then L-BFGS closure evaluations (phase separated by the vertical line)."
+
+display(plotting.plot_training_history(baseline_history, log_scale=True))
+```
+
+The training loss in @fig-baseline-loss shows the convergence of the Adam optimizer followed by L-BFGS refinement. The loss contains contributions from:
+- Radial momentum residual
+- Axial momentum residual  
+- Continuity residual
+- Inlet profile matching
+- Outlet pressure gauge
+
+The final loss value of `{python} f"{final_loss:.3e}"` indicates good convergence.
+
+## Global L2 Error
+
+```{python}
+#| label: baseline-l2-error
+"""
+Compute the global L2 error against the analytical solution.
+
+This provides a quantitative measure of the network's accuracy.
+"""
+
+# Create evaluation grid
+r_eval = torch.linspace(0.0, R, 80, device=DEVICE, dtype=DTYPE)
+z_eval = torch.linspace(0.0, L, 160, device=DEVICE, dtype=DTYPE)
+
+baseline_l2_error = mfp.compute_global_l2_error(
+    baseline_network,
+    domain,
+    r_eval,
+    z_eval,
+    PEAK_VELOCITY_NONDIM,
+)
+
+print(f"Baseline global relative L2 velocity error: {baseline_l2_error:.3e}")
+```
+
+The global relative L2 velocity error is `{python} f"{baseline_l2_error:.3e}"`. This is the primary accuracy metric for the baseline network.
+
+## Verification: Analytical Solution Comparison
+
+```{python}
+#| label: baseline-verification-grid
+"""
+Create a fine grid for detailed verification against analytical solution.
+"""
+
+n_r_verify = 100
+n_z_verify = 200
+r_grid = torch.linspace(0.0, R, n_r_verify, device=DEVICE, dtype=DTYPE)
+z_grid = torch.linspace(0.0, L, n_z_verify, device=DEVICE, dtype=DTYPE)
+rr, zz = torch.meshgrid(r_grid, z_grid, indexing="ij")
+grid_pts = torch.stack([rr.reshape(-1), zz.reshape(-1)], dim=1)
+
+# Get network predictions
+with torch.no_grad():
+    network_pred = baseline_network(grid_pts).reshape(n_r_verify, n_z_verify, 3)
+    u_r_pred = network_pred[..., 0]
+    u_z_pred = network_pred[..., 1]
+    p_pred = network_pred[..., 2]
+
+# Compute analytical solution
+analytical_u_z = PEAK_VELOCITY_NONDIM * (1.0 - rr**2 / R**2)
+analytical_u_r = torch.zeros_like(rr)
+analytical_p = -2.0 * PEAK_VELOCITY_NONDIM * (L - zz) / R**2
+
+# Compute errors
+u_z_error = (u_z_pred - analytical_u_z).abs()
+u_r_error = (u_r_pred - analytical_u_r).abs()
+p_error = (p_pred - analytical_p).abs()
+
+# Global error metrics
+u_z_max_error = u_z_error.max().item()
+u_z_rms_error = torch.sqrt(torch.mean(u_z_error**2)).item()
+u_r_max_error = u_r_error.max().item()
+p_max_error = p_error.max().item()
+
+print(f"\nVerification against analytical solution:")
+print(f"  u_z max absolute error: {u_z_max_error:.3e}")
+print(f"  u_z RMS error: {u_z_rms_error:.3e}")
+print(f"  u_r max absolute error: {u_r_max_error:.3e}")
+print(f"  p max absolute error: {p_max_error:.3e}")
+```
+
+## Visualization: Velocity Profile Comparison
+
+```{python}
+#| label: fig-baseline-profile-comparison
+#| fig-cap: "Baseline network axial velocity profile compared to analytical Hagen-Poiseuille solution at multiple axial stations."
+
+# Select stations for profile comparison
+n_stations = 5
+z_stations_profile = torch.linspace(0.0, L, n_stations, device=DEVICE, dtype=DTYPE)
+
+# Evaluate profiles and prepare for plotting
+station_profiles = []
+labels = []
+for z_station in z_stations_profile:
+    r_profile = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
+    coords = torch.stack([r_profile, z_station.expand_as(r_profile)], dim=1)
+    
+    with torch.no_grad():
+        u_z_network = baseline_network(coords)[:, 1]
+    
+    u_z_analytical = PEAK_VELOCITY_NONDIM * (1.0 - r_profile**2 / R**2)
+    
+    station_profiles.append((float(z_station.item()), u_z_network, u_z_analytical))
+    labels.append(f"z*={float(z_station.item()):.2f}")
+
+# Use plotting module function
+display(plotting.plot_station_profile_comparison(
+    r_profile,
+    station_profiles,
+    labels,
+    linewidth=1.6,
+))
+```
+
+@fig-baseline-profile-comparison shows the axial velocity profile at `{python} n_stations` stations along the channel. The network predictions (dashed orange) closely match the analytical solution (solid blue) at all stations.
+
+## Verification: Velocity Magnitude Field
+
+```{python}
+#| label: fig-baseline-velocity-field
+#| fig-cap: "Baseline network velocity magnitude field. Streamlines show the parabolic flow profile."
+
+# Use plotting module function for streamlines
+display(plotting.plot_streamlines(
+    baseline_network,
+    domain,
+    resolution=120,
+    density=1.5,
+    color="white",
+    linewidth=0.5,
+))
+```
+
+@fig-baseline-velocity-field shows the velocity magnitude field with streamlines. The parabolic profile characteristic of Hagen-Poiseuille flow is clearly visible.
+
+## Save Checkpoint
+
+```{python}
+#| label: save-baseline-checkpoint
+"""
+Save the trained baseline network to disk.
+
+This checkpoint will be used by all subsequent notebooks.
+"""
+SAVE_BASELINE_CHECKPOINT = True
+# mfp.make_provenance work with StreamLossHistory
+if SAVE_BASELINE_CHECKPOINT:
+    print(f"\nSaving baseline network checkpoint to {BASELINE_CHECKPOINT}...")
+    
+    # Create provenance
+    baseline_provenance = mfp.make_provenance(baseline_config, baseline_history)
+    
+    # Save checkpoint
+    mfp.save_stream_checkpoint(
+        baseline_network,
+        BASELINE_CHECKPOINT,
+        baseline_config,
+        baseline_provenance,
+        baseline_history,
+    )
+    
+    print(f"Checkpoint saved successfully.")
+    print(f"Checkpoint size: {BASELINE_CHECKPOINT.stat().st_size / 1024:.1f} KB")
+```
+
+## Verification Checks
+
+```{python}
+#| label: baseline-verification-checks
+"""
+Define and evaluate verification checks for the baseline network.
+
+These checks ensure the baseline network meets the required accuracy standards.
+"""
+
+# Baseline L2 error check
+baseline_l2_check = mfp.evaluate_check(
+    "Baseline global L2 error",
+    "Global relative L2 velocity error against analytical Hagen-Poiseuille solution",
+    baseline_l2_error,
+    0.01,  # 1% tolerance
+    "<=",
+)
+
+# u_z max error check
+u_z_error_reference = PEAK_VELOCITY_NONDIM
+u_z_max_relative_error = u_z_max_error / u_z_error_reference
+
+u_z_max_check = mfp.evaluate_check(
+    "Baseline u_z max relative error",
+    "Maximum absolute error in axial velocity normalized by peak velocity",
+    u_z_max_relative_error,
+    0.01,  # 1% tolerance
+    "<=",
+)
+
+# u_r should be nearly zero
+u_r_check = mfp.evaluate_check(
+    "Baseline u_r error",
+    "Maximum absolute error in radial velocity (should be ~0)",
+    u_r_max_error,
+    1.0e-4,  # Very small tolerance
+    "<=",
+)
+
+# Aggregate checks
+baseline_checks = (baseline_l2_check, u_z_max_check, u_r_check)
+verification_checks = verification_checks + baseline_checks
+
+for check in baseline_checks:
+    verification_categories[check.name] = VERIFICATION
+
+print(f"\nBaseline verification checks:")
+mfp.render_verification_table(baseline_checks)
+```
+
+## Summary
+
+This notebook has:
+
+1. **Trained** the baseline network for undisturbed Hagen-Poiseuille flow
+2. **Validated** the network against the analytical solution
+3. **Visualized** the velocity field and profile comparisons
+4. **Saved** the trained network checkpoint for use in subsequent notebooks
+5. **Evaluated** verification checks to ensure accuracy
+
+### Key Results
+
+| **Metric** | **Value** |
+|------------|-----------|
+| Training time | `{python} f"{training_time:.1f}s"` |
+| Final loss | `{python} f"{final_loss:.3e}"` |
+| Global L2 error | `{python} f"{baseline_l2_error:.3e}"` |
+| u_z max relative error | `{python} f"{u_z_max_relative_error:.3%}"` |
+| u_r max error | `{python} f"{u_r_max_error:.3e}"` |
+
+### Next Steps
+
+Proceed to `01_baseline_verification.qmd` for detailed verification, or directly to `02_particle_flow/02_particle_training.qmd` to train the particle-perturbed flow network.
+
+---
+
+*Notebook completed in `{python} f"{time.perf_counter() - notebook_t0:.1f}s"`*

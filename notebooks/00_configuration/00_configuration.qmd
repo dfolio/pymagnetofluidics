@@ -1,0 +1,648 @@
+---
+title: "00 - Shared Configuration and Utilities"
+subtitle: "Centralized parameters, thresholds, and helper functions for all PINN verification notebooks"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\require{physics}$
+:::
+
+```{python}
+#| label: import-magnetofluidics_pinn
+
+import sys
+from pathlib import Path
+
+# Ensure magnetofluidics_pinn is imported from the local checkout
+found = None
+for candidate in (Path.cwd(), Path.cwd().parent, Path.cwd().parent.parent):
+    if (candidate / "magnetofluidics_pinn").is_dir():
+        found = candidate.resolve()
+        if str(found) not in sys.path:
+            sys.path.insert(0, str(found))
+        break
+
+import magnetofluidics_pinn as mfp
+from magnetofluidics_pinn.visualization import plotting
+
+resolved = Path(mfp.__file__).resolve()
+print(f"mfp imported from: {resolved}")
+if found is not None:
+    assert resolved.is_relative_to(found), (
+        f"mfp was imported from {resolved}, not from the local checkout at {found} – "
+        "a stale module is cached (likely a warm Quarto kernel); restart the kernel/daemon."
+    )
+```
+
+# 00 - Configuration
+
+This notebook defines all **shared configuration**, **physical parameters**, **training hyperparameters**, and **verification thresholds** used across the entire verification suite. All other notebooks import from this single source to ensure **consistency** and **reproducibility**.
+
+## Design Principles
+
+1. **Single Source of Truth**: All parameters are defined here exactly once
+2. **Immutability**: Configuration objects use `dataclasses` and are not modified after creation
+3. **Type Safety**: All values have explicit types and units
+4. **Documentation**: Every parameter has a docstring explaining its purpose and units
+5. **Validation**: Configuration is validated at import time
+
+
+## Initialization
+
+```{python}
+#| label: initializationcategories
+
+"""
+Initialize the environment and configure global settings.
+
+This cell should be run at the beginning of every notebook to ensure
+consistent environment configuration.
+"""
+
+import datetime
+import dataclasses
+import copy
+import time
+import math
+
+import matplotlib.figure
+import numpy as np
+import pandas as pd
+import torch
+
+# Random seed for reproducibility
+RANDOM_SEED: int = 42
+
+# Device and dtype configuration
+DEVICE: torch.device = mfp.resolve_device("cuda")
+DTYPE: torch.dtype = torch.float32
+
+# Set random seed for reproducibility
+mfp.set_random_seed(RANDOM_SEED)
+
+# Configure CUDA matmul precision
+mfp.configure_cuda_matmul_precision("highest")
+
+# Configure pandas display
+pd.set_option("display.float_format", lambda value: f"{value:.3e}")
+
+# Print environment information
+notebook_t0 = time.perf_counter()
+gpu_name = torch.cuda.get_device_name(DEVICE) if DEVICE.type == "cuda" else "no CUDA device"
+print(f"PyTorch: {torch.__version__} | Device: {DEVICE} ({gpu_name}) | dtype: {DTYPE}")
+print(f"magnetofluidics_pinn: v{mfp.__version__}")
+print(f"Plotting module: {plotting.__name__}")
+```
+
+## Physical Configuration
+
+```{python}
+#| label: physical-parameters
+
+"""
+Physical parameters for the microfluidic channel and particle.
+
+All values are in SI units unless otherwise specified.
+- radius: Channel radius [m]
+- length: Channel length [m]
+- reference_velocity: Maximum centerline velocity [m/s]
+- dynamic_viscosity: Fluid dynamic viscosity [Pa·s]
+- density: Fluid density [kg/m³]
+"""
+
+# Channel geometry
+CHANNEL_RADIUS: float = 7.5e-4  # 750 μm
+CHANNEL_LENGTH: float = 8.0 * CHANNEL_RADIUS  # 8 mm
+
+# Fluid properties (water at 20°C)
+REFERENCE_VELOCITY: float = 1.0e-4  # 0.1 mm/s
+DYNAMIC_VISCOSITY: float = 1.0e-3  # 1 mPa·s
+FLUID_DENSITY: float = 1.0e3  # 1000 kg/m³
+
+# Particle properties
+PARTICLE_RADIUS: float = 0.25 * CHANNEL_RADIUS  # a* = 0.25 R*
+PARTICLE_AXIAL_POSITION: float = 0.5 * CHANNEL_LENGTH  # Centered
+PARTICLE_AXIAL_VELOCITY: float = 0.0  # Fixed sphere initially
+
+# Magnetic properties (for trajectory notebook)
+MAGNETIC_MOMENT_MAGNITUDE: float = 1.0e-10  # A·m²
+MAGNETIC_FIELD_MAGNITUDE: float = 1.0e-10  # T
+MAGNETIC_FIELD_ORIENTATION: tuple[float, float] = (0.0, 1.0)  # z-direction
+MAGNETIC_MOMENT_ORIENTATION: tuple[float, float] = (0.0, 1.0)  # z-direction
+```
+
+```{python}
+#| label: domain-configuration
+
+"""
+Domain and fluid configuration objects.
+
+These are created from the physical parameters above and used by all notebooks.
+"""
+
+fluid_config = mfp.FluidConfig(
+    regime="stokes",
+    dynamic_viscosity=DYNAMIC_VISCOSITY,
+    density=FLUID_DENSITY,
+)
+
+domain_config = mfp.DomainConfig(
+    kind="channel",
+    length=CHANNEL_LENGTH,
+    radius=CHANNEL_RADIUS,
+    fluid=fluid_config,
+    u_max=REFERENCE_VELOCITY,
+)
+
+field_config = mfp.MagneticFieldConfig(
+    source="uniform",
+    magnitude=MAGNETIC_FIELD_MAGNITUDE,
+    orientation=MAGNETIC_FIELD_ORIENTATION,
+)
+
+magnetic_moment = mfp.MagneticMomentConfig(
+    magnitude=MAGNETIC_MOMENT_MAGNITUDE,
+    orientation=MAGNETIC_MOMENT_ORIENTATION,
+)
+
+particle_config = mfp.ParticleConfig(
+    kind="spherical",
+    radius=PARTICLE_RADIUS,
+    magnetic_moment=magnetic_moment,
+)
+
+# Non-dimensional domain
+physical_domain = mfp.build_channel_domain(domain_config)
+scales = mfp.compute_scales(domain_config, field_config)
+domain = mfp.nondimensionalize_domain(physical_domain, scales)
+
+# Derived constants
+R: float = domain.radius  # Non-dimensional channel radius
+L: float = domain.length  # Non-dimensional channel length
+PARTICLE_RADIUS_NONDIM: float = particle_config.radius  # Non-dimensional particle radius
+PARTICLE_AXIAL_POSITION_NONDIM: float = 0.5 * L  # Non-dimensional particle position
+```
+
+```{python}
+#| label: particle-state
+
+"""
+Particle state configuration.
+
+Defines the initial state of the particle for all simulations.
+"""
+
+INITIAL_PARTICLE_POSITION: tuple[float, float] = (0.0, PARTICLE_AXIAL_POSITION_NONDIM)
+INITIAL_PARTICLE_VELOCITY: tuple[float, float] = (0.0, PARTICLE_AXIAL_VELOCITY)
+
+particle_state = mfp.ParticleState(
+    position=torch.tensor(INITIAL_PARTICLE_POSITION, device=DEVICE, dtype=DTYPE),
+    velocity=torch.tensor(INITIAL_PARTICLE_VELOCITY, device=DEVICE, dtype=DTYPE),
+    time=0.0,
+)
+
+state_translating = dataclasses.replace(
+    particle_state, velocity=torch.tensor((0.0, 1.0), device=DEVICE, dtype=DTYPE))
+```
+
+## Training Hyperparameters
+
+```{python}
+#| label: training-hyperparameters
+
+"""
+Training hyperparameters for all neural network training.
+
+These are separated from physical parameters to allow training sweeps
+without modifying the physics.
+"""
+
+# Adam optimizer parameters
+N_INTERIOR_POINTS: int = 10_000  # Number of interior collocation points per Adam epoch
+N_BOUNDARY_POINTS: int = 2_000  # Number of boundary collocation points per Adam epoch
+N_EPOCHS: int = 1_500
+LOG_EVERY: int = int(N_EPOCHS / 5)
+
+# L-BFGS refinement parameters
+LBFGS_N_INTERIOR_POINTS: int = 20_000
+LBFGS_N_BOUNDARY_POINTS: int = 4_000
+LBFGS_ROUNDS: int = 10
+LBFGS_ITERATIONS_PER_ROUND: int = 500
+
+# Residual form selection
+BASELINE_RESIDUAL_FORM: str = "standard"  # "standard" or "r_weighted"
+PARTICLE_RESIDUAL_FORM: str = "r_weighted"  # "standard", "r_weighted", or "native"
+
+# Stream-function architecture
+STREAM_HIDDEN_LAYERS: tuple[int, ...] = (96, 96, 96, 96)  # Width increased from 64 to 96
+# STREAM_HIDDEN_LAYERS: tuple[int, ...] = (128, 128, 128, 128)  # Width increased from 64 to 96
+
+# Taper parameters for stream-function constraint
+TAPER_MARGIN: float = 8.0
+TAPER_SHELL_FRACTION: float = 0.5
+TAPER_SHELL_FACTOR: float = 1.1 * math.sqrt(1.0 + TAPER_MARGIN)
+TAPER_BAND_FRACTION: float = 0.0
+TAPER_BAND_FACTOR: float = 1.5
+TAPER_EDGE_BAND: float = 0.05  # Relative half-width for edge probe
+
+# Options of the stream-function model (see `networks.lifting`).
+LIFTING_MODE = "taper"        # "taper" (default) or "wall" (ablation)
+WALL_START_FRACTION = 0.05    # blend start of the wall mode, r0 = a + f (R - a)
+END_ENVELOPE = False          # True: exact Poiseuille at inlet and outlet (taper mode only)
+AXIS_CLEARANCE = 0.0          # the (s, z) residual is regular on the axis; keep 0.0
+REFINE_DTYPE = torch.float64  # precision of the L-BFGS phase
+SHELL_ARGS = dict(shell_fraction=TAPER_SHELL_FRACTION, shell_factor=TAPER_SHELL_FACTOR,
+                  band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR)  # MOVED here (was defined after first use)
+
+# Evaluation parameters
+PEAK_VELOCITY_NONDIM: float = 1.0  # Non-dimensional peak centerline velocity
+PEAK_VELOCITY_PHYSICAL: float = domain_config.u_max  # Physical velocity scale
+REFERENCE_PRESSURE: float = domain_config.p_max
+
+# Quadrature parameters
+Q_STATION_NODES: int = 4096  # Converged quadrature node count
+RESISTANCE_N_QUAD: int = 181  # Quadrature points for traction integrals
+RESISTANCE_SHELL_RADII: tuple[float, ...] = (1.0, 1.25, 1.5, 2.0)
+
+# Flow rate evaluation
+N_FLOWRATE_STATIONS: int = 40
+Q_NODE_COUNTS: tuple[int, ...] = (256, 1024, 4096)
+
+# Pressure evaluation
+N_PRESSURE_POINTS: int = 200
+
+# Profile evaluation
+N_RADIAL_PROFILE: int = 150
+N_AXIAL_PROFILE: int = 260
+```
+
+```{python}
+#| label: create-training-configs
+
+"""
+Factory functions for creating training configuration objects.
+
+These ensure consistent training configurations across all notebooks.
+"""
+
+def create_baseline_training_config(random_seed_offset: int = 0) -> mfp.TrainingConfig:
+    """Creates a training configuration for baseline (undisturbed) flow.
+    
+    Args:
+        random_seed_offset: Offset to add to RANDOM_SEED for this configuration.
+        
+    Returns:
+        TrainingConfig: Configured for baseline flow training.
+    """
+    return mfp.TrainingConfig(
+        n_interior_points=N_INTERIOR_POINTS,
+        n_boundary_points=N_BOUNDARY_POINTS,
+        n_epochs=N_EPOCHS,
+        random_seed=RANDOM_SEED + random_seed_offset,
+        device=str(DEVICE),
+        use_lbfgs_refinement=True,
+        lbfgs_n_interior_points=LBFGS_N_INTERIOR_POINTS,
+        lbfgs_n_boundary_points=LBFGS_N_BOUNDARY_POINTS,
+        lbfgs_rounds=LBFGS_ROUNDS,
+        lbfgs_iterations_per_round=LBFGS_ITERATIONS_PER_ROUND,
+        residual_form=BASELINE_RESIDUAL_FORM,
+        verbose=True,
+        log_every=LOG_EVERY,
+    )
+
+
+def create_particle_training_config(random_seed_offset: int = 0) -> mfp.TrainingConfig:
+    """Creates a training configuration for particle-perturbed flow.
+    
+    Args:
+        random_seed_offset: Offset to add to RANDOM_SEED for this configuration.
+        
+    Returns:
+        TrainingConfig: Configured for particle flow training.
+    """
+    return mfp.TrainingConfig(
+        n_interior_points=N_INTERIOR_POINTS,
+        n_boundary_points=N_BOUNDARY_POINTS,
+        n_epochs=N_EPOCHS,
+        random_seed=RANDOM_SEED + random_seed_offset,
+        device=str(DEVICE),
+        use_lbfgs_refinement=True,
+        lbfgs_n_interior_points=LBFGS_N_INTERIOR_POINTS,
+        lbfgs_n_boundary_points=LBFGS_N_BOUNDARY_POINTS,
+        lbfgs_rounds=LBFGS_ROUNDS,
+        lbfgs_iterations_per_round=LBFGS_ITERATIONS_PER_ROUND,
+        residual_form=PARTICLE_RESIDUAL_FORM,
+        verbose=True,
+        log_every=LOG_EVERY,
+    )
+
+
+PARTICLE_TRAINING_CONFIG=create_particle_training_config(RANDOM_SEED)
+
+def create_resistance_training_config(random_seed_offset: int = 0) -> mfp.TrainingConfig:
+    """Creates a training configuration for resistance problems.
+    
+    Args:
+        random_seed_offset: Offset to add to RANDOM_SEED for this configuration.
+        
+    Returns:
+        TrainingConfig: Configured for resistance problem training.
+    """
+    return mfp.TrainingConfig(
+        n_interior_points=N_INTERIOR_POINTS,
+        n_boundary_points=N_BOUNDARY_POINTS,
+        n_epochs=N_EPOCHS,
+        random_seed=RANDOM_SEED + random_seed_offset,
+        device=str(DEVICE),
+        use_lbfgs_refinement=True,
+        lbfgs_n_interior_points=LBFGS_N_INTERIOR_POINTS,
+        lbfgs_n_boundary_points=LBFGS_N_BOUNDARY_POINTS,
+        lbfgs_rounds=LBFGS_ROUNDS,
+        lbfgs_iterations_per_round=LBFGS_ITERATIONS_PER_ROUND,
+        residual_form=PARTICLE_RESIDUAL_FORM,
+        verbose=True,
+        log_every=LOG_EVERY,
+    )
+
+RESISTANCE_TRAINING_CONFIG = create_resistance_training_config(random_seed_offset=0)    
+```
+
+## Verification Thresholds
+
+```{python}
+#| label: verification-thresholds
+
+"""
+Verification thresholds for all checks.
+
+These define the tolerance levels for each verification category.
+All thresholds are non-dimensional unless otherwise specified.
+"""
+
+EPS = torch.finfo(DTYPE).eps
+thresholds = mfp.default_thresholds(
+    dtype=DTYPE, peak_velocity=PEAK_VELOCITY_NONDIM,
+    noslip_tolerance=1.0e3 * EPS,             # structural condition (was 0.15; achieved ~4e-7)
+    quadrature_convergence_tolerance=1.0e-5,   # Gauss-Legendre (was 2e-2; achieved ~1e-7)
+    conservation_of_mass_tolerance=1.0e-4,     # Q is constant by construction (was 5e-2; achieved ~2e-6)
+)
+
+# Custom thresholds (override defaults where needed)
+CONSERVATION_OF_MASS_TOLERANCE: float = thresholds.conservation_of_mass_tolerance
+NOSLIP_TOLERANCE: float = thresholds.noslip_tolerance
+TWO_WAY_RESIDUAL_TOLERANCE: float = thresholds.two_way_residual_tolerance
+QUADRATURE_CONVERGENCE_TOLERANCE: float = thresholds.quadrature_convergence_tolerance
+STRUCTURAL_TOLERANCE: float = thresholds.structural_tolerance
+
+# Additional thresholds
+RESIDUAL_CONSISTENCY_TOLERANCE: float = 2.0  # O(1) band for residual form comparison
+PROBE_GAP_TOLERANCE: float = 10.0  # Ratio threshold for held-out probe
+INTERNAL_BALANCE_TOLERANCE: float = 0.02  # For momentum and pressure balance gates
+DIVERGENCE_EPSILON_FACTOR: float = 1.0e3  # Multiple of machine epsilon for divergence check
+
+# Reference uncertainty
+REFERENCE_UNCERTAINTY: float = 0.05
+
+def get_reference_tolerance(reynolds_number: float) -> float:
+    """Computes reference tolerance based on Reynolds number and uncertainty.
+    
+    Args:
+        reynolds_number: Reynolds number for the flow.
+        
+    Returns:
+        float: Tolerance for reference comparisons.
+    """
+    re_a = reynolds_number * PARTICLE_RADIUS_NONDIM
+    return mfp.reference_tolerance(REFERENCE_UNCERTAINTY, re_a)
+```
+
+## Evaluation Stations
+
+```{python}
+#| label: evaluation-stations
+
+"""
+Shared evaluation stations for all profile and flow rate evaluations.
+
+These stations are used consistently across all notebooks to ensure
+comparability of results.
+"""
+
+# Compute edge radius for taper ball
+EDGE_RADIUS: float = PARTICLE_RADIUS_NONDIM * math.sqrt(1.0 + TAPER_MARGIN)
+STATION_CLEARANCE: float = 2.0 * EDGE_RADIUS
+
+# Define evaluation stations: inlet, upstream, downstream, outlet
+z_stations_eval = [
+    0.50,  # Near inlet
+    PARTICLE_AXIAL_POSITION_NONDIM - STATION_CLEARANCE,  # Upstream of particle
+    PARTICLE_AXIAL_POSITION_NONDIM + STATION_CLEARANCE,  # Downstream of particle
+    7.50,  # Near outlet
+]
+
+# Ensure all stations are clear of the taper ball
+assert all(
+    abs(z - PARTICLE_AXIAL_POSITION_NONDIM) >= STATION_CLEARANCE 
+    for z in z_stations_eval
+), "Evaluation stations must be clear of the taper ball"
+
+# Flow rate evaluation stations
+z_upstream = torch.linspace(
+    0.05 * L, 
+    PARTICLE_AXIAL_POSITION_NONDIM - PARTICLE_RADIUS_NONDIM, 
+    N_FLOWRATE_STATIONS, 
+    device=DEVICE, 
+    dtype=DTYPE
+)
+
+z_downstream = torch.linspace(
+    PARTICLE_AXIAL_POSITION_NONDIM + PARTICLE_RADIUS_NONDIM, 
+    0.95 * L, 
+    N_FLOWRATE_STATIONS, 
+    device=DEVICE, 
+    dtype=DTYPE
+)
+
+# Reference flow rate (analytical Hagen-Poiseuille)
+Q_REF = mfp.poiseuille_reference_flow_rate(R, PEAK_VELOCITY_NONDIM)
+```
+
+## Utility Functions
+
+```{python}
+#| label: utility-functions
+
+"""
+Utility functions used across multiple notebooks.
+
+These functions encapsulate common operations to reduce code duplication.
+"""
+
+def compute_blockage_ratio(PARTICLE_RADIUS: float, channel_radius: float) -> float:
+    """Computes the blockage ratio a*/R*.
+    
+    Args:
+        PARTICLE_RADIUS: Particle radius (non-dimensional).
+        channel_radius: Channel radius (non-dimensional).
+        
+    Returns:
+        float: Blockage ratio a*/R*.
+    """
+    return PARTICLE_RADIUS / channel_radius
+
+
+def compute_reynolds_number(domain_config: mfp.DomainConfig) -> float:
+    """Computes the channel Reynolds number.
+    
+    Args:
+        domain_config: Domain configuration object.
+        
+    Returns:
+        float: Reynolds number Re_R.
+    """
+    return domain_config.reynolds
+
+
+def compute_particle_reynolds(domain_config: mfp.DomainConfig, 
+                              particle_config: mfp.ParticleConfig) -> float:
+    """Computes the particle-scale Reynolds number.
+    
+    Args:
+        domain_config: Domain configuration object.
+        particle_config: Particle configuration object.
+        
+    Returns:
+        float: Particle-scale Reynolds number Re_p.
+    """
+    particle_state_physical = mfp.ParticleState(
+        position=particle_state.position * scales.length,
+        velocity=particle_state.velocity * scales.velocity,
+        time=particle_state.time * scales.time,
+    )
+    particle_config_physical = mfp.ParticleConfig(
+        kind=particle_config.kind,
+        radius=particle_config.radius * scales.length,
+        magnetic_moment=particle_config.magnetic_moment,
+    )
+    return domain_config.reynolds_particle(
+        particle_config=particle_config_physical,
+        particle_state=particle_state_physical
+    )
+
+
+def local_particle_chord_radius(axial_position: float, 
+                                PARTICLE_AXIAL_POSITION: float, 
+                                PARTICLE_RADIUS: float) -> float:
+    """Computes the radial half-chord of the sphere's cross-section at a given axial position.
+    
+    At axial position z, the sphere (z - z_p)^2 + r^2 = a^2 intersects the
+    meridian plane only where |z - z_p| <= a, over the radial interval
+    r ∈ [0, r_c(z)], with
+    
+    r_c(z) = sqrt(max(0, a^2 - (z - z_p)^2)).
+    
+    Args:
+        axial_position: Axial coordinate z at which the chord is evaluated.
+        PARTICLE_AXIAL_POSITION: Sphere center z_p.
+        PARTICLE_RADIUS: Sphere radius a.
+        
+    Returns:
+        float: The half-chord radius r_c(z); 0.0 where the station does not
+            intersect the sphere.
+        
+    Raises:
+        ValueError: If PARTICLE_RADIUS is not finite and strictly positive.
+    """
+    if not math.isfinite(PARTICLE_RADIUS) or PARTICLE_RADIUS <= 0.0:
+        raise ValueError(
+            f"PARTICLE_RADIUS must be finite and strictly positive; got {PARTICLE_RADIUS!r}."
+        )
+    axial_offset_squared = (axial_position - PARTICLE_AXIAL_POSITION) ** 2
+    return math.sqrt(max(0.0, PARTICLE_RADIUS ** 2 - axial_offset_squared))
+```
+
+## Checkpoint Management
+
+```{python}
+#| label: checkpoint-paths
+
+"""
+Checkpoint file paths for all trained networks.
+
+These paths are used consistently across all notebooks to save and load
+-trained networks.
+"""
+
+from pathlib import Path
+
+BASEDIR = "../"
+# Base checkpoint directory
+CHECKPOINT_DIR = Path(f"{BASEDIR}checkpoints")
+CHECKPOINT_DIR.mkdir(exist_ok=True)
+
+# Baseline flow checkpoint
+BASELINE_CHECKPOINT = CHECKPOINT_DIR / f"{BASELINE_RESIDUAL_FORM}_baseline.pt"
+
+
+CHECKPOINT_PREFIX = f"{BASELINE_RESIDUAL_FORM}"
+# Particle flow checkpoint
+PARTICLE_CHECKPOINT = CHECKPOINT_DIR / f"{CHECKPOINT_PREFIX}_fixed_sphere.pt"
+
+# Resistance problem checkpoints
+RESISTANCE_AMBIENT_CHECKPOINT = CHECKPOINT_DIR / f"{CHECKPOINT_PREFIX}_resistance_ambient.pt"
+RESISTANCE_TRANSLATING_CHECKPOINT = CHECKPOINT_DIR / f"{CHECKPOINT_PREFIX}_resistance_translating.pt"
+
+# Warm-start checkpoints
+COLD_CHECKPOINT = CHECKPOINT_DIR / f"{CHECKPOINT_PREFIX}_fixed_sphere_cold.pt"
+COLD_SHIFTED_CHECKPOINT = CHECKPOINT_DIR / f"{CHECKPOINT_PREFIX}_fixed_sphere_cold_shifted.pt"
+WARM_CHECKPOINT = CHECKPOINT_DIR / f"{CHECKPOINT_PREFIX}_fixed_sphere_warm_shifted.pt"
+
+# Animation output
+ANIMATION_DIR = Path(f"{BASEDIR}animations")
+ANIMATION_DIR.mkdir(exist_ok=True)
+ANIMATION_PATH = ANIMATION_DIR / f"{PARTICLE_RESIDUAL_FORM}_magnetic_trajectory.gif"
+ANIMATION_STATIC_PATH = ANIMATION_PATH.with_suffix(".png")
+```
+
+## Verification Categories
+
+```{python}
+#| label: verification-categories
+
+"""
+Verification category constants.
+
+Used to categorize all verification checks consistently across notebooks.
+"""
+
+VERIFICATION = "verification"
+CONVERGENCE = "convergence"
+VALIDATION = "validation"
+
+# Global verification check registry
+verification_checks: tuple[mfp.VerificationCheck, ...] = ()
+verification_categories: dict[str, str] = {}
+verification_status_labels: dict[str, str] = {}
+```
+
+
+## Summary
+
+This configuration notebook provides:
+
+1. **Physical parameters** for the channel, fluid, and particle
+2. **Training hyperparameters** for all neural network training
+3. **Verification thresholds** for all checks
+4. **Shared evaluation stations** for consistent profiling
+5. **Utility functions** to reduce code duplication
+6. **Checkpoint paths** for saving and loading trained networks
+7. **Verification categories** for consistent check organization
+8. **Plotting module import** for all visualization needs
+
+All other notebooks should import from this configuration to ensure consistency.
+
+---
+
+
+*Last updated: `{python} print(datetime.date.today().isoformat())`*

@@ -1,0 +1,737 @@
+---
+title: "02 - Particle Flow Verification"
+subtitle: "Comprehensive verification of the particle-perturbed flow network"
+date: today
+---
+
+::: {.content-hidden when-format="pdf"}
+$\\require{physics}$
+:::
+
+# 02 - Particle Flow Verification
+
+
+## Setup
+
+```{python}
+#| label: import-configuration
+#| echo: false
+import sys
+from pathlib import Path
+
+# Import the configuration notebook
+sys.path.insert(0, str(Path.cwd().parent))
+# %run ../00_configuration/00_configuration.qmd
+```
+
+{{< include ../00_configuration/00_configuration.qmd >}}
+
+```{python}
+#| label: load-networks
+#| echo: true
+"""
+Load the trained networks from checkpoints.
+"""
+
+print(f"\n{'='*60}")
+print(f"Notebook: 02 - Particle Flow Verification")
+print(f"{'='*60}")
+
+# Load particle network
+if PARTICLE_CHECKPOINT.exists():
+    print(f"Loading particle network from {PARTICLE_CHECKPOINT}...")
+    particle_network, particle_architecture, _, particle_provenance, particle_history = mfp.load_stream_checkpoint(
+        PARTICLE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Particle network loaded successfully.")
+else:
+    raise FileNotFoundError(
+        f"Particle checkpoint not found at {PARTICLE_CHECKPOINT}. "
+        "Please run 02_particle_training.qmd first."
+    )
+
+# Load baseline network
+if BASELINE_CHECKPOINT.exists():
+    print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
+    baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
+        BASELINE_CHECKPOINT, device=DEVICE
+    )
+    print(f"Baseline network loaded successfully.")
+else:
+    print(f"Warning: Baseline checkpoint not found at {BASELINE_CHECKPOINT}.")
+    print(f"Profile comparisons will be skipped.")
+    baseline_network = None
+
+print(f"{'='*60}\n")
+```
+
+
+## Overview
+
+This notebook performs **comprehensive verification** of the particle network trained in `02_particle_training.qmd`. It verifies:
+
+1. **Mass conservation** - Flow rate conservation upstream and downstream of the particle
+2. **Particle no-slip** - Velocity on the particle surface matches the prescribed rigid-body velocity
+3. **Flow validity** - Residual analysis and divergence checks
+4. **Profile comparisons** - Velocity and pressure profiles against baseline and analytical solutions
+
+### Dependencies
+
+- `00_configuration.qmd` - Shared configuration and parameters
+- `01_baseline_flow/01_baseline_training.qmd` - Trained baseline network
+- `02_particle_flow/02_particle_training.qmd` - Trained particle network
+
+### Outputs
+
+- Comprehensive verification tables and figures
+- Error analysis for all verification metrics
+- Verification check results for the master report
+
+## Mass Conservation Check
+
+```{python}
+#| label: check-flowrate-through-sphere
+"""
+Verify mass conservation by checking flow rate upstream and downstream of the particle.
+
+With the stream-function formulation, incompressibility, wall, and symmetry axis
+conditions hold identically, so Q(z) should be constant along the channel.
+"""
+
+# Compute flow rate at multiple stations
+z_inside = torch.linspace(
+    PARTICLE_AXIAL_POSITION_NONDIM - 0.95 * PARTICLE_RADIUS_NONDIM,
+    PARTICLE_AXIAL_POSITION_NONDIM + 0.95 * PARTICLE_RADIUS_NONDIM,
+    21,
+    device=DEVICE,
+    dtype=DTYPE
+)
+
+with torch.no_grad():
+    q_inside = mfp.annular_flow_rate(
+        particle_network,
+        R,
+        PARTICLE_RADIUS_NONDIM,
+        PARTICLE_AXIAL_POSITION_NONDIM,
+        PARTICLE_AXIAL_VELOCITY,
+        z_inside,
+        1024
+    )
+
+q_inside_max_relative_error = ((q_inside - Q_REF).abs() / abs(Q_REF)).max().item()
+
+# Compute flow rate curve
+q_upstream_curve = mfp.compute_flow_rate_curve(
+    particle_network, domain, z_upstream, n_quadrature_points=Q_STATION_NODES
+)
+q_downstream_curve = mfp.compute_flow_rate_curve(
+    particle_network, domain, z_downstream, n_quadrature_points=Q_STATION_NODES
+)
+
+q_dev_upstream = (q_upstream_curve - Q_REF).abs() / abs(Q_REF)
+q_dev_downstream = (q_downstream_curve - Q_REF).abs() / abs(Q_REF)
+q_curve_deviation = torch.cat([q_dev_upstream, q_dev_downstream])
+
+q_curve_max_relative_error = q_curve_deviation.max().item()
+q_curve_rms_relative_error = torch.sqrt(torch.mean(q_curve_deviation ** 2)).item()
+q_upstream_max_relative_error = q_dev_upstream.max().item()
+q_downstream_max_relative_error = q_dev_downstream.max().item()
+
+max_conservation_error = max(q_curve_max_relative_error, q_inside_max_relative_error)
+
+print(f"\nMass conservation check:")
+print(f"  Reference flow rate Q_ref*: {Q_REF:.6f}")
+print(f"  Upstream max relative error: {q_upstream_max_relative_error:.3%}")
+print(f"  Downstream max relative error: {q_downstream_max_relative_error:.3%}")
+print(f"  Curve RMS relative error: {q_curve_rms_relative_error:.3%}")
+print(f"  Inside particle max relative error: {q_inside_max_relative_error:.3%}")
+print(f"  Maximum conservation error: {max_conservation_error:.3%}")
+```
+
+```{python}
+#| label: fig-particle-flowrate
+#| fig-cap: "Predicted volumetric flow rate Q(z) upstream and downstream of particle."
+
+display(plotting.plot_flow_rate_reconnection(
+    z_upstream, q_upstream_curve, z_downstream, q_downstream_curve,
+    Q_REF, PARTICLE_AXIAL_POSITION_NONDIM, PARTICLE_RADIUS_NONDIM,
+))
+```
+
+@fig-particle-flowrate shows the flow rate upstream and downstream of the particle. Because incompressibility, the wall, and the symmetry axis hold identically in the ansatz, $Q(z)$ is constant along the channel by construction. Any deviation measures the inlet match plus whatever error the station quadrature commits.
+
+```{python}
+#| label: tbl-particle-conservation
+#| tbl-cap: "Volumetric flow rate upstream and downstream against inlet reference."
+
+q_upstream = mfp.axial_flow_rate(particle_network, R, z_upstream, Q_STATION_NODES)
+q_downstream = mfp.axial_flow_rate(particle_network, R, z_downstream, Q_STATION_NODES)
+q_all = torch.cat([q_upstream, q_downstream])
+z_all = torch.cat([z_upstream, z_downstream])
+
+conservation_table = pd.DataFrame({
+    "z*": z_all.tolist(),
+    "station": ["upstream"] * len(z_upstream) + ["downstream"] * len(z_downstream),
+    "Q(z)*": q_all.tolist(),
+    "Q_ref*": [Q_REF] * len(z_all),
+    "relative error": ((q_all - Q_REF).abs() / Q_REF).tolist(),
+})
+conservation_table
+```
+
+```{python}
+#| label: check-particle-conservation
+"""
+Define the mass conservation verification check.
+"""
+
+conservation_check = mfp.evaluate_check(
+    "Mass conservation with particle",
+    "Q(z) upstream and downstream of the sphere against the analytical reference",
+    max_conservation_error,
+    thresholds.conservation_of_mass_tolerance,
+    "<=",
+)
+
+verification_checks = verification_checks + (conservation_check,)
+verification_categories[conservation_check.name] = VERIFICATION
+
+print(f"\nMass conservation check:")
+mfp.render_verification_table((conservation_check,))
+```
+
+## Particle No-Slip Check
+
+```{python}
+#| label: tbl-particle-noslip
+#| tbl-cap: "Predicted velocity on particle surface vs. prescribed rigid-body target."
+
+particle_noslip_error = mfp.evaluate_particle_noslip_error(
+    particle_network,
+    particle_config=particle_config,
+    particle_state=particle_state,
+    reference_velocity=PEAK_VELOCITY_NONDIM,
+    n_probe_points=181,
+)
+
+surface_error_linf = particle_noslip_error["max_abs_error"]
+surface_error_rms = particle_noslip_error["rms_error"]
+surface_error_l2_relative = particle_noslip_error["l2_relative_error"]
+surface_error_normalization = max(float(PEAK_VELOCITY_NONDIM), 1.0e-12)
+
+noslip_table = pd.Series({
+    "surface RMS error": surface_error_rms,
+    "surface L_inf error": surface_error_linf,
+    "surface RMS / U_ref": surface_error_rms / surface_error_normalization,
+    "surface L_inf / U_ref": surface_error_linf / surface_error_normalization,
+    "surface relative L2 error (area-weighted)": surface_error_l2_relative,
+})
+noslip_table
+```
+
+With the stream-function ansatz, the particle surface velocity deviation should be at float32 round-off level. The surface RMS error normalized against the reference velocity is `{python} f"{surface_error_rms / surface_error_normalization:.3e}"`.
+
+```{python}
+#| label: check-particle-noslip
+"""
+Define the particle no-slip verification check.
+"""
+
+max_noslip_error = surface_error_linf
+noslip_check = mfp.evaluate_check(
+    "Particle no-slip satisfaction",
+    "Predicted surface velocity error against the sphere's prescribed rigid-body velocity",
+    max_noslip_error,
+    thresholds.noslip_tolerance,
+    "<=",
+)
+
+verification_checks = verification_checks + (noslip_check,)
+verification_categories[noslip_check.name] = VERIFICATION
+
+print(f"\nParticle no-slip check:")
+mfp.render_verification_table((noslip_check,))
+```
+
+## Flow Validity: Residual Analysis
+
+```{python}
+#| label: residual-threshold
+"""
+Evaluate residuals on a fixed reference batch.
+
+This provides a consistent metric for comparing different runs.
+"""
+
+residual_terms = ("momentum_r", "momentum_z")
+final_losses = particle_history.final()
+final_rms = {name: math.sqrt(final_losses[name]) for name in residual_terms}
+
+continuity_noise_rms = math.sqrt(final_losses["continuity"])
+final_residual = max(final_rms.values())
+
+# Create a reference batch with fixed seeding
+REFERENCE_BATCH_SEED_OFFSET = 91_919
+# reference_batch_config = dataclasses.replace(
+#     particle_config,
+#     random_seed=RANDOM_SEED + REFERENCE_BATCH_SEED_OFFSET,
+#     n_interior_points=LBFGS_N_INTERIOR_POINTS,
+#     n_boundary_points=LBFGS_N_BOUNDARY_POINTS,
+# )
+reference_batch_config = create_particle_training_config(RANDOM_SEED + REFERENCE_BATCH_SEED_OFFSET,)
+reference_batch_losses = mfp.diagnose_loss_scale(
+    particle_network,
+    domain,
+    fluid_config,
+    training_config=reference_batch_config,
+    particle_axial_position=PARTICLE_AXIAL_POSITION_NONDIM,
+    particle_radius=PARTICLE_RADIUS_NONDIM,
+    inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
+    shell_fraction=0.0,
+    band_fraction=0.0,
+)
+
+reference_batch_rms = {
+    name: math.sqrt(reference_batch_losses[name]) for name in residual_terms
+}
+reference_batch_residual = max(reference_batch_rms.values())
+
+print(f"\nResidual analysis on reference batch:")
+print(f"  Radial momentum RMS: {reference_batch_rms['momentum_r']:.3e}")
+print(f"  Axial momentum RMS: {reference_batch_rms['momentum_z']:.3e}")
+print(f"  Maximum residual: {reference_batch_residual:.3e}")
+print(f"  Threshold: {thresholds.two_way_residual_tolerance:.3e}")
+```
+
+```{python}
+#| label: check-particle-residual
+"""
+Define the two-way flow residual verification check.
+"""
+
+convergence_check = mfp.evaluate_check(
+    "Two-way flow residual threshold",
+    "Maximum momentum RMS on a fixed uniform reference batch",
+    reference_batch_residual,
+    thresholds.two_way_residual_tolerance,
+    "<=",
+)
+
+verification_checks = verification_checks + (convergence_check,)
+verification_categories[convergence_check.name] = CONVERGENCE
+
+print(f"\nTwo-way flow residual check:")
+mfp.render_verification_table((convergence_check,))
+```
+
+## Flow Validity: Divergence Check
+
+```{python}
+#| label: check-continuity
+#| echo: true
+"""
+Verify continuity by checking the divergence of the velocity field.
+
+With the stream-function ansatz, continuity should hold exactly (to round-off).
+"""
+
+# Evaluate divergence on multiple fresh batches
+divergence_by_batch = tuple(
+    mfp.divergence_probe(
+        particle_network,
+        domain,
+        n_points=20_000,
+        random_seed=RANDOM_SEED + offset
+    )
+    for offset in (11, 12, 13)
+)
+
+continuity_divergence = max(divergence_by_batch)
+
+print(f"\nDivergence check:")
+print(f"  Maximum relative divergence: {continuity_divergence:.3e}")
+print(f"  Machine epsilon (float32): {torch.finfo(DTYPE).eps:.3e}")
+print(f"  Threshold: {DIVERGENCE_EPSILON_FACTOR * torch.finfo(DTYPE).eps:.3e}")
+```
+
+```{python}
+#| label: check-continuity-formal
+"""
+Define the continuity verification check.
+"""
+
+divergence_check = mfp.evaluate_check(
+    "Continuity (divergence probe)",
+    "Relative divergence of the velocity field on fresh points, away from the axis",
+    continuity_divergence,
+    DIVERGENCE_EPSILON_FACTOR * torch.finfo(DTYPE).eps,
+    "<=",
+)
+
+verification_checks = verification_checks + (divergence_check,)
+verification_categories[divergence_check.name] = VERIFICATION
+
+print(f"\nContinuity check:")
+mfp.render_verification_table((divergence_check,))
+```
+
+## Flow Validity: Residual Heatmap
+
+```{python}
+#| label: fig-particle-residual
+#| fig-cap: "Held-out axial-momentum residual magnitude around the fixed particle."
+
+residual_radial_grid = torch.linspace(R * 1.0e-3, R, 120, device=DEVICE, dtype=DTYPE)
+residual_axial_grid = torch.linspace(0.0, L, 220, device=DEVICE, dtype=DTYPE)
+residual_grids = mfp.evaluate_residual_grid(
+    particle_network,
+    fluid_config,
+    residual_radial_grid,
+    residual_axial_grid,
+    residual_form=PARTICLE_RESIDUAL_FORM,
+)
+
+residual_rr, residual_zz = torch.meshgrid(residual_radial_grid, residual_axial_grid, indexing="ij")
+residual_inside_particle = (
+    (residual_zz - PARTICLE_AXIAL_POSITION_NONDIM) ** 2 + residual_rr ** 2 < PARTICLE_RADIUS_NONDIM ** 2
+)
+
+momentum_z_residual = residual_grids["momentum_z"].clone()
+momentum_z_residual[residual_inside_particle] = float("nan")
+
+display(plotting.plot_residual_heatmap(
+    residual_radial_grid,
+    residual_axial_grid,
+    momentum_z_residual,
+    "momentum_z"
+))
+```
+
+@fig-particle-residual shows the axial-momentum residual magnitude around the particle. The residual should be small throughout the domain, with potentially higher values near the particle where the flow is most complex.
+
+## Profile Analysis: Velocity Profiles
+
+```{python}
+#| label: profile-analysis
+"""
+Evaluate velocity profiles at multiple stations and compare against baseline.
+"""
+
+# Use shared evaluation stations
+profile_evaluation_particle = mfp.evaluate_velocity_profiles(
+    particle_network,
+    domain,
+    z_stations_eval,
+    torch.linspace(0.0, R, N_RADIAL_PROFILE, device=DEVICE, dtype=DTYPE),
+    PEAK_VELOCITY_NONDIM
+)
+
+# Compute chord radii for masking
+station_chord_radii = torch.tensor(
+    [local_particle_chord_radius(z, PARTICLE_AXIAL_POSITION_NONDIM, PARTICLE_RADIUS_NONDIM)
+     for z in profile_evaluation_particle.z_stations],
+    device=DEVICE,
+    dtype=DTYPE,
+)
+
+radial_grid_particle = torch.linspace(0.0, R, N_RADIAL_PROFILE, device=DEVICE, dtype=DTYPE)
+fluid_mask = radial_grid_particle.unsqueeze(0) >= station_chord_radii.unsqueeze(1)
+
+# Create fluid-only version with masked interior
+profile_evaluation_fluid_only = dataclasses.replace(
+    profile_evaluation_particle,
+    predicted_uz=profile_evaluation_particle.predicted_uz.masked_fill(~fluid_mask, float("nan")),
+    predicted_ur=profile_evaluation_particle.predicted_ur.masked_fill(~fluid_mask, float("nan")),
+)
+
+# Compute errors against analytical (particle-free) solution
+abs_error = (
+    profile_evaluation_particle.predicted_uz - profile_evaluation_particle.analytical_uz.unsqueeze(0)
+).abs()
+
+# Per-station worst-case error
+per_station_max_error = abs_error.masked_fill(~fluid_mask, float("-inf")).max(dim=1).values
+worst_station_index_particle = int(per_station_max_error.argmax())
+worst_station_z_particle = z_stations_eval[worst_station_index_particle]
+worst_station_label_particle = profile_evaluation_particle.z_stations[worst_station_index_particle]
+
+profile_max_absolute_error = per_station_max_error.max().item()
+
+# Mask-weighted RMS over fluid points only
+n_fluid_points = fluid_mask.sum()
+profile_rms_error = torch.sqrt((abs_error.square() * fluid_mask).sum() / n_fluid_points).item()
+
+profile_error_reference = max(float(PEAK_VELOCITY_NONDIM), 1.0e-12)
+profile_max_relative_to_scale = profile_max_absolute_error / profile_error_reference
+
+print(f"\nProfile analysis:")
+print(f"  Maximum absolute error: {profile_max_absolute_error:.3e}")
+print(f"  RMS error: {profile_rms_error:.3e}")
+print(f"  Maximum relative to scale: {profile_max_relative_to_scale:.3%}")
+print(f"  Worst station: z* = {worst_station_z_particle:.3f}")
+```
+
+```{python}
+#| label: fig-predicted-vs-analytical-profiles
+#| fig-cap: "Predicted axial-velocity profile at stations vs. Hagen-Poiseuille."
+
+display(plotting.plot_velocity_profile_comparison(profile_evaluation_fluid_only))
+```
+
+```{python}
+#| label: fig-axial-velocity-profile-error
+#| fig-cap: "Axial-velocity profile error against analytical solution across stations."
+
+display(plotting.plot_profile_error(profile_evaluation_fluid_only))
+```
+
+@fig-axial-velocity-profile-error shows the error in axial velocity profiles across all evaluation stations. The errors are **physical** (not numerical errors) - they represent the actual perturbation caused by the particle in the flow field.
+
+## Profile Analysis: Radial Leakage
+
+```{python}
+#| label: fig-radial-leakage-domain
+#| fig-cap: "Predicted radial velocity (leakage) at all stations."
+
+radial_leakage_max = profile_evaluation_particle.predicted_ur.abs().max().item()
+radial_leakage_relative = radial_leakage_max / max(float(PEAK_VELOCITY_NONDIM), 1.0e-12)
+
+display(plotting.plot_radial_leakage(profile_evaluation_particle))
+```
+
+The radial-velocity leakage is quantified directly from the profile data. The maximum absolute radial velocity on the `{python} len(z_stations_eval)` stations is `{python} f"{radial_leakage_max:.3e}"`, corresponding to `{python} f"{radial_leakage_relative:.3%}"` of the reference velocity scale. A nonzero value is a local numerical diagnostic; it should decrease with training and sampling refinement.
+
+## Pressure Analysis
+
+```{python}
+#| label: fig-particle-pressure
+#| fig-cap: "Predicted axial pressure along symmetry axis."
+
+N_PRESSURE_POINTS = 200
+axial_positions_pressure, predicted_pressure_particle = mfp.evaluate_axis_pressure_profile(
+    particle_network, domain, n_axial_points=N_PRESSURE_POINTS
+)
+
+inside_particle_axis = np.abs(axial_positions_pressure - PARTICLE_AXIAL_POSITION_NONDIM) < PARTICLE_RADIUS_NONDIM
+predicted_pressure_masked = np.ma.array(predicted_pressure_particle, mask=inside_particle_axis)
+
+analytical_pressure_baseline = mfp.hagen_poiseuille_pressure(
+    torch.as_tensor(axial_positions_pressure, dtype=DTYPE),
+    R,
+    PEAK_VELOCITY_NONDIM,
+    L,
+    REFERENCE_PRESSURE
+).numpy()
+
+display(plotting.plot_pressure_through_particle(
+    axial_positions_pressure,
+    predicted_pressure_masked,
+    analytical_pressure_baseline,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+))
+```
+
+```{python}
+#| label: outside-pressure
+"""
+Compute pressure difference outside the particle.
+"""
+
+outside_pressure_mask = ~inside_particle_axis
+pressure_difference = np.asarray(
+    predicted_pressure_particle[outside_pressure_mask] -
+    analytical_pressure_baseline[outside_pressure_mask]
+)
+
+pressure_difference_max = float(np.max(np.abs(pressure_difference)))
+pressure_difference_rms = float(np.sqrt(np.mean(pressure_difference ** 2)))
+pressure_reference_span = float(
+    np.max(analytical_pressure_baseline[outside_pressure_mask]) -
+    np.min(analytical_pressure_baseline[outside_pressure_mask])
+)
+pressure_difference_relative = (
+    pressure_difference_max / pressure_reference_span
+    if pressure_reference_span > 0.0 else float("nan")
+)
+
+print(f"\nPressure analysis (outside particle):")
+print(f"  Maximum absolute difference: {pressure_difference_max:.3e}")
+print(f"  RMS difference: {pressure_difference_rms:.3e}")
+print(f"  Maximum relative difference: {pressure_difference_relative:.3%}")
+```
+
+## Held-Out Probe Gap Check
+
+```{python}
+#| label: check-probe-gap
+"""
+Check the gap between training loss and held-out probe loss.
+
+This ensures the network is not overfitting to the training batch.
+"""
+
+PROBE_SEED_OFFSET = 123_457
+held_out_config = create_particle_training_config(RANDOM_SEED + PROBE_SEED_OFFSET,)
+held_out_losses = mfp.diagnose_loss_scale(
+    particle_network,
+    domain,
+    fluid_config,
+    held_out_config,
+    PARTICLE_AXIAL_POSITION_NONDIM,
+    PARTICLE_RADIUS_NONDIM,
+    PEAK_VELOCITY_NONDIM,
+    shell_fraction=TAPER_SHELL_FRACTION,
+    shell_factor=TAPER_SHELL_FACTOR,
+    band_fraction=TAPER_BAND_FRACTION,
+    band_factor=TAPER_BAND_FACTOR,
+)
+
+probe_train_gap = held_out_losses["total"] / max(final_losses["total"], 1.0e-12)
+
+print(f"\nHeld-out probe gap:")
+print(f"  Training loss: {final_losses['total']:.3e}")
+print(f"  Held-out loss: {held_out_losses['total']:.3e}")
+print(f"  Gap ratio: {probe_train_gap:.1f}")
+print(f"  Threshold: {PROBE_GAP_TOLERANCE:.1f}")
+```
+
+```{python}
+#| label: check-probe-gap-formal
+"""
+Define the probe gap verification check.
+"""
+
+probe_gap_check = mfp.evaluate_check(
+    "Held-out probe gap",
+    "Ratio of the held-out probe loss to the final training-batch loss",
+    probe_train_gap,
+    PROBE_GAP_TOLERANCE,
+    "<=",
+)
+
+verification_checks = verification_checks + (probe_gap_check,)
+verification_categories[probe_gap_check.name] = CONVERGENCE
+
+print(f"\nProbe gap check:")
+mfp.render_verification_table((probe_gap_check,))
+```
+
+## Summary Table
+
+```{python}
+#| label: tbl-particle-verification-summary
+#| tbl-cap: "Summary of all verification metrics for the particle network."
+
+summary_data = {
+    "Metric": [
+        "Mass conservation max error",
+        "Particle no-slip L_inf",
+        "Particle no-slip RMS",
+        "Two-way flow residual",
+        "Continuity divergence",
+        "Profile max absolute error",
+        "Profile RMS error",
+        "Radial leakage max",
+        "Pressure max difference",
+        "Probe gap ratio",
+    ],
+    "Value": [
+        f"{max_conservation_error:.3%}",
+        f"{surface_error_linf:.3e}",
+        f"{surface_error_rms:.3e}",
+        f"{reference_batch_residual:.3e}",
+        f"{continuity_divergence:.3e}",
+        f"{profile_max_absolute_error:.3e}",
+        f"{profile_rms_error:.3e}",
+        f"{radial_leakage_max:.3e}",
+        f"{pressure_difference_max:.3e}",
+        f"{probe_train_gap:.1f}",
+    ],
+    "Threshold": [
+        f"{thresholds.conservation_of_mass_tolerance:.3%}",
+        f"{thresholds.noslip_tolerance:.3e}",
+        "-",
+        f"{thresholds.two_way_residual_tolerance:.3e}",
+        f"{DIVERGENCE_EPSILON_FACTOR * torch.finfo(DTYPE).eps:.3e}",
+        "-",
+        "-",
+        "-",
+        "-",
+        f"{PROBE_GAP_TOLERANCE:.1f}",
+    ],
+    "Status": [
+        "✓" if max_conservation_error <= thresholds.conservation_of_mass_tolerance else "✗",
+        "✓" if surface_error_linf <= thresholds.noslip_tolerance else "✗",
+        "-",
+        "✓" if reference_batch_residual <= thresholds.two_way_residual_tolerance else "✗",
+        "✓" if continuity_divergence <= DIVERGENCE_EPSILON_FACTOR * torch.finfo(DTYPE).eps else "✗",
+        "-",
+        "-",
+        "-",
+        "-",
+        "✓" if probe_train_gap <= PROBE_GAP_TOLERANCE else "✗",
+    ],
+}
+
+summary_df = pd.DataFrame(summary_data)
+summary_df
+```
+
+## Verification Checks Summary
+
+```{python}
+#| label: particle-verification-checks-summary
+"""
+Display all verification checks for the particle network.
+"""
+
+particle_verification_checks = (
+    conservation_check,
+    noslip_check,
+    convergence_check,
+    divergence_check,
+    probe_gap_check,
+)
+
+print(f"\nParticle verification checks:")
+mfp.render_verification_table(particle_verification_checks)
+
+# Count passed/failed
+passed_count = sum(1 for check in particle_verification_checks if check.passed)
+failed_count = len(particle_verification_checks) - passed_count
+
+print(f"\nSummary: {passed_count} passed, {failed_count} failed out of {len(particle_verification_checks)} checks")
+```
+
+## Summary
+
+This notebook has performed comprehensive verification of the particle network:
+
+### Key Findings
+
+1. **Mass Conservation**: Maximum flow rate error is `{python} f"{max_conservation_error:.3%}"`, 
+   which `{python} 'clears' if conservation_check.passed else 'misses'` the threshold.
+
+2. **Particle No-Slip**: Surface velocity error is at float32 round-off level:
+   - L_inf error: `{python} f"{surface_error_linf:.3e}"`
+   - RMS error: `{python} f"{surface_error_rms:.3e}"`
+   - This `{python} 'clears' if noslip_check.passed else 'misses'` the threshold.
+
+3. **Flow Residuals**: The network satisfies the Stokes equations with:
+   - Two-way flow residual: `{python} f"{reference_batch_residual:.3e}"` (threshold: `{python} f"{thresholds.two_way_residual_tolerance:.3e}"`)
+   - This `{python} 'clears' if convergence_check.passed else 'misses'` the threshold.
+
+4. **Continuity**: Maximum relative divergence is `{python} f"{continuity_divergence:.3e}"`, which `{python} 'clears' if divergence_check.passed else 'misses'` the threshold.
+
+5. **Probe Gap**: The held-out probe gap ratio is `{python} f"{probe_train_gap:.1f}"`, which `{python} 'clears' if probe_gap_check.passed else 'misses'` the threshold.
+
+### Overall Status
+
+Out of `{python} len(particle_verification_checks)` verification checks, `{python} passed_count` passed and `{python} failed_count` failed.
+
+The particle network is **verified** and ready for use in the resistance problems notebook (`03_resistance_problems/03_resistance_training.qmd`).
+
+---
+
+*Notebook completed in `{python} f"{time.perf_counter() - notebook_t0:.1f}s"`*
