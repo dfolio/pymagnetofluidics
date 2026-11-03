@@ -93,6 +93,7 @@ from magnetofluidics_pinn.data_types import Domain, MagneticFieldSample, Particl
 from magnetofluidics_pinn.verification.benchmarks import shell_force_profile, shell_force_spread
 from magnetofluidics_pinn.networks.mlp import build_mlp  # NEW
 from magnetofluidics_pinn.networks.stream_function import StreamFunctionSphereFlow  # NEW
+from magnetofluidics_pinn.networks.lifting import LiftingMode
 from magnetofluidics_pinn.training.stream_trainer import StreamLossHistory, train_stream_function_flow
 
 # CHANGED: ambient centreline velocity of the "fixed sphere in Poiseuille flow" problem.
@@ -735,6 +736,11 @@ def solve_resistance_problems_stream(
     shell_factor: float = 2.5,
     band_fraction: float = 0.0,
     band_factor: float = 1.5,
+    lifting_mode: LiftingMode = "taper",  # NEW
+    end_envelope: bool = False,  # NEW
+    wall_start_fraction: float = 0.05,  # NEW
+    axis_clearance_fraction: float = 0.0,  # NEW
+    refine_dtype: "torch.dtype | None" = None,  # NEW
 ) -> ResistanceResult:
     r"""Train the two canonical linear resistance problems using the stream-function PINN.
 
@@ -798,26 +804,23 @@ def solve_resistance_problems_stream(
             activation=activation,
         )
         start = StreamFunctionSphereFlow(
-            raw_network=raw,
-            domain=domain,
+            raw_network=raw, domain=domain,
             particle_axial_position=particle_axial_position,
-            particle_radius=particle_radius,
-            particle_axial_velocity=velocity,
+            particle_radius=particle_radius, particle_axial_velocity=velocity,
             flow_amplitude=ambient,
             taper_margin=taper_margin,
+            lifting_mode=lifting_mode, end_envelope=end_envelope,
+            wall_start_fraction=wall_start_fraction,  # NEW
         )
         trained, history = train_stream_function_flow(
-            network=start,
-            domain=domain,
-            fluid_config=fluid_config,
+            network=start, domain=domain, fluid_config=fluid_config,
             training_config=training_config,
             particle_axial_position=particle_axial_position,
-            particle_radius=particle_radius,
-            inlet_peak_velocity=ambient,
-            shell_fraction=shell_fraction,
-            shell_factor=shell_factor,
-            band_fraction=band_fraction,
-            band_factor=band_factor,
+            particle_radius=particle_radius, inlet_peak_velocity=ambient,
+            shell_fraction=shell_fraction, shell_factor=shell_factor,
+            band_fraction=band_fraction, band_factor=band_factor,
+            axis_clearance_fraction=axis_clearance_fraction, refine_dtype=refine_dtype,
+            # NEW
         )
         profile = shell_force_profile(trained, particle_config, particle_state, shell_factors, n_quadrature_points)
         force = float(profile["force"].mean())

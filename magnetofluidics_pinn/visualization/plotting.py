@@ -410,7 +410,9 @@ def plot_training_history(
             "Cannot plot empty TrainingHistory: both phases contain zero steps.")
 
     adam_steps = np.asarray(history.adam.step, dtype=np.int64)
-    lbfgs_steps = np.asarray(history.lbfgs.step, dtype=np.int64) + n_adam
+    lbfgs_steps = (
+        np.asarray(history.lbfgs.step, dtype=np.int64) + n_adam if n_lbfgs > 0
+        else np.empty(0, dtype=np.int64))
     combined_steps = np.concatenate(
         [adam_steps, lbfgs_steps]) if n_lbfgs > 0 else adam_steps
 
@@ -505,7 +507,7 @@ def plot_two_way_history(history: TrainingHistory,
     n_adam = len(history.adam.step)
     n_lbfgs = 0 if history.lbfgs is None else len(history.lbfgs.step)
     adam_steps = np.asarray(history.adam.step)
-    lbfgs_steps = np.asarray(history.lbfgs.step) + n_adam
+    lbfgs_steps = (np.asarray(history.lbfgs.step) + n_adam if n_lbfgs > 0 else np.empty(0, dtype=np.int64))
     steps = np.concatenate([adam_steps, lbfgs_steps]) if n_lbfgs else adam_steps
 
     # fig, ax = plt.subplots(figsize=(7.5, 4.5))
@@ -1718,6 +1720,7 @@ def plot_particle_flow_animation(
     show_streamlines: bool = True,
     streamline_kwargs: dict[str, Any] | None = None,
     particle_patch_kwargs: dict[str, Any] | None = None,
+    **kwargs: Any,
 ) -> Path:
     r"""Animate the particle-coupled velocity field along a trajectory and save it as a looping GIF.
 
@@ -1761,6 +1764,15 @@ def plot_particle_flow_animation(
         raise ValueError("Resolutions must be at least 2 per axis.")
     if n_frames < 1 or fps < 1:
         raise ValueError("n_frames and fps must be strictly positive.")
+
+    radius_val = particle_radius if particle_radius is not None else kwargs.get(
+        "PARTICLE_RADIUS")
+    if radius_val is None or radius_val <= 0.0:
+        raise ValueError(
+            f"particle_radius must be strictly positive; got {radius_val!r}."
+        )
+    effective_particle_radius = float(radius_val)
+
     if not (len(positions) == len(velocities) == len(times)) or len(positions) < 2:
         raise ValueError(
             "positions, velocities, and times must be equal-length sequences of at least two states."
@@ -1772,6 +1784,14 @@ def plot_particle_flow_animation(
     z_positions = [float(p) for p in positions]
     u_velocities = [float(v) for v in velocities]
     t_times = [float(t) for t in times]
+
+    if len(z_positions) == 1:
+        z_positions = [z_positions[0], z_positions[0]]
+        u_velocities = [u_velocities[0], u_velocities[0]]
+        t_times = [t_times[0], t_times[0] + 1.0 / fps]
+    elif len(z_positions) == 0:
+        raise ValueError("positions, velocities, and times must contain at least one state.")
+
     total_states = len(z_positions)
 
     # Uniform frame indexing across the trajectory

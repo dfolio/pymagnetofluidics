@@ -36,7 +36,7 @@ from magnetofluidics_pinn.verification.metrics import (
     compute_profile_invariance as compute_profile_invariance, compute_radial_leakage as compute_radial_leakage,
     evaluate_axis_pressure_profile as evaluate_axis_pressure_profile,
     evaluate_held_out_residual as evaluate_held_out_residual,
-    evaluate_particle_noslip_error as evaluate_particle_noslip_error, 
+    evaluate_particle_noslip_error as evaluate_particle_noslip_error,
     evaluate_residual_grid as evaluate_residual_grid,
     evaluate_structural_constraints as evaluate_structural_constraints,
     evaluate_velocity_profiles as evaluate_velocity_profiles, ProfileEvaluation as ProfileEvaluation,
@@ -49,6 +49,11 @@ from magnetofluidics_pinn.verification.physical_gates import (axis_pressure_jump
                                                               momentum_balance_gate as momentum_balance_gate,
                                                               pressure_drop_gate as pressure_drop_gate,
                                                               reference_tolerance as reference_tolerance)
+
+from magnetofluidics_pinn.verification.reciprocity import (
+    poiseuille_axial_profile as poiseuille_axial_profile,
+    reciprocal_resistance_pair as reciprocal_resistance_pair,
+)
 from magnetofluidics_pinn.verification.reporting import (
     build_residual_consistency_table as build_residual_consistency_table,
     default_thresholds as default_thresholds,
@@ -56,7 +61,16 @@ from magnetofluidics_pinn.verification.reporting import (
     pending_check as pending_check,
     render_verification_table as render_verification_table,
     VerificationCheck as VerificationCheck,
-    VerificationThresholds as VerificationThresholds)
+    VerificationThresholds as VerificationThresholds,
+    safe_evaluate_check as safe_evaluate_check,
+)
+from magnetofluidics_pinn.verification.stream_checks import (
+    axis_pressure_slope_error as axis_pressure_slope_error,
+    evaluate_native_residual_grid as evaluate_native_residual_grid,
+    far_field_recovery as far_field_recovery,
+    lifting_residual as lifting_residual,
+    worst_residual_points as worst_residual_points,
+)
 from magnetofluidics_pinn.verification.warm_start_gates import (
     warm_start_cost_ratio as warm_start_cost_ratio,
     warm_start_equivalence_gate as warm_start_equivalence_gate)
@@ -94,6 +108,7 @@ __all__ = [
     "evaluate_check",
     "pending_check",
     "render_verification_table",
+    "safe_evaluate_check",
     # Force checks
     "cross_section_momentum_force",
     "global_momentum_balance",
@@ -117,5 +132,14 @@ __all__ = [
     "momentum_balance_gate",
     # Warm start gates
     "warm_start_cost_ratio",
-    "warm_start_equivalence_gate"
+    "warm_start_equivalence_gate",
+    # Reciprocal resistance
+    "poiseuille_axial_profile",
+    "reciprocal_resistance_pair",
+    # Stream-function-specific checks
+    "axis_pressure_slope_error",
+    "evaluate_native_residual_grid",
+    "far_field_recovery",
+    "lifting_residual",
+    "worst_residual_points"
 ]

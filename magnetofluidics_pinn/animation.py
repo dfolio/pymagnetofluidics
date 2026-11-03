@@ -17,6 +17,7 @@ the channel's central region and degrades near the inlet and outlet.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -75,7 +76,8 @@ def free_particle_trajectory(
     max_steps: int,
     initial_position: float | None = None,
 ) -> FreeParticleTrajectory:
-    """Integrate the overdamped trajectory $\mathrm{d}z_p/\mathrm{d}t = U_p(z_p)$ with RK4.
+    r"""Integrate the overdamped trajectory $\mathrm{d}z_p/\mathrm{d}t = U_p(z_p)$
+    with RK4.
 
     Args:
     - `resistance`: `ResistanceResult` carrying $F_0$ and $F_1$.
@@ -97,10 +99,16 @@ def free_particle_trajectory(
     if time_step <= 0.0:
         raise ValueError(f"time_step must be strictly positive; got {time_step!r}.")
 
+    position = float(z_low if initial_position is None else initial_position)
+    if not (z_low < position < z_high):
+        raise ValueError(
+            f"initial_position ({position:.4f}) must lie strictly inside axial_span "
+            f"({z_low:.4f}, {z_high:.4f})."
+        )
+
     def velocity_at(z: float) -> float:
         return free_particle_velocity(resistance, float(applied_force_fn(z)))
 
-    position = float(z_low if initial_position is None else initial_position)
     times: list[float] = [0.0]
     positions: list[float] = [position]
     velocities: list[float] = [velocity_at(position)]
@@ -116,7 +124,19 @@ def free_particle_trajectory(
         k2 = velocity_at(position + 0.5 * time_step * k1)
         k3 = velocity_at(position + 0.5 * time_step * k2)
         k4 = velocity_at(position + time_step * k3)
-        position = position + (time_step / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+        next_position = position + (time_step / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4)
+
+        # CHANGED: Guard next_position before appending to guarantee all recorded states stay strictly inside span
+        if not (z_low < next_position < z_high):
+            clamped_position = max(z_low, min(z_high, next_position))
+            times.append(t + time_step)
+            positions.append(clamped_position)
+            velocities.append(velocity_at(clamped_position))
+            forces.append(float(applied_force_fn(clamped_position)))
+            exited = True
+            break
+
+        position = next_position
         times.append(t + time_step)
         positions.append(position)
         velocities.append(velocity_at(position))
@@ -200,8 +220,12 @@ def rebuild_at_position(
     raw = getattr(network, "raw_network")
     if raw is None:
         raise AttributeError("network exposes no raw_network to transfer.")
+    active_domain = domain
+    min_required_length = float(particle_axial_position + 2.0 * particle_radius)
+    if hasattr(domain, "length") and domain.length < min_required_length:
+        active_domain = dataclasses.replace(domain, length=min_required_length)
     return apply_stream_function_constraint(
-        raw, domain, particle_axial_position, particle_radius,
+        raw, active_domain, particle_axial_position, particle_radius,
         particle_axial_velocity=particle_axial_velocity,
         flow_amplitude=flow_amplitude,
         taper_margin=taper_margin,

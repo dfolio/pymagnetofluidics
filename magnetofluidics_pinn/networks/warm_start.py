@@ -177,16 +177,20 @@ def rebuild_for_geometry(
     flow_amplitude: float,
     taper_margin: float,
     training_config: TrainingConfig,
+    *,
+    lifting_mode: str | None = None,  # NEW
+    end_envelope: bool | None = None,  # NEW
+    wall_start_fraction: float | None = None,  # NEW
 ) -> nn.Module:
     """Build a network for a new geometry, initialized from `source`.
 
     Args:
     - `source`: Trained stream-function network providing the raw weights.
     - `domain`: Nondimensional channel of the new problem.
-    - `particle_axial_position`, `particle_radius`, `particle_axial_velocity`,
-      `flow_amplitude`, `taper_margin`: Parameters of the new problem; see
-      `apply_stream_function_constraint`.
+    - `particle_axial_position`, `particle_radius`, `particle_axial_velocity`, `flow_amplitude`, `taper_margin`: New problem.
     - `training_config`: Supplies the device and dtype of the new network.
+    - `lifting_mode`, `end_envelope`, `wall_start_fraction`: NEW. Lifting options of the new network; `None` inherits them
+      from `source`, so a warm start never silently changes the construction the weights were trained under.
 
     Returns:
     - A wrapped network with the new geometry and the transferred weights.
@@ -194,12 +198,14 @@ def rebuild_for_geometry(
     Raises:
     - `WarmStartError`: If `source` has an unsupported layout.
     """
-    # pyrefly: ignore[bad-argument-type]
     hidden_layers, activation = infer_mlp_layout(source.raw_network)
     raw = build_mlp(2, 2, hidden_layers, training_config=training_config, activation=activation)
     fresh = apply_stream_function_constraint(
-        raw, domain, particle_axial_position, particle_radius,
-        particle_axial_velocity, flow_amplitude, taper_margin,
+        raw, domain, particle_axial_position, particle_radius, particle_axial_velocity, flow_amplitude, taper_margin,
+        lifting_mode=getattr(source, "lifting_mode", "taper") if lifting_mode is None else lifting_mode,  # CHANGED
+        end_envelope=getattr(source, "end_envelope", False) if end_envelope is None else end_envelope,  # CHANGED
+        wall_start_fraction=(getattr(source, "wall_start_fraction", 0.05) if wall_start_fraction is None
+                             else wall_start_fraction),  # CHANGED
     )
     return transfer_raw_weights(source, fresh)
 

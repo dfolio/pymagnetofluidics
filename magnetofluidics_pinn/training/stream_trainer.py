@@ -24,7 +24,7 @@ from magnetofluidics_pinn.networks import StreamFunctionSphereFlow
 from magnetofluidics_pinn.physics.fluid_residuals import stokes_residual
 from magnetofluidics_pinn.sampling.exterior import sample_exterior_points, \
     sample_inlet_outlet_points
-from magnetofluidics_pinn.training.losses import compose_loss
+from magnetofluidics_pinn.training.losses import compose_loss, LossHistoryBase
 
 # Ordered names of the recorded losses; "total" is recorded first.
 STREAM_LOSS_NAMES: tuple[str, ...] = ("total", "momentum_r", "momentum_z", "continuity",
@@ -32,19 +32,25 @@ STREAM_LOSS_NAMES: tuple[str, ...] = ("total", "momentum_r", "momentum_z", "cont
 
 
 @dataclass(frozen=True)
-class StreamLossHistory:
+class StreamLossHistory(LossHistoryBase):
     """Loss values recorded during a stream-function training run.
 
     Args:
     - `names`: Recorded loss names, in column order.
     - `adam`: One tuple of values per Adam epoch, in `names` order.
     - `lbfgs`: One tuple of values per L-BFGS closure call, in `names` order.
+    - `probe`: Held-out probe loss after each L-BFGS round.
+    - `best_probe`: Probe loss of the state that was restored (`nan` if no restoration took place).
+    - `restored_stage`: `"adam"` if the Adam-end state was restored, `"lbfgs-round-k"` for round `k`,
+      `"last"` if nothing was restored (the returned network is then the last iterate).
     """
 
     names: tuple[str, ...]
     adam: tuple[tuple[float, ...], ...]
     lbfgs: tuple[tuple[float, ...], ...]
-    probe: tuple[float, ...] = ()  # CHANGED: probe loss after each L-BFGS round
+    probe: tuple[float, ...] = ()
+    best_probe: float = math.nan
+    restored_stage: str = "last"
 
     def final(self) -> dict[str, float]:
         """Return the last recorded value of every loss.
@@ -59,6 +65,59 @@ class StreamLossHistory:
         if not records:
             raise ValueError("The history is empty.")
         return dict(zip(self.names, records[-1]))
+
+    def print_summary(self) -> None:
+        """Prints a formatted summary table of initial, intermediate, and final loss values."""
+        has_lbfgs = len(self.lbfgs) > 0
+        has_adam = len(self.adam) > 0
+
+        if not has_adam and not has_lbfgs:
+            print("No training data to summarize.")
+            return
+
+        print("\n" + "=" * 78)
+        print(
+            f"{'Loss Component':<20} | {'Initial (Adam)':<14} | {'Post-Adam':<14} | {'Final Loss':<14} | {'Factor':<8}")
+        print("-" * 78)
+
+        for name in self.names:
+            if has_adam:
+                initial = self.adam[0][self.names.index(name)] if self.adam else float(
+                    'nan')
+                post_adam = self.adam[-1][
+                    self.names.index(name)] if self.adam else float('nan')
+            else:
+                initial = float('nan')
+                post_adam = float('nan')
+
+            if has_lbfgs:
+                final = self.lbfgs[-1][self.names.index(name)]
+            else:
+                final = post_adam
+
+            if math.isfinite(initial) and initial > 0:
+                reduction = initial / max(final, 1e-15)
+            else:
+                reduction = float('nan')
+
+            if has_adam and has_lbfgs:
+                print(
+                    f"{name.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {final:14.4e} | {reduction:7.1f}x"
+                )
+            elif has_adam:
+                print(
+                    f"{name.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {reduction:7.1f}x"
+                )
+            else:
+                print(
+                    f"{name.upper():<20} | {'N/A':<14} | {'N/A':<14} | {final:14.4e} | {'N/A':<8}"
+                )
+
+        print("=" * 78)
+        if math.isfinite(self.best_probe):
+            print(
+                f"Best probe loss: {self.best_probe:.4e} (restored from {self.restored_stage})")
+        print()
 
 
 @dataclass(frozen=True)
@@ -83,51 +142,38 @@ def _build_batch(
     inlet_peak_velocity: float,
     n_interior: int, n_boundary: int, seed: int, device: torch.device,
     dtype: torch.dtype,
-    shell_fraction: float = 0.25,  # NEW: forwarded to `sample_exterior_points`
-    shell_factor: float = 2.5,  # NEW: forwarded to `sample_exterior_points`
-    band_fraction: float = 0.0,
-    # NEW: fraction of interior points in the near-surface band
-    band_factor: float = 1.5,  # NEW: band outer radius in units of the sphere radius
+    shell_fraction: float = 0.25, shell_factor: float = 2.5, band_fraction: float = 0.0,
+    band_factor: float = 1.5,
+    axis_clearance_fraction: float = 0.0,
 ) -> _StreamBatch:
     r"""Sample one batch.
 
     Args:
     - `domain`: Nondimensional channel.
-    - `particle_z`: Sphere center.
-    - `particle_radius`: Sphere radius.
+    - `particle_z`, `particle_radius`: Sphere centre and radius.
     - `inlet_peak_velocity`: Peak of the imposed inlet profile (may be zero).
-    - `n_interior`: Number of interior points.
-    - `n_boundary`: Number of inlet plus outlet points.
+    - `n_interior`, `n_boundary`: Number of interior points and of inlet plus outlet points.
     - `seed`: Sampling seed.
-    - `device`: Target device.
-    - `dtype`: Floating-point dtype.
-    - `shell_fraction`, `shell_factor`: Interior-point distribution, forwarded to
-      `sample_exterior_points`; the defaults reproduce the previous sampler.
-    - `band_fraction`, `band_factor`: Dedicated near-surface share of the interior
-      batch, drawn uniform in area in the annulus
-      $[a,\ \mathrm{band\_factor} \cdot a]$. The shell share applies to the
-      remaining points, so the total share inside the taper ball is
-      `band_fraction + (1 - band_fraction) * shell_fraction`.
-      `band_fraction = 0` (the default) reproduces the previous distribution
-      exactly.
+    - `device`, `dtype`: Placement of the tensors.
+    - `shell_fraction`, `shell_factor`: Interior-point distribution, forwarded to `sample_exterior_points`.
+    - `band_fraction`, `band_factor`: Dedicated near-surface share of the interior batch (`0.0` disables it).
+    - `axis_clearance_fraction`: NEW. Fraction of $R$ kept free around the axis, forwarded to the sampler.
 
     Returns:
     - A `_StreamBatch`.
     """
-    n_band = round(band_fraction * n_interior)  # NEW
+    n_band = round(band_fraction * n_interior)
     interior = sample_exterior_points(
-        domain, particle_z, particle_radius, n_interior - n_band, seed,
-        # CHANGED: reduced count
-        device=device, dtype=dtype,
-        shell_fraction=shell_fraction, shell_factor=shell_factor,
-    )  # CHANGED: gradient attached once, after the band join
-    if n_band > 0:  # NEW: dedicated near-surface draw (library patch L10)
+        domain, particle_z, particle_radius, n_interior - n_band, seed, shell_fraction,
+        shell_factor, axis_clearance_fraction=axis_clearance_fraction,
+        device=device, dtype=dtype
+    )
+    if n_band > 0:
         band_points = _sample_near_surface_band(
-            domain, particle_z, particle_radius, band_factor, n_band,
-            seed + 717_717, device,
-            dtype)  # NEW: offset disjoint from every other seed in use
+            domain, particle_z, particle_radius, band_factor, n_band, seed + 717_717,
+            device=device, dtype=dtype)
         interior = torch.cat((interior, band_points))
-    interior = interior.requires_grad_(True)  # CHANGED
+    interior = interior.requires_grad_(True)
     inlet, outlet = sample_inlet_outlet_points(domain, n_boundary, seed + 1,
                                                device=device, dtype=dtype)
     return _StreamBatch(interior, inlet,
@@ -260,44 +306,41 @@ def train_stream_function_flow(
     particle_axial_position: float,
     particle_radius: float,
     inlet_peak_velocity: float,
-    resample_each_round: bool = True,  # NEW
-    min_relative_improvement: float = 1.0e-2,  # NEW
+    resample_each_round: bool = True,
+    min_relative_improvement: float = 1.0e-2,
     patience: int = 2,  # NEW
     stagnation_probe_seed: int | None = None,
     shell_fraction: float = 0.25,
     shell_factor: float = 2.5,
     band_fraction: float = 0.0,
     band_factor: float = 1.5,
-    restore_best_probe: bool = True,  # CHANGED
+    restore_best_probe: bool = True,
+    *,
+    axis_clearance_fraction: float = 0.0,  # NEW
+    refine_dtype: torch.dtype | None = None,  # NEW
+    restore_adam_end: bool = True,  # NEW
 ) -> tuple[nn.Module, StreamLossHistory]:
     """Train a stream-function network on a deep copy and return it.
 
     Args:
-    - `network`: A [`StreamFunctionSphereFlow`][magnetofluidics_pinn.networks.stream_function.StreamFunctionSphereFlow]; never modified.
+    - `network`: A `StreamFunctionSphereFlow`; never modified.
     - `domain`: Nondimensional channel.
     - `fluid_config`: Fluid configuration with `regime == "stokes"`.
     - `training_config`: Epochs, points, learning rate, L-BFGS settings, `dtype`, `device`.
-    - `particle_axial_position`: Sphere center.
-    - `particle_radius`: Sphere radius.
+    - `particle_axial_position`, `particle_radius`: Sphere centre and radius.
     - `inlet_peak_velocity`: Peak inlet velocity; it must match the network's `flow_amplitude`.
-    - `shell_fraction`, `shell_factor`: Interior-point distribution forwarded to
-      `sample_exterior_points`. The same values feed every Adam batch, every L-BFGS
-      fixed batch, and the held-out probe batch, so the early-stopping probe always
-      measures the distribution the objective penalizes. Out-of-range values raise
-      `ValueError` in the sampler.
-    - `band_fraction`, `band_factor`: Near-surface band distribution forwarded to
-      `_sample_near_surface_band`. The same values feed every Adam batch, every L-BFGS
-      fixed batch, and the held-out probe batch, so the early-stopping probe always
-      measures the distribution the objective penalizes. Out-of-range values raise
-      `ValueError` in the sampler.
-    - `band_fraction`, `band_factor`: Dedicated near-surface interior-point share
-      forwarded to `_build_batch`. The same values feed every Adam batch, every
-      L-BFGS fixed batch, and the held-out probe batch, so the early-stopping probe
-      always measures the distribution the objective penalizes. Out-of-range values
-      raise in the sampler and the helper.
+    - `resample_each_round`: Draw a new fixed L-BFGS batch at every round.
+    - `min_relative_improvement`, `patience`: Early-stopping rule on the probe loss.
+    - `stagnation_probe_seed`: Seed of the held-out probe batch; defaults to `random_seed + 999_999`.
+    - `shell_fraction`, `shell_factor`, `band_fraction`, `band_factor`: Interior-point distribution, shared by every batch.
+    - `restore_best_probe`: Restore the state with the lowest probe loss at the end.
+    - `axis_clearance_fraction`: NEW. Fraction of $R$ kept free around the axis in every batch (default `0.0`).
+    - `refine_dtype`: NEW. dtype of the L-BFGS phase, for example `torch.float64`; the network is cast back to the training
+      dtype before it is returned. `None` keeps the training dtype.
+    - `restore_adam_end`: NEW. Include the Adam-end state among the restoration candidates.
 
     Returns:
-    - The trained copy and a [`StreamLossHistory`][magnetofluidics_pinn.training.stream_trainer.StreamLossHistory].
+    - The trained copy, in the training dtype, and a `StreamLossHistory`.
 
     Raises:
     - `ValueError`: If L-BFGS is enabled with a non-positive setting.
@@ -313,16 +356,16 @@ def train_stream_function_flow(
     device, dtype = training_config.torch_device, training_config.torch_dtype
     trained = copy.deepcopy(network).to(device=device, dtype=dtype)
 
-    def batch(n_interior: int, n_boundary: int, seed: int) -> _StreamBatch:
+    def batch(n_interior: int, n_boundary: int, seed: int,
+              batch_dtype: torch.dtype) -> _StreamBatch:  # CHANGED: dtype argument
         return _build_batch(domain, particle_axial_position, particle_radius,
-                            inlet_peak_velocity,
-                            n_interior, n_boundary, seed, device, dtype,
-                            shell_fraction, shell_factor,
-                            band_fraction, band_factor)  # CHANGED
+                            inlet_peak_velocity, n_interior, n_boundary,
+                            seed, device, batch_dtype, shell_fraction, shell_factor,
+                            band_fraction, band_factor,
+                            axis_clearance_fraction)
 
     optimizer = torch.optim.Adam(trained.parameters(), lr=training_config.learning_rate)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        # NEW: damps resampling noise
         optimizer, T_max=training_config.n_epochs,
         eta_min=1.0e-2 * training_config.learning_rate)
 
@@ -331,9 +374,8 @@ def train_stream_function_flow(
         losses = _evaluate_losses(
             trained,
             batch(training_config.n_interior_points, training_config.n_boundary_points,
-                  training_config.random_seed + epoch),
-            fluid_config, training_config,
-        )
+                  training_config.random_seed + epoch, dtype), fluid_config,
+            training_config)
         optimizer.zero_grad()
         losses["total"].backward()
         if training_config.gradient_clip_norm is not None:
@@ -345,28 +387,37 @@ def train_stream_function_flow(
         if training_config.verbose and epoch % training_config.log_every == 0:
             print(f"Epoch {epoch:5d} | total {adam_records[-1][0]:.3e}")
 
-    probe_seed = (
-        training_config.random_seed + 999_999 if stagnation_probe_seed is None else stagnation_probe_seed
-    )
-    probe_batch = batch(training_config.lbfgs_n_interior_points,
-                        training_config.lbfgs_n_boundary_points,
-                        probe_seed)  # NEW: fixed across every round
+    refine = dtype if refine_dtype is None else refine_dtype  # NEW
+    if training_config.use_lbfgs_refinement and refine != dtype:
+        trained = trained.to(dtype=refine)  # NEW: the L-BFGS phase runs in `refine`
 
-    best_state, best_probe, probe_history = None, math.inf, []  # CHANGED
+    probe_seed = (
+        training_config.random_seed + 999_999 if stagnation_probe_seed is None else stagnation_probe_seed)
+    probe_batch = batch(training_config.lbfgs_n_interior_points,
+                        training_config.lbfgs_n_boundary_points, probe_seed, refine)
+
+    def probe_loss_now() -> float:
+        return _evaluate_losses(trained, probe_batch, fluid_config, training_config)[
+            "total"].item()
+
+    best_state, best_probe, restored_stage, probe_history = None, math.inf, "last", []
     lbfgs_records: list[tuple[float, ...]] = []
     if training_config.use_lbfgs_refinement:
+        if restore_adam_end:  # NEW: the Adam-end state competes with every L-BFGS round
+            best_probe, best_state, restored_stage = probe_loss_now(), copy.deepcopy(
+                trained.state_dict()), "adam"
         previous_probe_loss: float | None = None
         stalled_rounds = 0
         for round_index in range(training_config.lbfgs_rounds):
             seed = training_config.random_seed + 100_000 + (
                 round_index if resample_each_round else 0)
             fixed = batch(training_config.lbfgs_n_interior_points,
-                          training_config.lbfgs_n_boundary_points, seed)
+                          training_config.lbfgs_n_boundary_points, seed, refine)
             lbfgs = torch.optim.LBFGS(
                 trained.parameters(), lr=1.0,
                 max_iter=training_config.lbfgs_iterations_per_round,
-                history_size=100, line_search_fn="strong_wolfe",
-                tolerance_grad=1.0e-12, tolerance_change=1.0e-14,
+                history_size=100, line_search_fn="strong_wolfe", tolerance_grad=1.0e-12,
+                tolerance_change=1.0e-14,
             )
 
             def closure(batch_=fixed, optimizer=lbfgs) -> torch.Tensor:
@@ -378,19 +429,14 @@ def train_stream_function_flow(
                 return _losses["total"]
 
             lbfgs.step(closure)
-            # current = lbfgs_records[-1][0]
-            # with torch.no_grad():
-            probe_loss = \
-                _evaluate_losses(trained, probe_batch, fluid_config, training_config)[
-                    "total"].item()
+            probe_loss = probe_loss_now()
             probe_history.append(probe_loss)
-            if probe_loss < best_probe:  # CHANGED
+            if probe_loss < best_probe:
                 best_probe, best_state = probe_loss, copy.deepcopy(trained.state_dict())
-
+                restored_stage = f"lbfgs-round-{round_index + 1}"  # NEW
             if training_config.verbose:
                 print(
                     f"L-BFGS round {round_index + 1} | train {lbfgs_records[-1][0]:.3e} | probe {probe_loss:.3e}")
-
             if previous_probe_loss is not None:
                 improvement = (previous_probe_loss - probe_loss) / abs(
                     previous_probe_loss)
@@ -399,23 +445,33 @@ def train_stream_function_flow(
                     break
             previous_probe_loss = probe_loss
 
-    if restore_best_probe and best_state is not None:  # CHANGED (after the loop)
+    restored = restore_best_probe and best_state is not None
+    if restored:
         trained.load_state_dict(best_state)
-    return trained, StreamLossHistory(STREAM_LOSS_NAMES,
-                                      tuple(adam_records), tuple(lbfgs_records),
-                                      tuple(probe_history),
-                                      # CHANGED: probe was computed but never returned
-                                      )
+    if next(
+        trained.parameters()).dtype != dtype:  # NEW: hand the network back in the training dtype
+        trained = trained.to(dtype=dtype)
+    return trained, StreamLossHistory(
+        STREAM_LOSS_NAMES, tuple(adam_records), tuple(lbfgs_records),
+        tuple(probe_history),
+        best_probe=best_probe if restored else math.nan,
+        restored_stage=restored_stage if restored else "last",  # NEW
+    )
 
 
-def diagnose_loss_scale(  # NEW
-    network: nn.Module, domain: Domain, fluid_config: FluidConfig,
+def diagnose_loss_scale(
+    network: nn.Module,
+    domain: Domain,
+    fluid_config: FluidConfig,
     training_config: TrainingConfig,
-    particle_axial_position: float, particle_radius: float, inlet_peak_velocity: float,
+    particle_axial_position: float,
+    particle_radius: float,
+    inlet_peak_velocity: float,
     shell_fraction: float = 0.25,
     shell_factor: float = 2.5,
-    band_fraction: float = 0.0,  # NEW: must match the training distribution
-    band_factor: float = 1.5,  # NEW
+    band_fraction: float = 0.0,
+    band_factor: float = 1.5,
+    axis_clearance_fraction: float = 0.0,  # NEW
 ) -> dict[str, float]:
     """Evaluate every loss on one batch *before* training, to catch scaling defects.
 
@@ -423,24 +479,20 @@ def diagnose_loss_scale(  # NEW
     - `network`: Stream-function network (not modified).
     - `domain`, `fluid_config`, `training_config`: As in `train_stream_function_flow`.
     - `particle_axial_position`, `particle_radius`, `inlet_peak_velocity`: As in `train_stream_function_flow`.
-    - `shell_fraction`, `shell_factor`: Interior-point distribution of the audit
-      batch. Pass the same values as the subsequent `train_stream_function_flow`
-      call, so the audit measures the batch the optimizer will actually see.
-    - `band_fraction`, `band_factor`: Near-surface distribution of the audit batch.
-      Pass the same values as the subsequent `train_stream_function_flow` call, so
-      the audit measures the batch the optimizer will actually see.
+    - `shell_fraction`, `shell_factor`, `band_fraction`, `band_factor`: Distribution of the audit batch; pass the values of the run.
+    - `axis_clearance_fraction`: NEW. Axis clearance of the audit batch; pass the value of the run.
 
     Returns:
     - Mapping from each name in `STREAM_LOSS_NAMES` to its initial value.
     """
     device, dtype = training_config.torch_device, training_config.torch_dtype
     probe = copy.deepcopy(network).to(device=device, dtype=dtype)
-    batch = _build_batch(domain, particle_axial_position, particle_radius,
-                         inlet_peak_velocity,
-                         training_config.n_interior_points,
-                         training_config.n_boundary_points,
-                         training_config.random_seed, device, dtype,
-                         shell_fraction, shell_factor,
-                         band_fraction, band_factor)  # CHANGED
-    losses = _evaluate_losses(probe, batch, fluid_config, training_config)
-    return dict(zip(STREAM_LOSS_NAMES, _record(losses)))
+    batch = _build_batch(
+        domain, particle_axial_position, particle_radius, inlet_peak_velocity,
+        training_config.n_interior_points,
+        training_config.n_boundary_points, training_config.random_seed, device, dtype,
+        shell_fraction, shell_factor,
+        band_fraction, band_factor, axis_clearance_fraction,
+    )
+    return dict(zip(STREAM_LOSS_NAMES, _record(
+        _evaluate_losses(probe, batch, fluid_config, training_config))))

@@ -48,6 +48,7 @@ def sample_exterior_points(
     random_seed: int,
     shell_fraction: float = 0.25,
     shell_factor: float = 2.5,
+    axis_clearance_fraction: float = 0.0,  # NEW
     device: str | torch.device | None = None,
     dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
@@ -64,6 +65,9 @@ def sample_exterior_points(
     - `random_seed`: Seed for a device-local generator.
     - `shell_fraction`: Fraction in $[0, 1)$ of points placed in the shell.
     - `shell_factor`: Shell outer radius in units of $a$ ($> 1$); clipped to $0.95R$.
+    - `axis_clearance_fraction`: Fraction $c \in [0, 1)$ of $R$ kept free around the axis. `0.0` (default) keeps the previous
+      behavior. The $(s, z)$ residual is regular on the axis, so a clearance is only a safeguard for the primitive-variable
+      residuals, whose $1/r^2$ terms amplify round-off.
     - `device`: Target device; auto-resolved if `None`.
     - `dtype`: Floating-point dtype.
 
@@ -84,10 +88,13 @@ def sample_exterior_points(
         raise ValueError("particle_radius must satisfy 0 < a < domain.radius.")
     if not (0.0 < particle_axial_position < domain.length):
         raise ValueError("particle_axial_position must lie inside the channel.")
+    if not (0.0 <= axis_clearance_fraction < 1.0):
+        raise ValueError("axis_clearance_fraction must lie in [0, 1).")
 
     resolved = resolve_device(device)
     generator = torch.Generator(device=resolved).manual_seed(random_seed)
     a, z_p = particle_radius, particle_axial_position
+    clearance = axis_clearance_fraction * domain.radius
     outer = min(shell_factor * a, 0.95 * domain.radius)
     n_shell = int(round(n_points * shell_fraction)) if outer > a else 0
     n_bulk = n_points - n_shell
@@ -96,8 +103,9 @@ def sample_exterior_points(
         return torch.rand(n, 1, generator=generator, device=resolved, dtype=dtype)
 
     n_cand = math.ceil(_OVERSAMPLING * n_bulk) + 16
-    bulk = torch.cat([domain.radius * uniform(n_cand), domain.length * uniform(n_cand)], dim=1)
-    outside = (bulk[:, 1] - z_p).square() + bulk[:, 0].square() >= a**2
+    radial = clearance + (domain.radius - clearance) * uniform(n_cand)
+    bulk = torch.cat([radial, domain.length * uniform(n_cand)], dim=1)
+    outside = (bulk[:, 1] - z_p).square() + bulk[:, 0].square() >= a ** 2
     bulk = _take(bulk, outside, n_bulk, "bulk")
     if n_shell == 0:
         return bulk.detach()

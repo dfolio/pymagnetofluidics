@@ -18,7 +18,7 @@ from __future__ import annotations
 import math
 import operator
 from dataclasses import dataclass, fields
-from typing import Callable, Literal, NamedTuple, Mapping, Sequence
+from typing import Callable, Literal, Mapping, NamedTuple, Sequence
 
 import pandas as pd
 import torch
@@ -28,9 +28,9 @@ import torch
 # chain - mirroring `networks.mlp._ACTIVATION_LAYERS`'s dispatch idiom.
 _COMPARISON_OPERATORS: dict[str, Callable[[float, float], bool]] = {
     "<=": operator.le,
-    "<": operator.lt,
+    "<" : operator.lt,
     ">=": operator.ge,
-    ">": operator.gt,
+    ">" : operator.gt,
 }
 
 
@@ -63,6 +63,11 @@ class VerificationCheck(NamedTuple):
     comparison: Literal["<=", "<", ">=", ">"]
     passed: bool | None
 
+    @property
+    def operator(self) -> str:
+        """Return the comparison operator as a string."""
+        return self.comparison
+
 
 def pending_check(
     name: str,
@@ -90,7 +95,8 @@ def pending_check(
       `">"`.
     """
     if comparison not in _COMPARISON_OPERATORS:
-        raise ValueError(f"comparison must be one of {tuple(_COMPARISON_OPERATORS)!r}; got {comparison!r}.")
+        raise ValueError(
+            f"comparison must be one of {tuple(_COMPARISON_OPERATORS)!r}; got {comparison!r}.")
     return VerificationCheck(
         name=name, description=description, metric_value=None, threshold=None,
         comparison=comparison, passed=None,
@@ -122,16 +128,54 @@ def evaluate_check(
       `">"`, or if `metric_value` or `threshold` is not finite.
     """
     if comparison not in _COMPARISON_OPERATORS:
-        raise ValueError(f"comparison must be one of {tuple(_COMPARISON_OPERATORS)!r}; got {comparison!r}.")
+        raise ValueError(
+            f"comparison must be one of {tuple(_COMPARISON_OPERATORS)!r}; got {comparison!r}.")
     if not math.isfinite(metric_value):
         raise ValueError(f"metric_value must be finite; got {metric_value!r}.")
     if not math.isfinite(threshold):
         raise ValueError(f"threshold must be finite; got {threshold!r}.")
     passed = _COMPARISON_OPERATORS[comparison](metric_value, threshold)
     return VerificationCheck(
-        name=name, description=description, metric_value=metric_value, threshold=threshold,
+        name=name, description=description, metric_value=metric_value,
+        threshold=threshold,
         comparison=comparison, passed=passed,
     )
+
+
+def safe_evaluate_check(  # NEW
+    name: str,
+    description: str,
+    metric_value: float,
+    threshold: float,
+    comparison: Literal["<=", "<", ">=", ">"] = "<=",
+) -> VerificationCheck:
+    """Build a `VerificationCheck`, recording a non-finite metric as a failure instead of raising.
+
+    A verification table should show that a metric could not be computed (NaN, infinity), not abort the notebook.
+    Programming errors (invalid comparison, non-finite threshold) still raise.
+
+    Args:
+    - `name`: Short, human-readable identifier for the check.
+    - `description`: One-sentence explanation of what is being verified.
+    - `metric_value`: The measured value; may be NaN or infinite.
+    - `threshold`: The finite bound `metric_value` is compared against.
+    - `comparison`: One of `"<="`, `"<"`, `">="`, `">"`.
+
+    Returns:
+    - A `VerificationCheck`; `passed` is `False` and `metric_value` keeps the non-finite value when the metric is not finite.
+
+    Raises:
+    - `ValueError`: If `comparison` is invalid or `threshold` is not finite.
+    """
+    if comparison not in _COMPARISON_OPERATORS:
+        raise ValueError(
+            f"comparison must be one of {tuple(_COMPARISON_OPERATORS)!r}; got {comparison!r}.")
+    if not math.isfinite(threshold):
+        raise ValueError(f"threshold must be finite; got {threshold!r}.")
+    if not math.isfinite(metric_value):
+        return VerificationCheck(name, description, float(metric_value), threshold,
+                                 comparison, False)
+    return evaluate_check(name, description, metric_value, threshold, comparison)
 
 
 def render_verification_table(checks: tuple[VerificationCheck, ...]) -> pd.DataFrame:
@@ -153,12 +197,13 @@ def render_verification_table(checks: tuple[VerificationCheck, ...]) -> pd.DataF
         raise ValueError("checks must contain at least one VerificationCheck.")
     records = [
         {
-            "Check": check.name,
-            "Description": check.description,
+            "Check"       : check.name,
+            "Description" : check.description,
             "Metric value": "pending" if check.metric_value is None else f"{check.metric_value:.3e}",
-            "Threshold": "pending" if check.threshold is None else f"{check.threshold:.3e}",
-            "Comparison": check.comparison,
-            "Passed": "—" if check.passed is None else ("✓" if check.passed else "✗"),
+            "Threshold"   : "pending" if check.threshold is None else f"{check.threshold:.3e}",
+            "Comparison"  : check.comparison,
+            "Passed"      : "—" if check.passed is None else (
+                "✓" if check.passed else "✗"),
         }
         for check in checks
     ]
@@ -231,16 +276,17 @@ class VerificationThresholds:
     held_out_residual_tolerance: float
     conservation_of_mass_tolerance: float
     noslip_tolerance: float
-    two_way_residual_tolerance: float      # NEW
-    manufactured_force_tolerance: float    # NEW
+    two_way_residual_tolerance: float  # NEW
+    manufactured_force_tolerance: float  # NEW
     quadrature_convergence_tolerance: float  # NEW
-    faxen_consistency_tolerance: float     # NEW
+    faxen_consistency_tolerance: float  # NEW
 
     def __post_init__(self) -> None:
         for field in fields(self):
             value = getattr(self, field.name)
             if not math.isfinite(value) or value <= 0.0:
-                raise ValueError(f"{field.name} must be finite and strictly positive; got {value!r}.")
+                raise ValueError(
+                    f"{field.name} must be finite and strictly positive; got {value!r}.")
 
 
 def default_thresholds(
@@ -258,12 +304,15 @@ def default_thresholds(
     held_out_residual_tolerance: float = 1.0e-2,
     conservation_of_mass_tolerance: float = 5.0e-2,
     noslip_tolerance: float = 0.15,
-    two_way_residual_tolerance: float = 2.0e-1,       # NEW — loose on purpose: the obstacle problem
-                                                           # competes nine loss terms for a much smaller
-                                                           # budget than the baseline Phase-1 recipe.
-    manufactured_force_tolerance: float = 1.0e-4,     # NEW — matches the old MANUFACTURED_TOLERANCE
-    quadrature_convergence_tolerance: float = 2.0e-2, # NEW — matches the old QUADRATURE_TOLERANCE
-    faxen_consistency_tolerance: float = 0.15,        # NEW — matches the old FAXEN_TOLERANCE
+    two_way_residual_tolerance: float = 2.0e-1,
+    # NEW — loose on purpose: the obstacle problem
+    # competes nine loss terms for a much smaller
+    # budget than the baseline Phase-1 recipe.
+    manufactured_force_tolerance: float = 1.0e-4,
+    # NEW — matches the old MANUFACTURED_TOLERANCE
+    quadrature_convergence_tolerance: float = 2.0e-2,
+    # NEW — matches the old QUADRATURE_TOLERANCE
+    faxen_consistency_tolerance: float = 0.15,  # NEW — matches the old FAXEN_TOLERANCE
 
 ) -> VerificationThresholds:
     r"""Build a `VerificationThresholds` instance from reference scales and calibratable factors.
@@ -319,7 +368,8 @@ def default_thresholds(
       for any other invalid factor.
     """
     if not math.isfinite(peak_velocity) or peak_velocity <= 0.0:
-        raise ValueError(f"peak_velocity must be finite and strictly positive; got {peak_velocity!r}.")
+        raise ValueError(
+            f"peak_velocity must be finite and strictly positive; got {peak_velocity!r}.")
     machine_epsilon = torch.finfo(dtype).eps
     return VerificationThresholds(
         exact_residual_tolerance=exact_residual_epsilon_factor * machine_epsilon,
@@ -333,10 +383,10 @@ def default_thresholds(
         held_out_residual_tolerance=held_out_residual_tolerance,
         conservation_of_mass_tolerance=conservation_of_mass_tolerance,
         noslip_tolerance=noslip_tolerance,
-        two_way_residual_tolerance=two_way_residual_tolerance,        # NEW
-        manufactured_force_tolerance=manufactured_force_tolerance,    # NEW
+        two_way_residual_tolerance=two_way_residual_tolerance,  # NEW
+        manufactured_force_tolerance=manufactured_force_tolerance,  # NEW
         quadrature_convergence_tolerance=quadrature_convergence_tolerance,  # NEW
-        faxen_consistency_tolerance=faxen_consistency_tolerance,      # NEW
+        faxen_consistency_tolerance=faxen_consistency_tolerance,  # NEW
     )
 
 
@@ -378,14 +428,13 @@ def build_residual_consistency_table(
         rw_ratio = math.sqrt(rw_val / max(std_val, eps))
         worst = max(worst, nat_ratio, nat2_ratio, rw_ratio)
         records.append({
-            "Component": name,
-            "Standard (MSE)": std_val,
-            "Native (MSE)": nat_val,
-            "R-Weighted (MSE)": rw_val,
-            "Native / Standard (RMS)": nat_ratio,
-            "Native / R-Weighted (RMS)": nat2_ratio,
+            "Component"                  : name,
+            "Standard (MSE)"             : std_val,
+            "Native (MSE)"               : nat_val,
+            "R-Weighted (MSE)"           : rw_val,
+            "Native / Standard (RMS)"    : nat_ratio,
+            "Native / R-Weighted (RMS)"  : nat2_ratio,
             "R-Weighted / Standard (RMS)": rw_ratio,
         })
 
     return pd.DataFrame.from_records(records).set_index("Component"), worst
-

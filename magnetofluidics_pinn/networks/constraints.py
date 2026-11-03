@@ -39,7 +39,7 @@ alone already gave.
 
 from __future__ import annotations
 
-import warnings  # NEW
+import warnings
 
 import torch
 from torch import nn
@@ -49,15 +49,15 @@ from magnetofluidics_pinn.data_types import Domain
 
 class _HardWallConstrainedFlow(nn.Module):
     r"""Wraps a raw `(u_r, u_z, p)` network to enforce axis and wall regularity.
-    
+
     Applies exact physical boundary constraints for axisymmetric Phase 1 flow:
-    
+
     - $u_r(0, z) = 0$, $u_r(R, z) = 0$
     - $u_z(R, z) = 0$
     - $p(0, L) = 0$ (gauge anchoring)
     """
 
-    def __init__(self, raw_network: nn.Module,  domain: Domain) -> None:
+    def __init__(self, raw_network: nn.Module, domain: Domain) -> None:
         super().__init__()
         self.raw_network = raw_network
         self.radius = domain.radius
@@ -68,28 +68,29 @@ class _HardWallConstrainedFlow(nn.Module):
         param_device = next(self.raw_network.parameters()).device
         if coordinates.device != param_device:
             coordinates = coordinates.to(device=param_device)
-        
+
         normalized_radius = coordinates[:, 0:1] / self.radius
         axial_coordinate = coordinates[:, 1:2]
-        
+
         squared_normalized_radius = normalized_radius.square()
         wall_vanishing_factor = 1.0 - squared_normalized_radius
-        raw_output = self.raw_network(torch.cat([squared_normalized_radius, axial_coordinate], dim=1))
-        
+        raw_output = self.raw_network(
+            torch.cat([squared_normalized_radius, axial_coordinate], dim=1))
+
         # Radial velocity: u_r(0, z) = 0 and u_r(R, z) = 0
         radial_velocity = normalized_radius * wall_vanishing_factor * raw_output[:, 0:1]
-        
+
         # Axial velocity: wall no-slip u_z(R, z) = 0
         axial_velocity = wall_vanishing_factor * raw_output[:, 1:2]
         if self.u_max > 0.0:
             axial_velocity = axial_velocity + self.u_max * wall_vanishing_factor
-        
+
         # Pressure gauge fixing: p(0, L) = 0
-        ref_point = torch.tensor([[0.0, self.length]], device=coordinates.device, dtype=coordinates.dtype)
+        ref_point = torch.tensor([[0.0, self.length]], device=coordinates.device,
+                                 dtype=coordinates.dtype)
         p_ref = self.raw_network(ref_point)[:, 2:3]
         p = raw_output[:, 2:3] - p_ref
         return torch.cat([radial_velocity, axial_velocity, p], dim=1)
-
 
 
 def apply_hard_wall_constraint(network: nn.Module, domain: Domain) -> nn.Module:
@@ -130,7 +131,8 @@ def apply_hard_wall_constraint(network: nn.Module, domain: Domain) -> nn.Module:
     - `ValueError`: If `domain.radius` is not strictly positive.
     """
     if domain.radius <= 0.0:
-        raise ValueError(f"domain.radius must be strictly positive; got {domain.radius!r}.")
+        raise ValueError(
+            f"domain.radius must be strictly positive; got {domain.radius!r}.")
     return _HardWallConstrainedFlow(network, domain)
 
 
@@ -185,51 +187,53 @@ class _HardParticleConstrainedFlow(nn.Module):
         param_dtype = next(self.network.parameters()).dtype
         if coordinates.device != param_device or coordinates.dtype != param_dtype:
             coordinates = coordinates.to(device=param_device, dtype=param_dtype)
-        
+
         radial_coordinate = coordinates[:, 0:1]
         axial_coordinate = coordinates[:, 1:2]
-        
+
         r_sq = radial_coordinate.square()
         r_norm_sq = r_sq / (self.radius ** 2)
         wall_vanishing_factor = 1.0 - r_norm_sq
-        
+
         # Evaluate raw underlying MLP mapped from ((r/R)^2, z)[cite: 70]
         raw_output = self.network(torch.cat([r_norm_sq, axial_coordinate], dim=1))
         n_r = raw_output[:, 0:1]
         n_z = raw_output[:, 1:2]
         raw_p = raw_output[:, 2:3]
-        
+
         # Regularized distance to particle center (0, z_p)
         axial_offset = axial_coordinate - self.particle_axial_position
         center_distance = torch.sqrt(r_sq + axial_offset.square() + 1.0e-14)
         signed_particle_distance = center_distance - self.particle_radius
-        
+
         # Approach A: Linear distance factor via tanh
         # At sphere surface (signed_distance = 0), d_norm = 0 with d/dn(d_norm) = 1/a != 0[cite: 70]
         d_norm = torch.tanh(signed_particle_distance / self.particle_radius)
-        
+
         # Gaussian envelope for particle velocity influence region
         envelope = torch.exp(- (signed_particle_distance / self.delta).square())
-        
+
         # Wall blending factor for particle velocity (vanishes at r = R)[cite: 70]
         r_diff_sq = torch.clamp(self.radius ** 2 - r_sq, min=0.0)
         f_p = r_diff_sq / (
-                    r_diff_sq + self.radius * (signed_particle_distance.square() / self.particle_radius) + 1.0e-7)
-        
+            r_diff_sq + self.radius * (
+                signed_particle_distance.square() / self.particle_radius) + 1.0e-7)
+
         # 1. Radial velocity: zero at r=0, zero at r=R, zero on sphere surface S[cite: 70]
         u_r = (radial_coordinate / self.radius) * wall_vanishing_factor * d_norm * n_r
-        
+
         # 2. Axial velocity: Up on S, 0 at wall r=R, Poiseuille far field[cite: 70]
         u_z_particle = self.particle_axial_velocity * envelope * f_p
         u_z_shear = wall_vanishing_factor * d_norm * n_z
         u_z_ambient = self.u_max * wall_vanishing_factor * (1.0 - envelope)
         u_z = u_z_particle + u_z_shear + u_z_ambient
-        
+
         # 3. Pressure gauge anchoring: p(0, L) = 0[cite: 70]
-        ref_point = torch.tensor([[0.0, self.length]], device=param_device, dtype=param_dtype)
+        ref_point = torch.tensor([[0.0, self.length]], device=param_device,
+                                 dtype=param_dtype)
         p_ref = self.network(ref_point)[:, 2:3]
         p = raw_p - p_ref
-        
+
         return torch.cat([u_r, u_z, p], dim=1)
 
 
@@ -266,9 +270,11 @@ def apply_hard_particle_constraint(  # NEW
     - `ValueError`: If dimensions or radii are non-positive or $a \ge R$.
     """
     if particle_radius <= 0.0:
-        raise ValueError(f"particle_radius must be strictly positive; got {particle_radius!r}.")
+        raise ValueError(
+            f"particle_radius must be strictly positive; got {particle_radius!r}.")
     if domain.radius <= 0.0:
-        raise ValueError(f"domain.radius must be strictly positive; got {domain.radius!r}.")
+        raise ValueError(
+            f"domain.radius must be strictly positive; got {domain.radius!r}.")
     if particle_radius >= domain.radius:
         raise ValueError(
             f"particle_radius ({particle_radius!r}) must be strictly less than "
@@ -288,5 +294,3 @@ def apply_hard_particle_constraint(  # NEW
         particle_axial_velocity=particle_axial_velocity,
         boundary_layer_thickness_factor=boundary_layer_thickness_factor,
     )
-
-

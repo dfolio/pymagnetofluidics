@@ -17,13 +17,13 @@ import torch
 from torch import nn
 
 from magnetofluidics_pinn.config import FluidConfig
-from magnetofluidics_pinn.physics.fluid_residuals import (
-    stokes_residual,
-    compute_flow_derivatives
-)
-from magnetofluidics_pinn.sampling.exterior import sample_exterior_points
 from magnetofluidics_pinn.data_types import Domain
-from magnetofluidics_pinn.device_utils import resolve_device, resolve_module_device, resolve_module_dtype
+from magnetofluidics_pinn.device_utils import (resolve_device, resolve_dtype,
+                                               resolve_module_device,
+                                               resolve_module_dtype)
+from magnetofluidics_pinn.physics import (QuadratureRule, sphere_quadrature,
+                                          stokes_residual)
+from magnetofluidics_pinn.sampling.exterior import sample_exterior_points
 
 FlowField = Callable[[torch.Tensor], torch.Tensor]
 
@@ -44,13 +44,16 @@ def _resolve_placement(
     """
     is_module = isinstance(network, nn.Module)
     resolved_device = torch.device(device) if device is not None else (
-        resolve_module_device(network) if is_module else resolve_device(None))
+        resolve_module_device(network) if is_module else resolve_device(None)
+    )
     resolved_dtype = dtype if dtype is not None else (
-        resolve_module_dtype(network) if is_module else torch.float64)
+        resolve_module_dtype(network) if is_module else resolve_dtype(None)
+    )
     return resolved_device, resolved_dtype
 
 
-def _stress_components(network: FlowField, coordinates: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _stress_components(network: FlowField, coordinates: torch.Tensor) -> tuple[
+    torch.Tensor, torch.Tensor]:
     r"""Evaluate $\sigma_{zz} = -p + 2\partial_z u_z$ and $\sigma_{zr} = \partial_r u_z + \partial_z u_r$.
 
     Args:
@@ -61,38 +64,76 @@ def _stress_components(network: FlowField, coordinates: torch.Tensor) -> tuple[t
     - Detached tensors `(sigma_zz, sigma_zr)`, each `(n, 1)`.
     """
     if coordinates.ndim != 2 or coordinates.shape[1] != 2:
-        raise ValueError(f"coordinates must have shape (n, 2); got {tuple(coordinates.shape)}.")
+        raise ValueError(
+            f"coordinates must have shape (n, 2); got {tuple(coordinates.shape)}.")
     target_dtype = coordinates.dtype
     if isinstance(network, nn.Module):
         param = next(network.parameters(), None)
         if param is not None:
             target_dtype = param.dtype
-    
+
     with torch.enable_grad():
-        points = coordinates.detach().clone().to(dtype=target_dtype).requires_grad_(True)
+        points = coordinates.detach().clone().to(dtype=target_dtype).requires_grad_(
+            True)
         field_output = network(points)
         if field_output.ndim != 2 or field_output.shape[1] < 3:
-            raise ValueError(f"network output must have shape (n, 3); got {tuple(field_output.shape)}.")
-        
+            raise ValueError(
+                f"network output must have shape (n, 3); got {tuple(field_output.shape)}.")
+
         u_r = field_output[:, 0:1]
         u_z = field_output[:, 1:2]
         pressure = field_output[:, 2:3]
-        
+
         grad_u_r = torch.autograd.grad(
-            u_r, points, grad_outputs=torch.ones_like(u_r), create_graph=False, retain_graph=True
+            u_r, points, grad_outputs=torch.ones_like(u_r), create_graph=False,
+            retain_graph=True
         )[0]
         grad_u_z = torch.autograd.grad(
-            u_z, points, grad_outputs=torch.ones_like(u_z), create_graph=False, retain_graph=False
+            u_z, points, grad_outputs=torch.ones_like(u_z), create_graph=False,
+            retain_graph=False
         )[0]
-        
+
         d_velocity_r_dz = grad_u_r[:, 1:2]
         d_velocity_z_dr = grad_u_z[:, 0:1]
         d_velocity_z_dz = grad_u_z[:, 1:2]
-        
+
         sigma_zz = -pressure + 2.0 * d_velocity_z_dz
         sigma_zr = d_velocity_z_dr + d_velocity_r_dz
-    
-    return sigma_zz.detach().to(dtype=coordinates.dtype), sigma_zr.detach().to(dtype=coordinates.dtype)
+
+    return sigma_zz.detach().to(dtype=coordinates.dtype), sigma_zr.detach().to(
+        dtype=coordinates.dtype)
+
+
+def axial_traction(  # NEW
+    network: FlowField,
+    center_z: float,
+    radius: float,
+    theta: torch.Tensor,
+) -> torch.Tensor:
+    r"""Evaluate the axial traction $t_z(\theta) = \sigma_{zz}\cos\theta + \sigma_{zr}\sin\theta$ on a sphere.
+
+    Args:
+    - `network`: Flow field mapping `(r, z)` to `(u_r, u_z, p)`.
+    - `center_z`: Axial centre of the sphere.
+    - `radius`: Sphere radius, finite and strictly positive.
+    - `theta`: Tensor `(n,)` of polar angles.
+
+    Returns:
+    - Detached tensor `(n,)` with $t_z$, the axial force per unit area the fluid exerts on the sphere.
+
+    Raises:
+    - `ValueError`: If `radius` is not finite and strictly positive, or `center_z` is not finite.
+    """
+    if not (math.isfinite(radius) and radius > 0.0):
+        raise ValueError(
+            f"radius must be finite and strictly positive; got {radius!r}.")
+    if not math.isfinite(center_z):
+        raise ValueError(f"center_z must be finite; got {center_z!r}.")
+    coordinates = torch.stack(
+        [radius * torch.sin(theta), center_z + radius * torch.cos(theta)], dim=1)
+    sigma_zz, sigma_zr = _stress_components(network, coordinates)
+    return sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(
+        theta)
 
 
 def sphere_traction_force(
@@ -102,21 +143,21 @@ def sphere_traction_force(
     n_quadrature_points: int = 361,
     device: torch.device | str | None = None,
     dtype: torch.dtype | None = None,
+    rule: QuadratureRule = "gauss_legendre",
 ) -> float:
     r"""Integrate the axial traction over a *control* sphere of arbitrary radius.
 
-    $$ F_z = \int_0^\pi \big(\sigma_{zz}\cos\theta + \sigma_{zr}\sin\theta\big)\,2\pi a^2\sin\theta\,\dd\theta. $$
-
-    For a Stokes field this equals the force on the enclosed body for every radius
-    that encloses it and stays inside the fluid domain.
+     $F_z = 2\pi a^2 \sum_i w_i\,t_z(\theta_i)$ with the rules of `physics.quadrature.sphere_quadrature`. For a Stokes field this
+    equals the force on the enclosed body for every radius that encloses it and stays inside the fluid domain.
 
     Args:
     - `network`: Flow field mapping `(r, z)` to `(u_r, u_z, p)`.
     - `center_z`: Axial center of the control sphere.
     - `radius`: Control-sphere radius.
-    - `n_quadrature_points`: Polar-angle nodes (trapezoidal rule).
-    - `device`: Device override.
-    - `dtype`: Dtype override.
+    - `n_quadrature_points`: Number of nodes, at least 3.
+    - `device`, `dtype`: Placement overrides for plain callables.
+    - `rule`: `"gauss_legendre"` (default), `"simpson"` (the previous rule) or `"trapezoid"`. CHANGED: one quadrature shared with
+      `physics.hydrodynamic_drag.surface_traction_force`.
 
     Returns:
     - The axial force as a Python float.
@@ -125,45 +166,18 @@ def sphere_traction_force(
     - `ValueError`: If `radius <= 0`, a scalar is not finite, or `n_quadrature_points < 3`.
     """
     if not (math.isfinite(radius) and radius > 0.0):
-        raise ValueError(f"radius must be finite and strictly positive; got {radius!r}.")
+        raise ValueError(
+            f"radius must be finite and strictly positive; got {radius!r}.")
     if not math.isfinite(center_z):
         raise ValueError(f"center_z must be finite; got {center_z!r}.")
     if n_quadrature_points < 3:
-        raise ValueError(f"n_quadrature_points must be at least 3; got {n_quadrature_points!r}.")
+        raise ValueError(
+            f"n_quadrature_points must be at least 3; got {n_quadrature_points!r}.")
     resolved_device, resolved_dtype = _resolve_placement(network, device, dtype)
-    theta = torch.linspace(0.0, math.pi, n_quadrature_points, device=resolved_device, dtype=resolved_dtype)
-    coordinates = torch.stack([radius * torch.sin(theta), center_z + radius * torch.cos(theta)], dim=1)
-    sigma_zz, sigma_zr = _stress_components(network, coordinates)
-    traction = sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(theta)
-    integrand = traction * 2.0 * math.pi * radius * coordinates[:, 0]
-    
-    # --- MODIFIED: Composite Simpson's 1/3 rule (order 4) replacing trapezoidal rule ---
-    # The trapezoidal rule on non-periodic boundaries has an O(h^2) truncation error
-    # (~7.4e-6 for 360 intervals) due to non-zero odd derivatives at theta = 0 and pi.
-    # Composite Simpson's rule cancels this leading error term, reducing discretization
-    # error to O(h^4) (< 1e-9), comfortably satisfying the 1e-6 assertion.
-    n_intervals = n_quadrature_points - 1
-    h_step = math.pi / n_intervals
-
-    if n_intervals % 2 == 0:
-        simpson_weights = torch.ones(
-            n_quadrature_points, device=resolved_device, dtype=resolved_dtype
-        )
-        simpson_weights[1:-1:2] = 4.0
-        simpson_weights[2:-1:2] = 2.0
-        integral = torch.sum(integrand * simpson_weights) * (h_step / 3.0)
-    else:
-        # Fallback for even numbers of points (Simpson 1/3 on n-2 + trapezoid on last step)
-        weights = torch.ones(
-            n_quadrature_points - 1, device=resolved_device, dtype=resolved_dtype
-        )
-        weights[1:-1:2] = 4.0
-        weights[2:-1:2] = 2.0
-        simpson_part = torch.sum(integrand[:-1] * weights) * (h_step / 3.0)
-        trap_part = 0.5 * h_step * (integrand[-2] + integrand[-1])
-        integral = simpson_part + trap_part
-
-    return integral.item()
+    theta, weights = sphere_quadrature(n_quadrature_points, rule, resolved_device,
+                                       resolved_dtype)  # CHANGED
+    traction = axial_traction(network, center_z, radius, theta)
+    return (2.0 * math.pi * radius ** 2 * (weights * traction).sum()).item()
 
 
 def surface_independence_report(
@@ -194,15 +208,17 @@ def surface_independence_report(
     if not radii:
         raise ValueError("radii must contain at least one control radius.")
     forces = tuple(
-        sphere_traction_force(network, center_z, radius, n_quadrature_points, device, dtype)
+        sphere_traction_force(network, center_z, radius, n_quadrature_points, device,
+                              dtype)
         for radius in radii
     )
     mean_force = sum(forces) / len(forces)
     scale = abs(mean_force) if mean_force != 0.0 else 1.0
     return pd.DataFrame({
-        "radius": radii,
-        "force": forces,
-        "relative_deviation": tuple(abs(force - mean_force) / scale for force in forces),
+        "radius"            : radii,
+        "force"             : forces,
+        "relative_deviation": tuple(
+            abs(force - mean_force) / scale for force in forces),
     })
 
 
@@ -242,23 +258,27 @@ def cross_section_momentum_force(
     - `ValueError`: If `channel_radius <= 0`, `z_upstream >= z_downstream`, or a node count is below 3.
     """
     if not (math.isfinite(channel_radius) and channel_radius > 0.0):
-        raise ValueError(f"channel_radius must be finite and strictly positive; got {channel_radius!r}.")
+        raise ValueError(
+            f"channel_radius must be finite and strictly positive; got {channel_radius!r}.")
     if not z_upstream < z_downstream:
         raise ValueError("z_upstream must be smaller than z_downstream.")
     if n_radial < 3 or n_axial < 3:
         raise ValueError("n_radial and n_axial must be at least 3.")
     resolved_device, resolved_dtype = _resolve_placement(network, device, dtype)
-    r_grid = torch.linspace(0.0, channel_radius, n_radial, device=resolved_device, dtype=resolved_dtype)
+    r_grid = torch.linspace(0.0, channel_radius, n_radial, device=resolved_device,
+                            dtype=resolved_dtype)
 
     def section_force(z_value: float) -> torch.Tensor:
         points = torch.stack([r_grid, torch.full_like(r_grid, z_value)], dim=1)
         sigma_zz, _ = _stress_components(network, points)
         return torch.trapezoid(sigma_zz.squeeze(1) * 2.0 * math.pi * r_grid, r_grid)
 
-    z_grid = torch.linspace(z_upstream, z_downstream, n_axial, device=resolved_device, dtype=resolved_dtype)
+    z_grid = torch.linspace(z_upstream, z_downstream, n_axial, device=resolved_device,
+                            dtype=resolved_dtype)
     wall_points = torch.stack([torch.full_like(z_grid, channel_radius), z_grid], dim=1)
     _, sigma_zr = _stress_components(network, wall_points)
-    wall_force = torch.trapezoid(sigma_zr.squeeze(1) * 2.0 * math.pi * channel_radius, z_grid)
+    wall_force = torch.trapezoid(sigma_zr.squeeze(1) * 2.0 * math.pi * channel_radius,
+                                 z_grid)
     return (section_force(z_downstream) - section_force(z_upstream) + wall_force).item()
 
 
@@ -293,13 +313,14 @@ def global_momentum_balance(
     radius = particle_radius if control_radius is None else control_radius
     if section_offset <= radius:
         raise ValueError("section_offset must exceed the control radius.")
-    surface = sphere_traction_force(network, center_z, radius, device=device, dtype=dtype)
+    surface = sphere_traction_force(network, center_z, radius, device=device,
+                                    dtype=dtype)
     momentum = cross_section_momentum_force(
         network, channel_radius, center_z - section_offset, center_z + section_offset,
         device=device, dtype=dtype,
     )
     scale = max(abs(surface), abs(momentum), 1.0e-12)
-    return {"surface_force": surface, "momentum_force": momentum,
+    return {"surface_force"      : surface, "momentum_force": momentum,
             "relative_difference": abs(surface - momentum) / scale}
 
 
@@ -348,7 +369,8 @@ def residual_by_region(
     - `ValueError`: If an argument is out of range.
     """
     if n_points <= 0 or near_factor <= 1.0 or not (0.0 < axis_band < 1.0):
-        raise ValueError("n_points > 0, near_factor > 1 and 0 < axis_band < 1 are required.")
+        raise ValueError(
+            "n_points > 0, near_factor > 1 and 0 < axis_band < 1 are required.")
     resolved_device, resolved_dtype = _resolve_placement(network, device, dtype)
     points = sample_exterior_points(
         domain, particle_axial_position, particle_radius, n_points, random_seed,
@@ -358,29 +380,36 @@ def residual_by_region(
         residual = network.stokes_residual_sz(points).detach()
     else:
         with torch.enable_grad():
-            residual = stokes_residual(network, points, fluid_config, residual_form=residual_form).detach()
+            residual = stokes_residual(network, points, fluid_config,
+                                       residual_form=residual_form).detach()
     # evaluate_held_out_residual / evaluate_residual_grid: the same two-branch pattern.
     r, z = points[:, 0].detach(), points[:, 1].detach()
     rho = torch.hypot(r, z - particle_axial_position)
-    masks = {"all": torch.ones_like(r, dtype=torch.bool),
+    masks = {"all"        : torch.ones_like(r, dtype=torch.bool),
              "near sphere": rho < near_factor * particle_radius,
-             "axis band": r < axis_band * domain.radius}
+             "axis band"  : r < axis_band * domain.radius}
     if section_offset is not None:
         masks["slab"] = (z - particle_axial_position).abs() < section_offset
     nan = float("nan")
     rows = {}
     for name, mask in masks.items():
         if int(mask.sum()) == 0:
-            rows[name] = {"count": 0, "rms_r": nan, "rms_z": nan, "rms_continuity": nan,
+            rows[name] = {"count"            : 0,
+                          "rms_r"            : nan,
+                          "rms_z"            : nan,
+                          "rms_continuity"   : nan,
                           "force_error_bound": nan}
             continue
         weight = r[mask]
-        rms = [torch.sqrt((weight * residual[mask, k].square()).sum() / weight.sum()).item() for k in range(3)]
+        rms = [torch.sqrt(
+            (weight * residual[mask, k].square()).sum() / weight.sum()).item() for k in
+               range(3)]
         bound = nan
         if name == "slab":
-            slab_volume = math.pi * domain.radius**2 * 2.0 * section_offset - 4.0 / 3.0 * math.pi * particle_radius**3
+            slab_volume = math.pi * domain.radius ** 2 * 2.0 * section_offset - 4.0 / 3.0 * math.pi * particle_radius ** 3
             bound = slab_volume * rms[1]
-        rows[name] = {"count": int(mask.sum()), "rms_r": rms[0], "rms_z": rms[1],
+        rows[name] = {"count"         : int(mask.sum()), "rms_r": rms[0],
+                      "rms_z"         : rms[1],
                       "rms_continuity": rms[2], "force_error_bound": bound}
     return pd.DataFrame.from_dict(rows, orient="index")
 
@@ -411,13 +440,18 @@ def traction_profile(
     - A `DataFrame` with columns `theta`, `r`, `z`, `sigma_zz`, `sigma_zr`, `t_z`.
     """
     resolved_device, resolved_dtype = _resolve_placement(network, device, dtype)
-    theta = torch.linspace(0.0, math.pi, n_quadrature_points, device=resolved_device, dtype=resolved_dtype)
-    coordinates = torch.stack([radius * torch.sin(theta), center_z + radius * torch.cos(theta)], dim=1)
+    theta = torch.linspace(0.0, math.pi, n_quadrature_points, device=resolved_device,
+                           dtype=resolved_dtype)
+    coordinates = torch.stack(
+        [radius * torch.sin(theta), center_z + radius * torch.cos(theta)], dim=1)
     sigma_zz, sigma_zr = _stress_components(network, coordinates)
-    t_z = sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(theta)
+    t_z = sigma_zz.squeeze(1) * torch.cos(theta) + sigma_zr.squeeze(1) * torch.sin(
+        theta)
     return pd.DataFrame({
-        "theta": theta.cpu().numpy(),
-        "r": coordinates[:, 0].cpu().numpy(), "z": coordinates[:, 1].cpu().numpy(),
-        "sigma_zz": sigma_zz.squeeze(1).cpu().numpy(), "sigma_zr": sigma_zr.squeeze(1).cpu().numpy(),
-        "t_z": t_z.cpu().numpy(),
+        "theta"   : theta.cpu().numpy(),
+        "r"       : coordinates[:, 0].cpu().numpy(),
+        "z"       : coordinates[:, 1].cpu().numpy(),
+        "sigma_zz": sigma_zz.squeeze(1).cpu().numpy(),
+        "sigma_zr": sigma_zr.squeeze(1).cpu().numpy(),
+        "t_z"     : t_z.cpu().numpy(),
     })

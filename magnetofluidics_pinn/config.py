@@ -745,6 +745,7 @@ class TwoWayCouplingConfig:
 
         if self.device.split(":")[0] not in ("cuda", "cpu"):
             raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
+        resolve_dtype(self.dtype)
 
     @property
     def particle_velocity_magnitude(self) -> float:
@@ -932,6 +933,7 @@ class TrainingConfig:
             raise ValueError(f"log_every must be at least 1 when verbose=True; got {self.log_every!r}.")
         if self.device.split(":")[0] not in ("cuda", "cpu"):  # CHANGED: accepts "cuda:0" as documented
             raise ValueError(f"device type must be 'cuda' or 'cpu', got '{self.device}'.")
+        resolve_dtype(self.dtype)  # raises ValueError for anything but "float32" / "float64"
 
     @property
     def torch_device(self) -> torch.device:
@@ -940,7 +942,8 @@ class TrainingConfig:
 
     @property
     def torch_dtype(self) -> torch.dtype:
-        return torch.float32 if self.dtype == "float32" else torch.float64
+        """Return the resolved dtype of the run."""
+        return resolve_dtype(self.dtype)
 
 
 def set_random_seed(seeds: int | None = None) -> None:

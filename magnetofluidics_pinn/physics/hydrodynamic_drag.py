@@ -48,17 +48,21 @@ from typing import Callable
 import torch
 from torch import nn
 
-from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
-from magnetofluidics_pinn.device_utils import resolve_module_device, resolve_module_dtype, resolve_device
+from magnetofluidics_pinn.config import ParticleConfig
+from magnetofluidics_pinn.data_types import ParticleState
+from magnetofluidics_pinn.device_utils import (resolve_device, resolve_dtype,
+                                               resolve_module_device,
+                                               resolve_module_dtype)
 from magnetofluidics_pinn.physics.fluid_residuals import (
     axisymmetric_vector_laplacian,
     compute_flow_derivatives,
 )
-from magnetofluidics_pinn.config import ParticleConfig
-from magnetofluidics_pinn.data_types import ParticleState
+from magnetofluidics_pinn.physics.quadrature import (
+    QuadratureRule,
+    sphere_quadrature,
+)
 
 
-# CHANGED: Refactored to leverage compute_flow_derivatives and axisymmetric_vector_laplacian.
 def faxen_corrected_velocity(
     flow_network: Callable[[torch.Tensor], torch.Tensor],
     positions: torch.Tensor,
@@ -91,7 +95,8 @@ def faxen_corrected_velocity(
       across the symmetry axis (`r <= 0`).
     """
     if particle_radius < 0.0:
-        raise ValueError(f"particle_radius must be non-negative; got {particle_radius!r}.")
+        raise ValueError(
+            f"particle_radius must be non-negative; got {particle_radius!r}.")
     if positions.ndim != 2 or positions.shape[1] != 2:
         raise ValueError(f"positions must have shape (n_points, 2);"
                          f" got {tuple(positions.shape)}.")
@@ -108,28 +113,30 @@ def faxen_corrected_velocity(
     )
     positions_placed = positions.to(device=device, dtype=dtype)
     positions_for_grad = (
-        positions_placed if positions_placed.requires_grad else positions_placed.clone().requires_grad_(True)
+        positions_placed if positions_placed.requires_grad else positions_placed.clone().requires_grad_(
+            True)
     )
     radius_coordinate = positions_for_grad[:, 0:1]
-    
+
     # if torch.any(radius_coordinate <= 0.0):
     #     raise ValueError(
     #         "faxen_corrected_velocity received positions on or across the "
     #         "symmetry axis (r <= 0); the Laplacian correction is singular there."
     #     )
-    
+
     if particle_radius == 0.0:
         # Zero radius: bypass derivative computations entirely for performance
         output = flow_network(positions_for_grad)
         return output[:, :2]
-    
-    derivs = compute_flow_derivatives(flow_network, positions_for_grad, compute_second_order=True)
+
+    derivs = compute_flow_derivatives(flow_network, positions_for_grad,
+                                      compute_second_order=True)
     laplacian_r, laplacian_z = axisymmetric_vector_laplacian(
         derivs=derivs,
         radius=radius_coordinate,
         residual_form="standard",
     )
-    
+
     velocity = torch.cat([derivs.velocity_r, derivs.velocity_z], dim=1)
     laplacian_u = torch.cat([laplacian_r, laplacian_z], dim=1)
     correction = (particle_radius ** 2 / 6.0) * laplacian_u
@@ -166,18 +173,19 @@ def brenner_poiseuille_wall_factor(blockage_ratio: float) -> float:
             f"blockage_ratio must lie in [0, 1); got {blockage_ratio!r}."
         )
     lam = blockage_ratio
-    numerator = 1.0 - (2.0 / 3.0) * (lam**2)
+    numerator = 1.0 - (2.0 / 3.0) * (lam ** 2)
     denominator = (
         1.0
         - 2.10444 * lam
-        + 2.08877 * (lam**3)
-        - 0.94813 * (lam**5)
-        - 1.372 * (lam**6)
-        + 3.873 * (lam**8)
-        - 4.192 * (lam**10)
+        + 2.08877 * (lam ** 3)
+        - 0.94813 * (lam ** 5)
+        - 1.372 * (lam ** 6)
+        + 3.873 * (lam ** 8)
+        - 4.192 * (lam ** 10)
     )
     if denominator <= 0.0:
-        raise ValueError(f"Asymptotic expansion singular at blockage ratio {blockage_ratio!r}.")
+        raise ValueError(
+            f"Asymptotic expansion singular at blockage ratio {blockage_ratio!r}.")
     return numerator / denominator
 
 
@@ -186,6 +194,7 @@ def surface_traction_force(
     particle_config: ParticleConfig,
     particle_state: ParticleState,
     n_quadrature_points: int = 181,
+    rule: QuadratureRule = "gauss_legendre",
 ) -> torch.Tensor:
     r"""Axial hydrodynamic force the flow exerts on an embedded particle.
 
@@ -205,6 +214,7 @@ def surface_traction_force(
     - `n_quadrature_points`: Number of polar-angle quadrature nodes; the
       two poles ($\theta = 0, \pi$) contribute zero regardless of
       resolution, since $r = 0$ there.
+    - `rule`: `"gauss_legendre"` (default), `"simpson"` or `"trapezoid"` (the previous rule).
 
     Returns:
     - Scalar tensor: the axial drag force $F_z$ (dimensionless), on the
@@ -213,43 +223,33 @@ def surface_traction_force(
       `"cuda"` and a CPU scalar is inconvenient).
 
     Raises:
-    - `ValueError`: If `n_quadrature_points` is smaller than 2, or if
-      `flow_network`'s output does not have exactly 3 columns.
+    - `ValueError`: If `n_quadrature_points < 2`, `rule` is unknown, or the network output does not have 3 columns.
+
     """
     if n_quadrature_points < 2:
         raise ValueError(
             f"n_quadrature_points must be at least 2 for trapezoidal quadrature; got {n_quadrature_points!r}."
         )
-        
-    # CHANGED: Dynamically resolve device and dtype from particle state tensor
+
     if isinstance(flow_network, nn.Module):
         device = resolve_module_device(flow_network)
         dtype = resolve_module_dtype(flow_network)
     else:
         device = resolve_device(None)
-        dtype = torch.float32
-    
-    theta = torch.linspace(0.0, torch.pi, n_quadrature_points, device=device, dtype=dtype)
+        dtype = resolve_dtype("float32")
+
+    theta, weights = sphere_quadrature(n_quadrature_points, rule, device,
+                                       dtype)  # CHANGED
     a = particle_config.radius
     z_p = particle_state.axial_position
-    
-    radial_coordinate = a * torch.sin(theta)
-    axial_coordinate = z_p + a * torch.cos(theta)
-    
+
     with torch.enable_grad():
-        coordinates = torch.stack([radial_coordinate, axial_coordinate], dim=1).requires_grad_(True)
-        derivs = compute_flow_derivatives(flow_network, coordinates, compute_second_order=False)
-        
-        # Cauchy stress components in dimensionless Stokes regime (mu = 1):
-        # sigma_zz = -p + 2 * du_z / dz
-        # sigma_zr = du_z / dr + du_r / dz
+        coordinates = torch.stack([a * torch.sin(theta), z_p + a * torch.cos(theta)],
+                                  dim=1).requires_grad_(True)
+        derivs = compute_flow_derivatives(flow_network, coordinates,
+                                          compute_second_order=False)
         sigma_zz = -derivs.pressure + 2.0 * derivs.d_velocity_z_dz
         sigma_zr = derivs.d_velocity_z_dr + derivs.d_velocity_r_dz
-        
-        normal_r = torch.sin(theta).unsqueeze(1)
-        normal_z = torch.cos(theta).unsqueeze(1)
-        traction_z = (sigma_zz * normal_z + sigma_zr * normal_r).squeeze(1)
-        
-        # dA = 2 * pi * r * a * dtheta
-        integrand = traction_z * (2.0 * torch.pi * a) * radial_coordinate
-        return torch.trapezoid(integrand, theta)
+        traction_z = (sigma_zz * torch.cos(theta).unsqueeze(1) + sigma_zr * torch.sin(
+            theta).unsqueeze(1)).squeeze(1)
+        return 2.0 * torch.pi * a ** 2 * (weights * traction_z).sum()

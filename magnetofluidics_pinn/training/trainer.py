@@ -55,7 +55,7 @@ from magnetofluidics_pinn.sampling.collocation import (
     sample_collocation_points,
     sample_collocation_points_with_particle,
 )
-from magnetofluidics_pinn.training.losses import compose_loss
+from magnetofluidics_pinn.training.losses import compose_loss, LossHistoryBase
 from magnetofluidics_pinn.data_types import Domain, ParticleState
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 
@@ -133,7 +133,7 @@ def _stokes_residual_losses(
       singularity analytically, and additionally accepts `r = 0`. See this
       module's docstring for the full derivation and the trade-off between
       the two.
-      
+
     Returns:
     - A tuple `(momentum_r_loss, momentum_z_loss, continuity_loss)`, each a
       scalar tensor: the mean-squared residual of its own governing
@@ -295,7 +295,7 @@ def _particle_conservation_loss(
         dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
     r"""Mass-conservation loss, restricted to full-bore cross-sections away from particle.
- 
+
     CHANGED: Partitions evaluation stations into three distinct physical zones:
     1. Upstream full-bore segment: $z \in [0.05 L, z_p - 1.2 a]$.
     2. Annular constriction zone: $z \in [z_p - a, z_p + a]$, where $Q(z)$ is computed
@@ -304,7 +304,7 @@ def _particle_conservation_loss(
 
     All zones are constrained to match $Q_{\mathrm{ref}} = \pi R^2 u_{\mathrm{peak}} / 2$,
     forcing the network to accelerate fluid in the bypass gap to preserve mass.
- 
+
     Args:
     - `network`: Flow network mapping `(r, z)` coordinates to
       `(u_r, u_z, p)`.
@@ -316,26 +316,26 @@ def _particle_conservation_loss(
     - `n_quadrature_points`: Radial quadrature resolution per station,
       forwarded to `axial_flow_rate`.
     - `device`: Device the axial-station grids are created on.
- 
+
     Returns:
     - Scalar tensor: Mean-squared error between computed flow rates and analytical reference $Q_{\mathrm{ref}}$.
     """
     z_p = particle_state.axial_position
     a = particle_config.radius
     u_p = particle_state.velocity[1].item() if particle_state.velocity.numel() > 1 else 0.0
-    
+
     # Ensure sufficient stations in each zone (at least 6 per zone)
     n_zone = max(n_stations // 3, 6)
-    
+
     upstream_stations = torch.linspace(0.05 * domain.length, max(z_p - 1.2 * a, 0.02 * domain.length), n_zone,
                                        device=device, dtype=dtype)
     # Constriction stations spanning the sphere diameter
     constriction_stations = torch.linspace(z_p - 0.95 * a, z_p + 0.95 * a, n_zone, device=device, dtype=dtype)
     downstream_stations = torch.linspace(min(z_p + 1.2 * a, 0.90 * domain.length), 0.95 * domain.length, n_zone,
                                          device=device, dtype=dtype)
-    
+
     all_stations = torch.cat([upstream_stations, constriction_stations, downstream_stations])
-    
+
     # Compute volumetric flow rate accounting for solid core transport in the constriction
     predicted_flux = annular_flow_rate(
         network=network,
@@ -466,7 +466,7 @@ def _build_training_batch(
       `particle_target` populated only when `particle_config` is not
       `None`.
     """
-    
+
     if coupling_config is None:
         collocation = sample_collocation_points(
             domain=domain, n_interior=n_interior, n_boundary=n_boundary,
@@ -501,18 +501,18 @@ def _build_training_batch(
             device=device,
             dtype=dtype,
         )
-    
+
     # `.clone()` guarantees a tensor distinct from the one `collocation`
     # owns, so setting `requires_grad_` here never mutates a value that a
     # pure sampling function returned.
     # Freeze the point set to maintain a deterministic loss landscape for Hessian approximation
     interior = collocation.interior.detach().clone().requires_grad_(True)
-    
+
     n_wall, n_inlet, n_outlet = boundary_face_sizes(n_boundary)
     wall_points = collocation.boundary[:n_wall]
     inlet_points = collocation.boundary[n_wall: n_wall + n_inlet]
     outlet_points = collocation.boundary[n_wall + n_inlet: n_wall + n_inlet + n_outlet]
-    
+
     peak_velocity = coupling_config.ambient_peak_velocity if coupling_config is not None else _DIMENSIONLESS_PEAK_INLET_VELOCITY
     return _TrainingBatch(
         interior=interior,
@@ -559,7 +559,7 @@ class _LossComponents:
       particle's surface and its prescribed rigid-body velocity; `None`
       unless this call to `train()` was given an `ParticleConfig`.
     """
-    
+
     momentum_r: torch.Tensor
     momentum_z: torch.Tensor
     continuity: torch.Tensor
@@ -615,13 +615,13 @@ def _evaluate_loss_components(
     inlet_value = _velocity_boundary_loss(network, batch.inlet_points, batch.inlet_target)
     outlet_value = _pressure_boundary_loss(network, batch.outlet_points, batch.outlet_target)
     positivity_value = _positivity_loss(network, batch.interior)
-    
+
     resolved_positivity_weight = (
         training_config.positivity_loss_weight                       # penalty near a confined particle without
         if coupling_config is None or coupling_config.positivity_loss_weight_override is None
         else coupling_config.positivity_loss_weight_override         # touching training_config; None (the
     )
-    
+
     terms: dict[str, Callable[[], torch.Tensor]] = {
         "momentum_r": lambda: momentum_r_value,
         "momentum_z": lambda: momentum_z_value,
@@ -640,7 +640,7 @@ def _evaluate_loss_components(
         "outlet"    : DEFAULT_BOUNDARY_LOSS_WEIGHT,
         "positivity": resolved_positivity_weight,
     }
-    
+
     peak_velocity = coupling_config.ambient_peak_velocity if coupling_config is not None else _DIMENSIONLESS_PEAK_INLET_VELOCITY
     # Inside _evaluate_loss_components:
     if coupling_config is None:
@@ -679,14 +679,14 @@ def _evaluate_loss_components(
         )
         # Combined immersed boundary loss
         particle_value = surface_loss + 1.0 * core_loss
-    
+
     terms["conservation"] = lambda: conservation_value
     weights["conservation"] = training_config.conservation_loss_weight
-    
+
     if particle_value is not None:
         terms["particle"] = lambda: particle_value
         weights["particle"] = coupling_config.particle_loss_weight
-    
+
     total_loss = compose_loss(terms=terms, weights=weights)
     return _LossComponents(
         momentum_r=momentum_r_value, momentum_z=momentum_z_value, continuity=continuity_value,
@@ -704,7 +704,7 @@ def _record_loss_components(components: _LossComponents) -> dict[str, float]:
 
 
 @dataclass(frozen=True)
-class LossHistory:
+class LossHistory(LossHistoryBase):
     """Loss values recorded at each step of one training phase.
 
     Every field is a plain tuple (not a list), so a returned
@@ -727,7 +727,7 @@ class LossHistory:
       for a `train()` call made without an `ParticleConfig`; a tuple the
       same length as every other field otherwise.
     """
-    
+
     step: tuple[int, ...]
     momentum_r: tuple[float, ...]
     momentum_z: tuple[float, ...]
@@ -738,7 +738,40 @@ class LossHistory:
     positivity: tuple[float, ...]
     conservation: tuple[float, ...]
     total: tuple[float, ...]
-    particle: tuple[float, ...] | None = None  # NEW
+    particle: tuple[float, ...] | None = None
+    best_probe: float = math.nan  # NEW: best probe loss for this phase
+    restored_stage: str = "last"  # NEW: stage from which state was restored
+
+    def final(self) -> dict[str, float]:
+        """Return the last recorded value of every loss."""
+        if not self.step:
+            raise ValueError("The history is empty.")
+        fields = ["momentum_r", "momentum_z", "continuity", "wall", "inlet", "outlet",
+                  "positivity", "conservation", "total"]
+        if self.particle is not None:
+            fields.append("particle")
+        return {field: getattr(self, field)[-1] for field in fields}
+
+    def print_summary(self) -> None:
+        """Print a formatted summary of the loss history for this phase."""
+        if not self.step:
+            print("No training data to summarize.")
+            return
+
+        fields = ["momentum_r", "momentum_z", "continuity", "wall", "inlet", "outlet",
+                  "positivity", "conservation", "total"]
+        if self.particle is not None:
+            fields.append("particle")
+
+        print("\n" + "=" * 78)
+        print(f"{'Loss Component':<20} | {'Final Loss':<14}")
+        print("-" * 78)
+
+        for field in fields:
+            final = getattr(self, field)[-1]
+            print(f"{field.upper():<20} | {final:14.4e}")
+
+        print("=" * 78 + "\n")
 
 
 @dataclass(frozen=True)
@@ -753,10 +786,12 @@ class TrainingHistory:
       (every field an empty tuple) if
       `training_config.use_lbfgs_refinement` was `False`.
     """
-    
+
     adam: LossHistory
     lbfgs: LossHistory | None
-    
+    best_probe: float = math.nan  # NEW
+    restored_stage: str = "last"  # NEW
+
     def print_summary(self) -> None:
         """Prints a formatted summary table of initial, intermediate, and final loss values.
 
@@ -772,7 +807,7 @@ class TrainingHistory:
         print(
             f"{'Loss Component':<20} | {'Initial (Adam)':<14} | {'Post-Adam':<14} | {'Final Loss':<14} | {'Factor':<8}")
         print("-" * 78)
-        
+
         for f in fields:
             initial = getattr(self.adam, f)[0]
             post_adam = getattr(self.adam, f)[-1]
@@ -787,7 +822,7 @@ class TrainingHistory:
                 print(
                     f"{f.upper():<20} | {initial:14.4e} | {post_adam:14.4e} | {reduction:7.1f}x"
                 )
-                
+
         print("=" * 78 + "\n")
 
 
@@ -815,7 +850,9 @@ def train(
         fluid_config: FluidConfig,
         training_config: TrainingConfig,
         field_config: MagneticFieldConfig | None = None,
-        coupling_config: TwoWayCouplingConfig | None = None,  # NEW
+        coupling_config: TwoWayCouplingConfig | None = None,
+        restore_best_probe: bool = True,  # NEW: restore the state with lowest probe loss
+        stagnation_probe_seed: int | None = None,  # NEW: seed for probe batch
 ) -> tuple[nn.Module, TrainingHistory]:
     """Train a network to satisfy the flow PDE and boundary conditions.
 
@@ -831,7 +868,7 @@ def train(
     than local residual smallness, since it also confirms the disturbed
     flow correctly reconnects past the sphere — see
     [`_particle_conservation_loss`][magnetofluidics_pinn.training.trainer._particle_conservation_loss]).
-    
+
     Args:
     - `network`: Network instance to train, e.g., built by
       [`build_mlp`][magnetofluidics_pinn.networks.mlp.build_mlp], optionally
@@ -909,35 +946,80 @@ def train(
     # warning from masking a genuine future oversight if a magnetic term
     # is added without wiring this argument through to it.
     del field_config
-    
+
     resolved_device = resolve_device(training_config.device)
     resolved_dtype=resolve_dtype(training_config.torch_dtype)  # CHANGED
-    
+
     # Never mutate the network handed in by the caller: train a private
     # copy and return it, per this module's stated contract.
     trained_network = copy.deepcopy(network).to(device=resolved_device,
                                                 dtype=resolved_dtype)  # CHANGED
-    
+
+    # Track best probe loss and restoration stage
+    best_state, best_probe, restored_stage = None, math.inf, "last"
+
+    # Run Adam phase
     adam_start_time = time.perf_counter()
     adam_history = _run_adam_phase(
-        trained_network, domain, fluid_config, training_config, coupling_config, resolved_device, resolved_dtype
+        trained_network, domain, fluid_config, training_config, coupling_config,
+        resolved_device, resolved_dtype
     )
     if training_config.verbose:
-        print(
-            f"Adam phase finished in {time.perf_counter() - adam_start_time:.1f}s |"
-            f"Final Total Loss: {adam_history.total[-1]:.2e}")
-        
+        print(f"Adam phase finished in {time.perf_counter() - adam_start_time:.1f}s |"
+              f"Final Total Loss: {adam_history.total[-1]:.2e}")
+
+    # Create probe batch for early stopping (similar to stream_trainer)
+    probe_seed = (
+        training_config.random_seed + 999_999 if stagnation_probe_seed is None else stagnation_probe_seed
+    )
+    probe_batch = _build_training_batch(
+        domain, coupling_config, training_config.lbfgs_n_interior_points,
+        training_config.lbfgs_n_boundary_points, probe_seed,
+        axis_clearance_fraction=training_config.axis_clearance_fraction,
+        device=resolved_device, dtype=resolved_dtype,
+    )
+
+    def probe_loss_now() -> float:
+        """Evaluate loss on the held-out probe batch."""
+        components = _evaluate_loss_components(
+            trained_network, probe_batch, domain, fluid_config, training_config,
+            coupling_config
+        )
+        return components.total.item()
+
+    # Check if Adam end state is the best so far
+    adam_probe = probe_loss_now()
+    if restore_best_probe and adam_probe < best_probe:
+        best_probe, best_state = adam_probe, copy.deepcopy(trained_network.state_dict())
+        restored_stage = "adam"
+
     if not training_config.use_lbfgs_refinement:
-        return trained_network, TrainingHistory(adam=adam_history, lbfgs=None)
-    
+        # Restore best state if it exists and restoration is enabled
+        restored = restore_best_probe and best_state is not None
+        if restored:
+            trained_network.load_state_dict(best_state)
+        return trained_network, TrainingHistory(
+            adam=adam_history, lbfgs=None,
+            best_probe=best_probe if restored else math.nan,
+            restored_stage=restored_stage if restored else "last"
+        )
+
+    # Run L-BFGS phase
     lbfgs_start_time = time.perf_counter()
     empty_history_fields = ("step",) + _component_names(coupling_config) + ("total",)
     lbfgs_history = LossHistory(**{name: () for name in empty_history_fields})
     if training_config.use_lbfgs_refinement:
         lbfgs_history = _run_lbfgs_phase(
-            trained_network, domain, fluid_config, training_config, coupling_config, resolved_device, resolved_dtype,
+            trained_network, domain, fluid_config, training_config,
+            coupling_config, resolved_device, resolved_dtype,
         )
-    
+        # Evaluate probe loss after L-BFGS and track best
+        lbfgs_probe = probe_loss_now()
+        if restore_best_probe and lbfgs_probe < best_probe:
+            best_probe, best_state = lbfgs_probe, copy.deepcopy(
+                trained_network.state_dict())
+            restored_stage = "lbfgs"
+
     if training_config.verbose:
         print(
             f"L-BFGS phase finished in {time.perf_counter() - lbfgs_start_time:.1f}s |"
@@ -946,8 +1028,17 @@ def train(
         final_total = (lbfgs_history.total or adam_history.total)[-1]
         print(f"Training finished in {elapsed_seconds:.1f}s |"
               f"Final Total Loss: {final_total:.2e}")
-    
-    return trained_network, TrainingHistory(adam=adam_history, lbfgs=lbfgs_history)
+
+    # Restore best state if it exists and restoration is enabled
+    restored = restore_best_probe and best_state is not None
+    if restored:
+        trained_network.load_state_dict(best_state)
+
+    return trained_network, TrainingHistory(
+        adam=adam_history, lbfgs=lbfgs_history,
+        best_probe=best_probe if restored else math.nan,
+        restored_stage=restored_stage if restored else "last"
+    )
 
 
 def _run_adam_phase(
@@ -988,7 +1079,7 @@ def _run_adam_phase(
     accumulator: dict[str, list[float]] = {
         name: [] for name in ("step",) + component_names + ("total",)
     }
-    
+
     for epoch in range(training_config.n_epochs):
         # Re-sampling every epoch, with a deterministically-varying seed,
         # exposes the network to a fresh set of collocation points instead
@@ -1004,7 +1095,7 @@ def _run_adam_phase(
         components = _evaluate_loss_components(
             trained_network, batch, domain, fluid_config, training_config, coupling_config
         )
-        
+
         optimizer.zero_grad()
         components.total.backward()
         if training_config.gradient_clip_norm is not None:
@@ -1016,17 +1107,17 @@ def _run_adam_phase(
                 trained_network.parameters(), training_config.gradient_clip_norm
             )
         optimizer.step()
-        
+
         current_values = _record_loss_components(components)
         accumulator["step"].append(epoch)
         for name, value in current_values.items():
             accumulator[name].append(value)
-        
+
         if training_config.verbose and (
                 epoch % training_config.log_every == 0 or epoch == training_config.n_epochs - 1
         ):
             print(_format_progress_line(f"Epoch {epoch:5d}", current_values))
-    
+
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})
 
 
@@ -1079,25 +1170,25 @@ def _run_lbfgs_phase(
         line_search_fn="strong_wolfe",
         tolerance_grad=1.0e-12, tolerance_change=1.0e-14,          # CHANGED: rounds 2-6 were no-ops
     )
-    
+
     component_names = _component_names(coupling_config)
     accumulator: dict[str, list[float]] = {
         name: [] for name in ("step",) + component_names + ("total",)
     }
-    
+
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
         components = _evaluate_loss_components(
             trained_network, batch, domain, fluid_config, training_config, coupling_config
         )
         components.total.backward()
-        
+
         current_values = _record_loss_components(components)
         accumulator["step"].append(len(accumulator["step"]))
         for name, value in current_values.items():
             accumulator[name].append(value)
         return components.total
-    
+
     round_width = len(str(training_config.lbfgs_rounds))
     previous = math.inf                                              # CHANGED
     for round_index in range(training_config.lbfgs_rounds):
@@ -1110,5 +1201,5 @@ def _run_lbfgs_phase(
         if previous - current < 1.0e-6 * abs(previous):  # CHANGED: stop when a round gains nothing
             break
         previous = current
-        
+
     return LossHistory(**{name: tuple(values) for name, values in accumulator.items()})

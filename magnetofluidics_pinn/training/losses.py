@@ -15,6 +15,30 @@ import torch
 LossTerm = Callable[[], torch.Tensor]
 
 
+class LossHistoryBase:
+    """Base class for loss history objects providing common functionality."""
+
+    def final(self) -> dict[str, float]:
+        """Return the last recorded value of every loss.
+
+        Returns:
+        - Mapping from loss name to value.
+
+        Raises:
+        - `ValueError`: If nothing was recorded.
+        - `NotImplementedError`: If not implemented by subclass.
+        """
+        raise NotImplementedError("Subclasses must implement final()")
+
+    def print_summary(self) -> None:
+        """Print a formatted summary of the training history.
+
+        Raises:
+        - `NotImplementedError`: If not implemented by subclass.
+        """
+        raise NotImplementedError("Subclasses must implement print_summary()")
+
+
 def compose_loss(
     terms: dict[str, LossTerm], weights: dict[str, float] | None = None
 ) -> torch.Tensor:
