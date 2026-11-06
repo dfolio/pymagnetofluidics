@@ -62,10 +62,8 @@ import torch
 from magnetofluidics_pinn.autodiff_utils import scalar_field_gradient
 from magnetofluidics_pinn.config import DomainConfig, FluidConfig
 
-# CHANGED: "native" is no longer accepted by the primitive-variable residuals. It used to pass the
-# validation and silently fall through to the r-weighted branch of every `if form == "standard" ... else`.
-ResidualForm = Literal["standard", "r_weighted"]
-_RESIDUAL_FORMS: tuple[str, ...] = ("standard", "r_weighted")
+ResidualForm = Literal["standard", "r_weighted", "native"]
+_RESIDUAL_FORMS: tuple[str, ...] = ("standard", "r_weighted", "native")
 
 FieldsSZ = Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor, torch.Tensor]]
 
@@ -432,8 +430,7 @@ def stokes_residual_sz(fields_sz: FieldsSZ, sz: torch.Tensor) -> torch.Tensor:  
     if torch.any(sz[:, 0:1] < 0.0):
         raise ValueError("sz contains negative s = r^2.")
     g, u_z, pressure = fields_sz(sz)
-    grad_g = _gradient_or_zero(g,
-                               sz)  # CHANGED: robust to fields whose derivatives are constant
+    grad_g = _gradient_or_zero(g, sz)  
     grad_u = _gradient_or_zero(u_z, sz)
     grad_p = _gradient_or_zero(pressure, sz)
     g_ss = _gradient_or_zero(grad_g[:, 0:1], sz)[:, 0:1]
@@ -453,7 +450,7 @@ def stokes_residual_sz(fields_sz: FieldsSZ, sz: torch.Tensor) -> torch.Tensor:  
 def stokes_residual(
     network: Callable[[torch.Tensor], torch.Tensor],
     coordinates: torch.Tensor,
-    config: FluidConfig | DomainConfig,
+    config : DomainConfig | FluidConfig,
     residual_form: ResidualForm = "standard",
 ) -> torch.Tensor:
     r"""Evaluate the incompressible Stokes-flow residual.
@@ -468,7 +465,7 @@ def stokes_residual(
       pressure and the preceding columns being velocity components.
     - `coordinates`: Tensor of shape `(n_points, n_dims)`, requiring
       gradients, sampled inside the domain.
-    - `fluid_config`: Fluid configuration; must have `regime == "stokes"`.
+    - `domain`: Fluid configuration; must have `regime == "stokes"`.
     - `residual_form`: NEW. `"standard"` (default) evaluates the equations
       as classically written, and requires `r > 0` everywhere (unchanged
       from every prior release). `"r_weighted"` evaluates the same
@@ -494,11 +491,22 @@ def stokes_residual(
       where that form's residual is singular), or if `network`'s output does
       not have exactly 3 columns (`u_r`, `u_z`, `p`).
     """
-    fluid_config = config.fluid if isinstance(config, DomainConfig) else config
+    fluid_config = config .fluid if isinstance(config , DomainConfig) else config
+    # fluid_config = domain.fluid
     if fluid_config.regime != "stokes":
         raise ValueError(
             f"Expected a Stokes fluid configuration, got regime={fluid_config.regime!r}."
         )
+    # Handle "native" residual form by delegating to stokes_residual_sz if available
+    if residual_form == "native":
+        # Check if network has stokes_residual_sz method (StreamFunctionSphereFlow)
+        if hasattr(network, 'stokes_residual_sz'):
+            return network.stokes_residual_sz(coordinates)
+        else:
+            raise ValueError(
+                "residual_form='native' requires a network with stokes_residual_sz() method "
+                "(e.g., StreamFunctionSphereFlow)."
+            )
     radius = _validate_inputs(
         coordinates=coordinates,
         expected_dim=2,

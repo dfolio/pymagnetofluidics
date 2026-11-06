@@ -137,23 +137,23 @@ def evaluate_structural_constraints(
     """
     if n_probe_points <= 0:
         raise ValueError(f"n_probe_points must be strictly positive; got {n_probe_points!r}.")
-    
+
     resolved_device = resolve_module_device(network)
     resolved_dtype = resolve_module_dtype(network)
     generator = torch.Generator(device=resolved_device).manual_seed(random_seed)
     axial_probe = domain.length * torch.rand(
         n_probe_points, 1, generator=generator, device=resolved_device, dtype=resolved_dtype
     )
-    
+
     axis_points = torch.cat([torch.zeros_like(axial_probe), axial_probe], dim=1).requires_grad_(True)
     wall_points = torch.cat([torch.full_like(axial_probe, domain.radius), axial_probe], dim=1)
-    
+
     axis_output = network(axis_points)
     grad_axis_uz = scalar_field_gradient(axis_output[:, 1:2], axis_points)[:, 0:1]
     grad_axis_p = scalar_field_gradient(axis_output[:, 2:3], axis_points)[:, 0:1]
     with torch.no_grad():
         wall_output = network(wall_points)
-    
+
     return {
         "max_abs_ur_axis"    : axis_output[:, 0:1].detach().abs().max().item(),
         "max_abs_ur_wall"    : wall_output[:, 0:1].abs().max().item(),
@@ -191,13 +191,13 @@ class ProfileEvaluation:
     Raises:
     - `ValueError`: If any tensor's shape is inconsistent with the others.
     """
-    
+
     z_stations: tuple[float, ...]
     radial_grid: torch.Tensor
     predicted_uz: torch.Tensor
     predicted_ur: torch.Tensor
     analytical_uz: torch.Tensor
-    
+
     def __post_init__(self) -> None:
         n_stations = len(self.z_stations)
         n_radial = self.radial_grid.shape[0]
@@ -246,23 +246,23 @@ def evaluate_velocity_profiles(
         raise ValueError("z_stations must contain at least one axial station.")
     if radial_grid.ndim != 1:
         raise ValueError(f"radial_grid must be a 1-D tensor; got shape {tuple(radial_grid.shape)}.")
-    
+
     resolved_device = resolve_module_device(network)
     resolved_dtype = resolve_module_dtype(network)
     radial_grid = radial_grid.to(device=resolved_device, dtype=resolved_dtype)
-    
+
     n_radial = radial_grid.shape[0]
     station_tensor = torch.as_tensor(z_stations, dtype=resolved_dtype, device=resolved_device)
     radial_mesh = radial_grid.unsqueeze(0).expand(len(z_stations), -1).reshape(-1, 1)
     axial_mesh = station_tensor.unsqueeze(1).expand(-1, n_radial).reshape(-1, 1)
     coordinates = torch.cat([radial_mesh, axial_mesh], dim=1)
-    
+
     with torch.no_grad():
         prediction = network(coordinates)
     predicted_ur = prediction[:, 0].reshape(len(z_stations), n_radial)
     predicted_uz = prediction[:, 1].reshape(len(z_stations), n_radial)
     analytical_uz = peak_velocity * (1.0 - (radial_grid / domain.radius) ** 2)
-    
+
     return ProfileEvaluation(
         z_stations=z_stations,
         radial_grid=radial_grid.detach(),
@@ -450,7 +450,7 @@ def compute_global_l2_error(
     with torch.no_grad():
         predicted_velocity = network(coordinates)[:, :2]
     analytical_velocity = _analytical_velocity(coordinates, domain.radius, peak_velocity)
-    
+
     denominator = torch.linalg.norm(analytical_velocity)
     if denominator.item() == 0.0:
         raise ValueError("Analytical velocity field norm is zero; the relative L2 error is undefined.")
@@ -809,7 +809,7 @@ def evaluate_residual_grid(
     radial_grid = radial_grid.to(device=resolved_device, dtype=resolved_dtype)
     axial_grid = axial_grid.to(device=resolved_device, dtype=resolved_dtype)
     coordinates = _cartesian_grid(radial_grid, axial_grid).requires_grad_(True)
-    residual = stokes_residual(network, coordinates, config=fluid_config, residual_form=residual_form)
+    residual = stokes_residual(network, coordinates, domain=fluid_config, residual_form=residual_form)
     n_radial, n_axial = radial_grid.shape[0], axial_grid.shape[0]
     return {
         name: residual[:, index].detach().abs().reshape(n_radial, n_axial)
@@ -863,8 +863,8 @@ def compare_trajectory_to_analytical(
         for t, pr, ar, pz, az in zip(time_grid, predicted_r, analytical_r, predicted_z, analytical_z)
     ]
     return pd.DataFrame.from_records(records)
-    
-    
+
+
 def partition_evaluation_stations(
     stations: Sequence[float],
     particle_axial_position: float,

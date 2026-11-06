@@ -252,7 +252,7 @@ class StreamFunctionSphereFlow(nn.Module):
         Returns:
         - Tensor `(n, 1)`.
         """
-        return lifting_pressure(s, z, self._geometry, self._lifting_mode) + raw_pressure  # CHANGED: analytic part included
+        return lifting_pressure(s, z, self._geometry, self._lifting_mode) + raw_pressure
 
     def _reference_pressure(self, like: torch.Tensor) -> torch.Tensor:
         """Return the ungauged pressure at the outlet axis point $(s, z) = (0, L)$, shape `(1, 1)`.

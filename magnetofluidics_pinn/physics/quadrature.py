@@ -61,8 +61,7 @@ def sphere_quadrature(
         base[[0, -1]] = 0.5 * step
         if rule == "simpson":
             base = np.zeros(n_nodes)
-            n_even = n_nodes if (
-                                        n_nodes - 1) % 2 == 0 else n_nodes - 1  # nodes covered by composite Simpson
+            n_even = n_nodes if (n_nodes - 1) % 2 == 0 else n_nodes - 1  # nodes covered by composite Simpson
             pattern = np.ones(n_even)
             pattern[1:-1:2], pattern[2:-1:2] = 4.0, 2.0
             base[:n_even] = pattern * step / 3.0

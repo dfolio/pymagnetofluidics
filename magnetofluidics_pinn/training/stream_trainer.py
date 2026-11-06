@@ -185,38 +185,37 @@ def _evaluate_losses(
     network: nn.Module | StreamFunctionSphereFlow,
     batch: _StreamBatch,
     fluid_config: FluidConfig,
-    config: TrainingConfig,
+    training_config: TrainingConfig,
 ) -> dict[str, torch.Tensor]:
     r"""Compute every loss term and the weighted total objective.
 
-    When `config.residual_form == "native"`, queries `StreamFunctionSphereFlow.stokes_residual_sz`
+    When `training_config.residual_form == "native"`, queries `StreamFunctionSphereFlow.stokes_residual_sz`
     directly, narrowing the type to suppress PyCharm inspection warnings.
 
     Args:
     - `network`: Flow model, expected to be an instance of `StreamFunctionSphereFlow`
-      when `config.residual_form == "native"`.
+      when `training_config.residual_form == "native"`.
     - `batch`: Collocation batches for interior, inlet, and outlet points.
     - `fluid_config`: Stokes fluid configuration.
-    - `config`: Hyperparameter configuration specifying loss weights and `residual_form`.
+    - `training_config`: Hyperparameter configuration specifying loss weights and `residual_form`.
 
     Returns:
     * Dictionary mapping names in `STREAM_LOSS_NAMES` to scalar tensors attached to the graph.
 
     Raises:
-    * `TypeError`: If `config.residual_form == "native"` but `network` is not an
+    * `TypeError`: If `training_config.residual_form == "native"` but `network` is not an
       instance of `StreamFunctionSphereFlow`.
     """
-    # residual = stokes_residual(network, batch.interior, fluid_config, residual_form=config.residual_form)
-    if config.residual_form == "native":  # CHANGED
-        if not isinstance(network, StreamFunctionSphereFlow):
-            raise TypeError(
-                f"residual_form='native' requires a StreamFunctionSphereFlow instance; "
-                f"got {type(network).__name__}."
-            )
-        residual = network.stokes_residual_sz(batch.interior)
-    else:
-        residual = stokes_residual(network, batch.interior, fluid_config,
-                                   residual_form=config.residual_form)
+    # if training_config.residual_form == "native":
+    #     if not isinstance(network, StreamFunctionSphereFlow):
+    #         raise TypeError(
+    #             f"residual_form='native' requires a StreamFunctionSphereFlow instance; "
+    #             f"got {type(network).__name__}."
+    #         )
+    #     residual = network.stokes_residual_sz(batch.interior)
+    # else:
+    residual = stokes_residual(network, batch.interior, fluid_config,
+                               residual_form=training_config.residual_form)
 
     parts = {
         "momentum_r": residual[:, 0:1].square().mean(),
@@ -227,8 +226,8 @@ def _evaluate_losses(
                            :, :2] - batch.inlet_target).square().mean(),
         "outlet"    : network(batch.outlet_points)[:, 2:3].square().mean(),
     }
-    weights = {"momentum_r": config.momentum_loss_weight,
-               "momentum_z": config.momentum_loss_weight,
+    weights = {"momentum_r": training_config.momentum_loss_weight,
+               "momentum_z": training_config.momentum_loss_weight,
                "inlet"     : DEFAULT_BOUNDARY_LOSS_WEIGHT,
                "outlet"    : DEFAULT_BOUNDARY_LOSS_WEIGHT}
     total = compose_loss({name: (lambda value=parts[name]: value) for name in weights},
@@ -471,7 +470,7 @@ def diagnose_loss_scale(
     shell_factor: float = 2.5,
     band_fraction: float = 0.0,
     band_factor: float = 1.5,
-    axis_clearance_fraction: float = 0.0,  # NEW
+    axis_clearance_fraction: float = 0.0,
 ) -> dict[str, float]:
     """Evaluate every loss on one batch *before* training, to catch scaling defects.
 

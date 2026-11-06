@@ -238,8 +238,8 @@ def surface_traction_force(
         device = resolve_device(None)
         dtype = resolve_dtype("float32")
 
-    theta, weights = sphere_quadrature(n_quadrature_points, rule, device,
-                                       dtype)  # CHANGED
+    theta, weights = sphere_quadrature(n_quadrature_points, rule,
+                                       device, dtype)
     a = particle_config.radius
     z_p = particle_state.axial_position
 
