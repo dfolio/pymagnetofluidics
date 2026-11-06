@@ -23,7 +23,19 @@ sys.path.insert(0, str(Path.cwd().parent))
 # %run ../00_configuration/00_configuration.qmd
 ```
 
+:::{.collapse #collapse-00-configuration}
+:::{.card .card-body}
 {{< include ../00_configuration/00_configuration.qmd >}}
+:::
+:::
+
+```{python}
+#| label: notebook-parameters
+#| tags: [parameters]
+#| echo: true
+# Added Quarto parameter cell for CLI overrides (-P retrain:true)
+retrain: bool = False
+```
 
 ```{python}
 #| label: notebook-setup
@@ -108,7 +120,7 @@ with different boundary conditions:
 Load the baseline network for reference.
 """
 
-if BASELINE_CHECKPOINT.exists():
+if BASELINE_CHECKPOINT.exists() and not retrain:
     print(f"Loading baseline network from {BASELINE_CHECKPOINT}...")
     baseline_network, _, _, _, _ = mfp.load_stream_checkpoint(
         BASELINE_CHECKPOINT, device=DEVICE
@@ -179,8 +191,8 @@ print(f"\nTraining resistance networks...")
 t0 = time.perf_counter()
 
 # Check if both checkpoints already exist
-if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists():
-    print(f"Both checkpoints already exist. Loading from disk...")
+if RESISTANCE_AMBIENT_CHECKPOINT.exists() and RESISTANCE_TRANSLATING_CHECKPOINT.exists() and not retrain:
+    print(f"Both checkpoints already exist, and not force retrain. Loading from disk...")
 
     # Load existing networks
     network_ambient, _, _, provenance_ambient, history_ambient = mfp.load_stream_checkpoint(

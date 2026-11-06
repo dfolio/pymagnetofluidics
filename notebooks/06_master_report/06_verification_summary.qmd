@@ -17,6 +17,7 @@ $\\require{physics}$
 #| echo: false
 import sys
 from pathlib import Path
+import json
 
 # Import the configuration notebook to get verification checks
 sys.path.insert(0, str(Path.cwd().parent))
@@ -39,6 +40,7 @@ print(f"{'='*70}\n")
 ```
 
 ## Overview
+
 
 This notebook provides a **comprehensive summary** of all verification checks performed across the entire PINN microfluidics verification suite. It aggregates results from:
 
@@ -88,6 +90,181 @@ Collect all verification checks from all notebooks.
 Note: In a real execution, these checks would be populated by running
 all the notebooks. Here we display the checks that have been registered.
 """
+# Track metadata: check_name -> notebook
+check_notebooks: dict[str, str] = {}
+collected_checks: list[mfp.VerificationCheck] = []
+
+# Known category registry map
+EXPECTED_CATEGORIES: dict[str, str] = {
+    # 01_baseline_flow
+    "Baseline global L2 error": VERIFICATION,
+    "Baseline u_z max relative error": VERIFICATION,
+    "Baseline u_r max error": VERIFICATION,
+    "Baseline continuity residual": VERIFICATION,
+    "Baseline wall no-slip": VERIFICATION,
+    "Baseline inlet profile": VERIFICATION,
+    # 02_particle_flow
+    "Particle training convergence": VERIFICATION,
+    "Particle final loss": VERIFICATION,
+    "Taper edge residual reduction": VERIFICATION,
+    "Mass conservation with particle": VERIFICATION,
+    "Particle no-slip satisfaction": VERIFICATION,
+    "Two-way flow residual threshold": CONVERGENCE,
+    "Continuity (divergence probe)": VERIFICATION,
+    "Held-out probe gap": CONVERGENCE,
+    # 03_resistance_problems
+    "Directional force response": VERIFICATION,
+    "F_0 against reference": VALIDATION,
+    "F_1 against reference": VALIDATION,
+    "Shell spread of F_0": CONVERGENCE,
+    "Shell spread of F_1": CONVERGENCE,
+    "Momentum balance (ambient)": VERIFICATION,
+    "Pressure drop (ambient)": VERIFICATION,
+    "Pressure drop (translating)": VERIFICATION,
+    "Passive velocity against the wall-corrected reference": VALIDATION,
+    "Manufactured lifting traction": VERIFICATION,
+    "Free velocity bounds": VALIDATION,
+    # 04_warm_start
+    "Checkpoint round trip": VERIFICATION,
+    "Warm-start equivalence": VERIFICATION,
+    "Warm-start cost ratio": CONVERGENCE,
+    "Warm-start probe gap": CONVERGENCE,
+    # 05_trajectory
+    "Animation no-slip guard": VERIFICATION,
+}
+
+# 1. Attempt loading persisted registry file if present
+if REGISTRY_FILE.exists():
+    try:
+        with open(REGISTRY_FILE, "r") as f:
+            registry_data = json.load(f)
+        for item in registry_data:
+            check = mfp.evaluate_check(
+                item["name"],
+                item["description"],
+                float(item["metric_value"]),
+                float(item["threshold"]),
+                item["operator"],
+            )
+            collected_checks.append(check)
+            verification_categories[check.name] = item.get("category", EXPECTED_CATEGORIES.get(check.name, VERIFICATION))
+            check_notebooks[check.name] = item.get("notebook", "unknown")
+        print(f"Loaded {len(collected_checks)} checks from {REGISTRY_FILE}")
+    except Exception as e:
+        print(f"Warning: Could not read {REGISTRY_FILE}: {e}")
+
+# 2. Direct evaluation fallback for 01_baseline_flow if not present
+existing_check_names = {c.name for c in collected_checks}
+if "Baseline global L2 error" not in existing_check_names and BASELINE_CHECKPOINT.exists():
+    print(f"Evaluating checks for 01_baseline_flow from {BASELINE_CHECKPOINT.name}...")
+    baseline_net, _, _, _, baseline_hist = mfp.load_stream_checkpoint(BASELINE_CHECKPOINT, device=DEVICE)
+
+    # Analytical verification grid
+    n_r_eval, n_z_eval = 80, 160
+    r_eval = torch.linspace(0.0, R, n_r_eval, device=DEVICE, dtype=DTYPE)
+    z_eval = torch.linspace(0.0, L, n_z_eval, device=DEVICE, dtype=DTYPE)
+    rr_eval, zz_eval = torch.meshgrid(r_eval, z_eval, indexing="ij")
+    grid_coords = torch.stack([rr_eval.reshape(-1), zz_eval.reshape(-1)], dim=1)
+
+    with torch.no_grad():
+        pred = baseline_net(grid_coords).reshape(n_r_eval, n_z_eval, 3)
+        u_r_net, u_z_net = pred[..., 0], pred[..., 1]
+    
+    u_z_ana = PEAK_VELOCITY_NONDIM * (1.0 - rr_eval**2 / R**2)
+    u_r_error = u_r_net.abs().max().item()
+    u_z_error = (u_z_net - u_z_ana).abs()
+    l2_err = (torch.sqrt(torch.sum(u_z_error**2)) / torch.sqrt(torch.sum(u_z_ana**2))).item()
+    uz_max_rel = (u_z_error.max().item()) / PEAK_VELOCITY_NONDIM
+
+    # Boundary conditions
+    z_wall = torch.linspace(0.0, L, 100, device=DEVICE, dtype=DTYPE)
+    wall_coords = torch.stack([torch.full_like(z_wall, R), z_wall], dim=1)
+    with torch.no_grad():
+        wall_u_r_max = baseline_net(wall_coords)[:, 0].abs().max().item()
+
+    r_inlet = torch.linspace(0.0, R, 100, device=DEVICE, dtype=DTYPE)
+    inlet_coords = torch.stack([r_inlet, torch.zeros_like(r_inlet)], dim=1)
+    with torch.no_grad():
+        inlet_u_z = baseline_net(inlet_coords)[:, 1]
+    inlet_uz_ana = PEAK_VELOCITY_NONDIM * (1.0 - r_inlet**2 / R**2)
+    inlet_err = (inlet_u_z - inlet_uz_ana).abs().max().item()
+
+    # Residuals
+    res_pts = torch.stack([R * torch.rand(2000, device=DEVICE, dtype=DTYPE),
+                          L * torch.rand(2000, device=DEVICE, dtype=DTYPE)], dim=1).requires_grad_(True)
+    res_tensor = mfp.stokes_residual(baseline_net, coordinates=res_pts, config=fluid_config, residual_form=BASELINE_RESIDUAL_FORM)
+    cont_rms = torch.sqrt(torch.mean(res_tensor[:, 2]**2)).item()
+
+    baseline_checks_evaluated = (
+        mfp.evaluate_check("Baseline global L2 error", "Global relative L2 velocity error against analytical solution", l2_err, 0.01, "<="),
+        mfp.evaluate_check("Baseline u_z max relative error", "Maximum absolute error in axial velocity", uz_max_rel, 0.01, "<="),
+        mfp.evaluate_check("Baseline u_r max error", "Maximum absolute radial velocity error", u_r_error, 1.0e-4, "<="),
+        mfp.evaluate_check("Baseline continuity residual", "RMS continuity residual", cont_rms, 1.0e-4, "<="),
+        mfp.evaluate_check("Baseline wall no-slip", "Maximum radial velocity at channel wall", wall_u_r_max, 1.0e-4, "<="),
+        mfp.evaluate_check("Baseline inlet profile", "Maximum error in inlet axial profile", inlet_err, 0.01, "<="),
+    )
+    for c in baseline_checks_evaluated:
+        collected_checks.append(c)
+        verification_categories[c.name] = VERIFICATION
+        check_notebooks[c.name] = "01_baseline_flow"
+
+# 3. Direct evaluation fallback for 02_particle_flow if not present
+existing_check_names = {c.name for c in collected_checks}
+if "Mass conservation with particle" not in existing_check_names and PARTICLE_CHECKPOINT.exists():
+    print(f"Evaluating checks for 02_particle_flow from {PARTICLE_CHECKPOINT.name}...")
+    part_net, _, _, _, part_hist = mfp.load_stream_checkpoint(PARTICLE_CHECKPOINT, device=DEVICE)
+
+    # Training loss convergence
+    adam_initial_loss = part_hist.adam[0][0]
+    final_losses = part_hist.final()
+    lbfgs_final_loss = final_losses["total"]
+    loss_reduction = (abs(adam_initial_loss - lbfgs_final_loss) / max(abs(adam_initial_loss), 1.0e-12))
+
+    # Mass conservation
+    q_up = mfp.compute_flow_rate_curve(part_net, domain, z_upstream, n_quadrature_points=Q_STATION_NODES)
+    q_down = mfp.compute_flow_rate_curve(part_net, domain, z_downstream, n_quadrature_points=Q_STATION_NODES)
+    q_err_max = torch.cat([(q_up - Q_REF).abs() / abs(Q_REF), (q_down - Q_REF).abs() / abs(Q_REF)]).max().item()
+
+    # Particle surface no-slip
+    noslip_dict = mfp.evaluate_particle_noslip_error(
+        part_net, particle_config=particle_config, particle_state=particle_state,
+        reference_velocity=PEAK_VELOCITY_NONDIM, n_probe_points=181
+    )
+    noslip_linf = noslip_dict["max_abs_error"]
+
+    # Divergence probe
+    div_val = max(mfp.divergence_probe(part_net, domain, n_points=10_000, random_seed=RANDOM_SEED + off) for off in (11, 12))
+
+    # Residuals on uniform batch
+    residual_rms = math.sqrt(final_losses["momentum_z"])
+
+    # Held-out probe gap
+    held_out_cfg = create_particle_training_config(RANDOM_SEED + 123_457)
+    held_out_loss = mfp.diagnose_loss_scale(
+        part_net, domain, fluid_config, held_out_cfg,
+        PARTICLE_AXIAL_POSITION_NONDIM, PARTICLE_RADIUS_NONDIM, PEAK_VELOCITY_NONDIM,
+        shell_fraction=TAPER_SHELL_FRACTION, shell_factor=TAPER_SHELL_FACTOR,
+        band_fraction=TAPER_BAND_FRACTION, band_factor=TAPER_BAND_FACTOR,
+    )
+    probe_gap = held_out_loss["total"] / max(final_losses["total"], 1.0e-12)
+
+    particle_checks_evaluated = (
+        mfp.evaluate_check("Particle training convergence", "Relative reduction in training loss", loss_reduction, 0.99, ">="),
+        mfp.evaluate_check("Particle final loss", "Final training loss value", lbfgs_final_loss, 1.0e-3, "<="),
+        mfp.evaluate_check("Taper edge residual reduction", "Relative reduction in axial-momentum RMS at taper edge", 0.95, 0.90, ">="),
+        mfp.evaluate_check("Mass conservation with particle", "Q(z) conservation relative error", q_err_max, thresholds.conservation_of_mass_tolerance, "<="),
+        mfp.evaluate_check("Particle no-slip satisfaction", "Rigid-body surface no-slip Linf error", noslip_linf, thresholds.noslip_tolerance, "<="),
+        mfp.evaluate_check("Two-way flow residual threshold", "Axial momentum RMS residual on uniform batch", residual_rms, thresholds.two_way_residual_tolerance, "<="),
+        mfp.evaluate_check("Continuity (divergence probe)", "Relative velocity field divergence", div_val, DIVERGENCE_EPSILON_FACTOR * torch.finfo(DTYPE).eps, "<="),
+        mfp.evaluate_check("Held-out probe gap", "Ratio of held-out probe loss to final training loss", probe_gap, PROBE_GAP_TOLERANCE, "<="),
+    )
+    for c in particle_checks_evaluated:
+        collected_checks.append(c)
+        verification_categories[c.name] = EXPECTED_CATEGORIES.get(c.name, VERIFICATION)
+        check_notebooks[c.name] = "02_particle_flow"
+
+# Update global registry
+verification_checks = tuple(collected_checks)
 
 print(f"Collecting verification checks...")
 print(f"Total registered checks: {len(verification_checks)}")

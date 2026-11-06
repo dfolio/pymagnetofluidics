@@ -133,18 +133,18 @@ echo_notebook_footer() {
 }
 
 format_duration() {
-    local seconds=$1
-    if [ $seconds -gt 3600 ]; then
+    local seconds="${1:-0}"
+    if [ "$seconds" -gt 3600 ]; then
         local hours=$((seconds / 3600))
         local minutes=$(( (seconds % 3600) / 60 ))
         local secs=$((seconds % 60))
         printf "%dh %dm %ds" $hours $minutes $secs
-    elif [ $seconds -gt 60 ]; then
+    elif [ "$seconds" -gt 60 ]; then
         local minutes=$((seconds / 60))
         local secs=$((seconds % 60))
         printf "%dm %ds" $minutes $secs
     else
-        printf "%ds" $seconds
+        printf "%ds" "$seconds"
     fi
 }
 
@@ -157,53 +157,51 @@ check_quarto_installed() {
     echo "Quarto version: $(quarto --version 2>&1 | head -n 1)"
 }
 
+FIRST_RENDER_RUN=true
+
 render_notebook() {
     local notebook_path="$1"
     local notebook_name=$(basename "$notebook_path" .qmd)
     local notebook_dir=$(dirname "$notebook_path")
+    # CHANGED: Ensure notebook_index passed is 0-based to match array indexing in print_summary
     local notebook_index=$2
 
-    echo_notebook_header "$notebook_path" "$notebook_index"
+    echo_notebook_header "$notebook_path" "$((notebook_index + 1))"
 
     local notebook_start=$(date +%s)
     local all_success=true
-    local quarto_extra_args=" --execute-daemon-restart"
 
     for format in "${FORMATS[@]}"; do
         local output_subdir="${OUTPUT_DIR}/${format}"
         mkdir -p "${output_subdir}"
-
         local output_file="${output_subdir}/${notebook_name}.${format}"
+        local source_file="${NOTEBOOKS_DIR}/${notebook_path}"
+
+        # CHANGED: Skip rendering if generated output exists and is newer than source
+        if [ -f "${output_file}" ] && [ "${output_file}" -nt "${source_file}" ]; then
+            echo "   [CACHED] ${notebook_path} (${format}) is up to date; skipping."
+            COMPLETED_TASKS=$((COMPLETED_TASKS + 1))
+            echo_progress $COMPLETED_TASKS $TOTAL_TASKS
+            continue
+        fi
 
         echo "   Rendering ${notebook_path} to ${format}..."
 
-        # Render with Quarto
-        if [ "$format" == "pdf" ]; then
-            quarto render "${NOTEBOOKS_DIR}/${notebook_path}" \
-                --to pdf \
-                --execute \
-                --cache-dir "${BASE_DIR}/.quarto-cache" \
-                --log-level warning >> "${LOG_FILE}" 2>&1
-        elif [ "$format" == "ipynb" ]; then
-            quarto render "${NOTEBOOKS_DIR}/${notebook_path}" \
-                --to ipynb \
-                --execute \
-                --cache-dir "${BASE_DIR}/.quarto-cache" \
-                --log-level warning >> "${LOG_FILE}" 2>&1
-        elif [ "$format" == "docx" ]; then
-            quarto render "${NOTEBOOKS_DIR}/${notebook_path}" \
-                --to docx \
-                --execute \
-                --cache-dir "${BASE_DIR}/.quarto-cache" \
-                --log-level warning >> "${LOG_FILE}" 2>&1
-        else
-            quarto render "${NOTEBOOKS_DIR}/${notebook_path}"\
-                --to html \
-                --execute \
-                --log-level warning >> "${LOG_FILE}" 
-                # --output "${output_file}" \
-                #  --execute-daemon-restart 
+        # CHANGED: Dynamically append --execute-daemon-restart only on the very first render run
+        local daemon_arg=""
+        if [ "$FIRST_RENDER_RUN" = true ]; then
+            daemon_arg="--execute-daemon-restart"
+            FIRST_RENDER_RUN=false
         fi
+
+        quarto render "${source_file}" \
+            --to "${format}" \
+            --output "${notebook_name}.${format}" \
+            --output-dir "${output_subdir}" \
+            --execute \
+            ${daemon_arg} \
+            --cache-dir "${BASE_DIR}/.quarto-cache" \
+            --log-level warning >> "${LOG_FILE}" 2>&1
 
         if [ $? -eq 0 ]; then
             echo "      ✓ ${format} rendered successfully"
@@ -219,14 +217,21 @@ render_notebook() {
     local notebook_end=$(date +%s)
     local notebook_duration=$((notebook_end - notebook_start))
 
-    NOTEBOOK_START_TIMES[$notebook_index]=$(date -d @"$notebook_start" '+%H:%M:%S')
-    NOTEBOOK_END_TIMES[$notebook_index]=$(date -d @"$notebook_end" '+%H:%M:%S')
-    NOTEBOOK_DURATIONS[$notebook_index]=$notebook_duration
+    # CHANGED: Store using consistent 0-based indexing matching NOTEBOOKS loop
+    NOTEBOOK_START_TIMES[$notebook_index]=$(date -d @"$notebook_start" '+%H:%M:%S' 2>/dev/null || date -r "$notebook_start" '+%H:%M:%S')
+    NOTEBOOK_END_TIMES[$notebook_index]=$(date -d @"$notebook_end" '+%H:%M:%S' 2>/dev/null || date -r "$notebook_end" '+%H:%M:%S')
+    NOTEBOOK_DURATIONS[$notebook_index]="$notebook_duration"
 
     echo_notebook_footer "$notebook_path" "$notebook_duration"
-
     return $([ "$all_success" = true ] && echo 0 || echo 1)
 }
+
+ALL_SUCCESS=true
+for i in "${!NOTEBOOKS[@]}"; do
+    if ! render_notebook "${NOTEBOOKS[$i]}" "$i"; then
+        ALL_SUCCESS=false
+    fi
+done
 
 print_summary() {
     local end_time=$(date +%s)
@@ -261,28 +266,30 @@ print_summary() {
     done
     echo "  └─────────────────────────────────────────────────────────────┘"
     echo ""
-
-    # # Find slowest and fastest notebooks
-    # local slowest_index=0
-    # local fastest_index=0
-    # for i in "${!NOTEBOOK_DURATIONS[@]}"; do
-    #     if [ ${NOTEBOOK_DURATIONS[$i]} -gt ${NOTEBOOK_DURATIONS[$slowest_index]} ]; then
-    #         slowest_index=$i
-    #     fi
-    #     if [ ${NOTEBOOK_DURATIONS[$i]} -lt ${NOTEBOOK_DURATIONS[$fastest_index]} ]; then
-    #         fastest_index=$i
-    #     fi
-    # done
-    # 
-    # echo "Performance:"
-    # echo "  Fastest: ${NOTEBOOKS[$fastest_index]} ($(format_duration ${NOTEBOOK_DURATIONS[$fastest_index]}))"
-    # echo "  Slowest: ${NOTEBOOKS[$slowest_index]} ($(format_duration ${NOTEBOOK_DURATIONS[$slowest_index]}))"
-    # echo ""
-    # echo "Output directory: ${OUTPUT_DIR}"
-    # echo "Log file: ${LOG_FILE}"
-    # echo ""
 }
+print_summary_performance() {
+    if [ ${#NOTEBOOK_DURATIONS[@]} -eq 0 ]; then
+        return
+    fi
+    local slowest_index=0
+    local fastest_index=0
+    for i in "${!NOTEBOOK_DURATIONS[@]}"; do
+        local cur_dur="${NOTEBOOK_DURATIONS[$i]:-0}"
+        local slow_dur="${NOTEBOOK_DURATIONS[$slowest_index]:-0}"
+        local fast_dur="${NOTEBOOK_DURATIONS[$fastest_index]:-0}"
+        if [ "$cur_dur" -gt "$slow_dur" ]; then
+            slowest_index=$i
+        fi
+        if [ "$cur_dur" -lt "$fast_dur" ]; then
+            fastest_index=$i
+        fi
+    done
 
+    echo "Performance:"
+    echo "  Fastest: ${NOTEBOOKS[$fastest_index]} ($(format_duration "${NOTEBOOK_DURATIONS[$fastest_index]:-0}"))"
+    echo "  Slowest: ${NOTEBOOKS[$slowest_index]} ($(format_duration "${NOTEBOOK_DURATIONS[$slowest_index]:-0}"))"
+    echo ""
+}
 # ==========================================
 # MAIN EXECUTION
 # ==========================================
@@ -311,7 +318,7 @@ echo ""
 
 # Print summary
 print_summary
-
+print_summary_performance
 # Exit with appropriate code
 if [ "$ALL_SUCCESS" = true ]; then
     echo "✓ All notebooks rendered successfully"

@@ -17,6 +17,7 @@ $\\require{physics}$
 #| echo: false
 import sys
 from pathlib import Path
+import json
 
 # Import the configuration notebook
 sys.path.insert(0, str(Path.cwd().parent))
@@ -570,6 +571,28 @@ for check in baseline_verification_checks:
 
 print(f"\nBaseline verification checks:")
 mfp.render_verification_table(baseline_verification_checks)
+```
+
+```{python}
+#| label: baseline-verification-checks-save
+existing_registry = json.loads(REGISTRY_FILE.read_text()) if REGISTRY_FILE.exists() else []
+existing_names = {item["name"] for item in existing_registry}
+
+new_entries = [
+    {
+        "notebook": "01_baseline_flow",  # or "02_particle_flow"
+        "category": verification_categories.get(c.name, VERIFICATION),
+        "name": c.name,
+        "description": c.description,
+        "metric_value": float(c.metric_value),
+        "threshold": float(c.threshold),
+        "operator": c.operator,
+        "passed": bool(c.passed),
+    }
+    for c in baseline_checks
+    if c.name not in existing_names
+]
+REGISTRY_FILE.write_text(json.dumps(existing_registry + new_entries, indent=2))
 ```
 
 ## Summary

@@ -24,7 +24,19 @@ sys.path.insert(0, str(Path.cwd().parent))
 # %run ../00_configuration/00_configuration.qmd
 ```
 
+:::{.collapse #collapse-00-configuration}
+:::{.card .card-body}
 {{< include ../00_configuration/00_configuration.qmd >}}
+:::
+:::
+
+```{python}
+#| label: notebook-parameters
+#| tags: [parameters]
+#| echo: true
+# Added Quarto parameter cell for CLI overrides (-P retrain:true)
+retrain: bool = False
+```
 
 ```{python}
 #| label: notebook-setup
@@ -38,9 +50,12 @@ print(f"Notebook: 02 - Particle Flow Training")
 print(f"{'='*60}")
 print(f"Particle radius a*: {PARTICLE_RADIUS_NONDIM:.4f}")
 print(f"Particle position z_p*: {PARTICLE_AXIAL_POSITION_NONDIM:.4f}")
+print(f"Particle at z={PARTICLE_AXIAL_POSITION_NONDIM}, r=0")
+print(f"Domain: z∈[0,{domain.length}], r∈[0,{domain.radius}]")
 print(f"Blockage ratio a*/R*: {compute_blockage_ratio(PARTICLE_RADIUS_NONDIM, R):.4f}")
-print(f"Taper margin: {TAPER_MARGIN:.1f}")
+print(f"Taper margin: {TAPER_MARGIN:.1f} --- Taper band fraction: {TAPER_BAND_FRACTION:.1}")
 print(f"Residual form: {PARTICLE_RESIDUAL_FORM}")
+print(f"Lifting mode: {LIFTING_MODE}")
 print(f"Device: {DEVICE}")
 print(f"{'='*60}\n")
 ```
@@ -167,6 +182,8 @@ particle_network_init = mfp.apply_stream_function_constraint(
     particle_axial_velocity=PARTICLE_AXIAL_VELOCITY,  # Fixed sphere: U_p = 0
     flow_amplitude=PEAK_VELOCITY_NONDIM,
     taper_margin=TAPER_MARGIN,
+    lifting_mode=LIFTING_MODE,                # Pass the mode
+    wall_start_fraction=WALL_START_FRACTION,  # Pass the fraction
 )
 
 # Print architecture information
@@ -194,7 +211,7 @@ print(f"\nTraining particle network...")
 t0 = time.perf_counter()
 
 # Check if checkpoint already exists
-if PARTICLE_CHECKPOINT.exists():
+if PARTICLE_CHECKPOINT.exists() and not retrain:
     print(f"Checkpoint already exists at {PARTICLE_CHECKPOINT}.")
     print(f"Loading from checkpoint...")
     particle_network, particle_architecture, _, particle_provenance, particle_history = mfp.load_stream_checkpoint(
@@ -202,7 +219,7 @@ if PARTICLE_CHECKPOINT.exists():
     )
     print(f"Network loaded from checkpoint.")
 else:
-    print(f"Training from scratch...")
+    print(f"Training from scratch (retrain={retrain})...")
     particle_network, particle_history = mfp.train_stream_function_flow(
         particle_network_init,
         domain=domain,
@@ -212,9 +229,13 @@ else:
         particle_radius=PARTICLE_RADIUS_NONDIM,
         inlet_peak_velocity=PEAK_VELOCITY_NONDIM,
         **SHELL_ARGS,
+        refine_dtype=REFINE_DTYPE,
+        axis_clearance_fraction=AXIS_CLEARANCE,
     )
     print(f"Particle network trained in {time.perf_counter() - t0:.1f}s")
-
+    # Create provenance
+    particle_provenance = mfp.make_provenance(PARTICLE_TRAINING_CONFIG, particle_history)
+    
 training_time = time.perf_counter() - t0
 print(f"Total time: {training_time:.1f}s")
 ```
@@ -270,9 +291,6 @@ This checkpoint will be used by subsequent notebooks for verification and analys
 
 print(f"\nSaving particle network checkpoint to {PARTICLE_CHECKPOINT}...")
 
-# Create provenance
-particle_provenance = mfp.make_provenance(PARTICLE_TRAINING_CONFIG, particle_history)
-
 # Save checkpoint
 mfp.save_stream_checkpoint(
     particle_network,
@@ -287,23 +305,6 @@ print(f"Checkpoint size: {PARTICLE_CHECKPOINT.stat().st_size / 1024:.1f} KB")
 ```
 
 ## Initial Verification: Flow Field Visualization
-
-```{python}
-#| label: fig-particle-field
-#| fig-cap: "Velocity magnitude around the fixed particle. Solid disk marks excluded region."
-
-# Use plotting module function for particle flow field
-display(plotting.plot_particle_flow_field(
-    particle_network,
-    domain,
-    particle_position=(0.0, PARTICLE_AXIAL_POSITION_NONDIM),
-    particle_radius=PARTICLE_RADIUS_NONDIM,
-    resolution_r=140,
-    resolution_z=260,
-    show_streamlines=True,
-    cmap="viridis",
-))
-```
 
 ```{python}
 #| label: particle-field-veolicity
@@ -323,6 +324,23 @@ vel_mag = torch.hypot(u_r_field, u_z_field)
 fluid_mask_field = ((zz - particle_state.axial_position) ** 2 + rr ** 2) >= particle_config.radius ** 2
 velocity_magnitude_max = vel_mag[fluid_mask_field].max().item()
 velocity_magnitude_min = vel_mag[fluid_mask_field].min().item()
+```
+
+```{python}
+#| label: fig-particle-field
+#| fig-cap: "Velocity magnitude around the fixed particle. Solid disk marks excluded region."
+
+# Use plotting module function for particle flow field
+display(plotting.plot_particle_flow_field(
+    particle_network,
+    domain,
+    particle_position=(0.0, PARTICLE_AXIAL_POSITION_NONDIM),
+    particle_radius=PARTICLE_RADIUS_NONDIM,
+    resolution_r=140,
+    resolution_z=260,
+    particle_patch_kwargs={"facecolor": "red"},  # More visible
+    show_streamlines=True,
+))
 ```
 
 The fluid-region velocity magnitude spans `{python} f"{velocity_magnitude_min:.3e}"` to `{python} f"{velocity_magnitude_max:.3e}"` in the plotted domain. The presence of the spherical particle forces the flow around the rigid obstacle, generating local flow acceleration in the annular clearance and stagnation zones upstream and downstream.
